@@ -291,6 +291,17 @@ The application expects a PostgreSQL database named `iot_db` with the following 
 | `event_type` | TEXT | e.g. `maintenance` |
 | `timestamp` | TIMESTAMPTZ | Event time |
 
+#### Adding missing columns
+If your `appliances` table was created before the dryer baseline feature, run this once:
+
+```sql
+ALTER TABLE appliances
+    ADD COLUMN IF NOT EXISTS baseline_heat_rise_mean REAL,
+    ADD COLUMN IF NOT EXISTS baseline_heat_rise_std REAL;
+```
+
+These columns are required for Gas Dryer SPC temperature monitoring.
+
 ---
 
 ## Firmware
