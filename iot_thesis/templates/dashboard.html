@@ -1078,8 +1078,8 @@
         return;
     }
     
-    // Fetch the correct analytics table data (Raw readings for Dryer, Daily Averages for HVAC)
-    const endpoint = isHVAC ? `/api/device/${currentDetailId}/hvac_analytics` : `/api/device/${currentDetailId}/table_data`;
+    // Fetch the correct analytics table data (Cycle Summary for Dryer, Daily Averages for HVAC)
+    const endpoint = isHVAC ? `/api/device/${currentDetailId}/hvac_analytics` : `/api/device/${currentDetailId}/dryer_analytics`;
     
     fetch(endpoint)
         .then(r => r.json())
@@ -1088,7 +1088,7 @@
             const headers = document.getElementById('table-headers');
             
             if (!data || data.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:2rem; color:var(--text-muted);">No data available yet.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="11" style="text-align:center; padding:2rem; color:var(--text-muted);">No data available yet.</td></tr>`;
                 return;
             }
             
@@ -1103,11 +1103,11 @@
                     headers.appendChild(th);
                 });
             } else {
-                document.getElementById('table-title').innerText = "Dryer Telemetry History";
-                ['Time', 'Exhaust Temp (°C)', 'Exhaust RH (%)', 'Pressure (hPa)', 'Current (A)'].forEach(h => {
+                document.getElementById('table-title').innerText = "Dryer Cycle Analytics";
+                ['#', 'Start', 'End', 'Duration', 'Ignitions', 'Min Temp', 'Max Temp', 'Begin RH', 'End RH', 'Spike Avg (A)', 'Consumption (A)'].forEach(h => {
                     const th = document.createElement('th');
                     th.innerText = h;
-                    th.style.cssText = "padding: 0.75rem 1rem; text-align: left; font-weight: 600; white-space: nowrap;";
+                    th.style.cssText = "padding: 0.75rem 1rem; text-align: left; font-weight: 600; white-space: nowrap; font-size:0.8rem;";
                     headers.appendChild(th);
                 });
             }
@@ -1127,13 +1127,20 @@
                         <td style="padding: 0.5rem 1rem;">${row.avg_coil} °C</td>
                     `;
                 } else {
-                    const timeObj = new Date(row.time).toLocaleTimeString();
+                    const startObj = new Date(row.start_time).toLocaleTimeString();
+                    const endObj = new Date(row.end_time).toLocaleTimeString();
                     tr.innerHTML = `
-                        <td style="padding: 0.5rem 1rem; white-space: nowrap;">${timeObj}</td>
-                        <td style="padding: 0.5rem 1rem;">${row.Texhaust}</td>
-                        <td style="padding: 0.5rem 1rem;">${row.RHexhaust}</td>
-                        <td style="padding: 0.5rem 1rem;">${row.Pressure}</td>
-                        <td style="padding: 0.5rem 1rem;">${row.Imotor}</td>
+                        <td style="padding: 0.5rem 1rem;">${idx + 1}</td>
+                        <td style="padding: 0.5rem 1rem; white-space: nowrap;">${startObj}</td>
+                        <td style="padding: 0.5rem 1rem; white-space: nowrap;">${endObj}</td>
+                        <td style="padding: 0.5rem 1rem;">${row.duration_minutes} min</td>
+                        <td style="padding: 0.5rem 1rem;">${row.ignition_count}</td>
+                        <td style="padding: 0.5rem 1rem;">${row.min_temp} °C</td>
+                        <td style="padding: 0.5rem 1rem;">${row.max_temp} °C</td>
+                        <td style="padding: 0.5rem 1rem;">${row.start_rh}%</td>
+                        <td style="padding: 0.5rem 1rem;">${row.end_rh_avg}%</td>
+                        <td style="padding: 0.5rem 1rem;">${row.current_spike_avg} A</td>
+                        <td style="padding: 0.5rem 1rem;">${row.current_consumption} A</td>
                     `;
                 }
                 tbody.appendChild(tr);

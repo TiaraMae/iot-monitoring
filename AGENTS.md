@@ -378,6 +378,7 @@ The following can be set in a `.env` file (see `.env.example`):
 2. **Do not commit `__pycache__/` or `.env`.** Both are in `.gitignore`.
 
 3. **Column naming convention:** The DB uses `rhreturn_*`, `rhsupply_*`, `rhexhaust_*`, `rhambient_*` (no underscore between `rh` and the location). Code must match this exactly.
+4. **Button 2 durations:** 2s = baseline/rebaseline, 5s = one-time HVAC calibration. The firmware uses release-based timing: release between 2–5s sends baseline; hold past 5s sends calibration.
 
 4. **Calibration factors are appliance-type dependent:**
    - HVAC (ZHT103C): factor = 11.0

@@ -175,6 +175,12 @@ void beepLongFail(unsigned long ms = 1200) {
   buzzerOff();
 }
 
+void beepLongFailTwice() {
+  beepLongFail(800);
+  delay(300);
+  beepLongFail(800);
+}
+
 void beepRequest() {
   beepShort(1, 120, 0);
 }
@@ -415,7 +421,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
     }
     if (message == "calibrationfailack") {
         Serial.println("BACKEND FAIL -> calibration denied/failed");
-        beepLongFail(1200);
+        beepLongFailTwice();
         calibState = CALIBIDLE;
         calibApprovalRequestedAt = 0;
         calibrationSavePending = false;
@@ -457,7 +463,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
     }
     if (message == "baselinefailack") {
         Serial.println("BACKEND CANCEL/FAIL -> baseline rejected or cancelled");
-        beepLongFail(1200);
+        beepLongFailTwice();
         baselineRequestPending = false;
         baselineInProgress = false;
         printWorkflow();
@@ -467,7 +473,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
     // Maintenance
     if (message == "maintenanceack") {
         Serial.println("BACKEND SUCCESS -> maintenance logged");
-        beepSuccess();
+        beepLongFail(1000);
         maintenanceRequestPending = false;
         printWorkflow();
         return;
@@ -488,17 +494,51 @@ void callback(char* topic, byte* payload, unsigned int length) {
     }
 }
 
+static unsigned long lastConnBuzzer = 0;
+
 void checkConnection() {
   unsigned long now = millis();
 
-  // WiFi down
-  if (WiFi.status() != WL_CONNECTED) {
+  // --- LED STATE MACHINE (overrides connection LED when active) ---
+  if (calibState == CALIBBASELINEWAIT || calibState == CALIBRUNNING) {
+    if (now - lastLedBlink >= 2000) {
+      lastLedBlink = now;
+      ledState = !ledState;
+      digitalWrite(PINLED, ledState);
+    }
+  } else if (baselineInProgress) {
+    if (now - lastLedBlink >= 1000) {
+      lastLedBlink = now;
+      ledState = !ledState;
+      digitalWrite(PINLED, ledState);
+    }
+  } else if (WiFi.status() != WL_CONNECTED) {
     if (now - lastLedBlink >= 200) {
       lastLedBlink = now;
       ledState = !ledState;
       digitalWrite(PINLED, ledState);
     }
+  } else if (!client.connected()) {
+    if (now - lastLedBlink >= 500) {
+      lastLedBlink = now;
+      ledState = !ledState;
+      digitalWrite(PINLED, ledState);
+    }
+  } else {
+    digitalWrite(PINLED, HIGH);
+  }
 
+  // --- CONNECTION DOWN BUZZER (every 10s) ---
+  if ((WiFi.status() != WL_CONNECTED || !client.connected()) &&
+      (calibState == CALIBIDLE) && !baselineInProgress) {
+    if (now - lastConnBuzzer >= 10000) {
+      lastConnBuzzer = now;
+      beepShort(1, 120, 0);
+    }
+  }
+
+  // WiFi down
+  if (WiFi.status() != WL_CONNECTED) {
     if (now - lastWiFiRetry >= 10000) {
       lastWiFiRetry = now;
       Serial.println("WiFi lost! Trying reconnect...");
@@ -514,12 +554,6 @@ void checkConnection() {
 
   // MQTT down
   if (!client.connected()) {
-    if (now - lastLedBlink >= 500) {
-      lastLedBlink = now;
-      ledState = !ledState;
-      digitalWrite(PINLED, ledState);
-    }
-
     if (now - lastMqttRetry >= 5000) {
       lastMqttRetry = now;
 
@@ -538,9 +572,6 @@ void checkConnection() {
     }
     return;
   }
-
-  // All good
-  digitalWrite(PINLED, HIGH);
 }
 
 // =========================
@@ -749,28 +780,50 @@ void handleButtons() {
     btn1State = 0;
   }
 
-  // ---------- BUTTON 2: CALIBRATION / BASELINE ----------
+  // ---------- BUTTON 2: CALIBRATION (5s) / BASELINE (2s) ----------
   if (b2) {
     if (btn2State == 0) {
       btn2PressedAt = now;
       btn2State = 1;
     } else if (btn2State == 1 && now - btn2PressedAt >= 2000) {
+      // 2-second threshold reached — give feedback but do NOT send yet
       btn2State = 2;
-
+      beepRequest();
+      Serial.println("BUTTON 2 -> 2s threshold reached (baseline if released)");
+    } else if (btn2State == 2 && now - btn2PressedAt >= 5000) {
+      // 5-second threshold reached — send calibration request
+      btn2State = 3;
+      beepRequest();
+      Serial.println("BUTTON 2 -> 5s threshold reached (calibration)");
+      
       if (!isPaired) {
         Serial.println("BUTTON 2 denied: node not paired yet.");
         beepLongFail(700);
       } else if (calibrationSavePending || baselineRequestPending || maintenanceRequestPending || calibState == CALIBWAITAPPROVAL) {
-         // SILENTLY ignore
+        // SILENTLY ignore
       } else {
-        String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"event_button2_action_request\"}";
-        Serial.println("BUTTON 2 -> backend action request sent");
-        beepRequest();
+        String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"event_button2_calibration_request\"}";
+        Serial.println("BUTTON 2 -> calibration request sent");
         publishEventJson(ev);
         printWorkflow();
       }
     }
   } else {
+    // Button released
+    if (btn2State == 2) {
+      // Released between 2s and 5s -> baseline request
+      if (!isPaired) {
+        Serial.println("BUTTON 2 denied: node not paired yet.");
+        beepLongFail(700);
+      } else if (calibrationSavePending || baselineRequestPending || maintenanceRequestPending || calibState == CALIBWAITAPPROVAL) {
+        // SILENTLY ignore
+      } else {
+        String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"event_button2_action_request\"}";
+        Serial.println("BUTTON 2 -> baseline request sent");
+        publishEventJson(ev);
+        printWorkflow();
+      }
+    }
     btn2State = 0;
   }
 }

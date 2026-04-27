@@ -357,17 +357,26 @@ Standalone test firmware used to validate that the custom PCB can read BME280 an
 
 ---
 
-## Future Work
+## Future Work / Roadmap
 
-The following components are planned for inclusion in subsequent repository updates:
+| # | Task | Priority | Notes |
+|---|------|----------|-------|
+| 1 | **Fault Logic & Alert System** | 🔴 High | Compare real-time readings against SPC limits; trigger alerts when UCL/LCL breached |
+| 2 | **Discord Integration** | 🔴 High | Webhook alerts for maintenance reminders and fault notifications |
+| 3 | **Multi-Device Dashboard Stress Test** | 🟡 Medium | Verify UI performance with 5+ simultaneous devices |
+| 4 | **Unit Tests** | 🟡 Medium | pytest suite for SPC math, calibration regression, cycle detection |
+| 5 | **Docker Deployment** | 🟡 Medium | Containerize Flask app + PostgreSQL for easy cloud deployment |
+| 6 | **Mobile Responsive Polish** | 🟡 Medium | Test and fix dashboard on phone/tablet screens |
+| 7 | **PCB Design Files** | 🟢 Low | KiCad schematics and Gerber files |
+| 8 | **3D Enclosure** | 🟢 Low | STL files for sensor node housing |
+| 9 | **DB Migration Scripts** | 🟢 Low | Formalize schema creation and versioned migrations |
+| 10 | **CI/CD** | 🟢 Low | GitHub Actions for linting and basic tests |
 
-- [ ] **PCB Design** — KiCad schematics and Gerber files for the ESP32-C3 sensor node
-- [ ] **Database Schema** — Official SQL migration scripts and ER diagram
-- [ ] **3D Enclosure** — STL files for sensor node housing
-- [ ] **Calibration Guide** — Step-by-step HVAC sensor calibration procedure
-- [ ] **Deployment Guide** — Docker/containerization and cloud deployment instructions
-- [ ] **Unit Tests** — Backend API and SPC logic test suite
-- [ ] **CI/CD** — GitHub Actions for linting and dependency checks
+### Completed Recently
+- ✅ Firmware LED patterns for calibration/baseline
+- ✅ Button 2 split: 2s baseline / 5s calibration
+- ✅ Dryer cycle analytics with current peak detection
+- ✅ Full DB schema reference documentation
 
 ---
 

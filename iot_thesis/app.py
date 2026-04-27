@@ -474,28 +474,47 @@ def handle_node_events(mac, payload):
         status, app_type = stat_row[0], stat_row[1]
         
         if event_type == "event_button2_action_request":
+            # 2-second hold -> baseline request only
             if "Dryer" in app_type:
-                if status in ['calibration_needed', 'pending_baseline', 'normal']:
+                if status in ['pending_baseline', 'normal']:
                     cur.execute("UPDATE appliances SET operational_status = 'baselining', baselining_since = NOW() WHERE id = %s", (appliance_id,))
                     conn.commit()
                     send_node_command(mac, "baselinestartack")
                     print(f"Node {mac} (Dryer) 10-Minute Baseline Recording Started.")
                 elif status == 'baselining':
                     send_node_command(mac, "baselinefailack")
+                else:
+                    send_node_command(mac, "actiondenied:busy")
+            else:
+                if status in ['pending_baseline', 'normal']:
+                    cur.execute("UPDATE appliances SET operational_status = 'baselining', baselining_since = NOW() WHERE id = %s", (appliance_id,))
+                    conn.commit()
+                    send_node_command(mac, "baselinestartack")
+                    print(f"Node {mac} (HVAC) 10-Minute Baseline Recording Started.")
+                elif status == 'calibration_needed':
+                    send_node_command(mac, "calibrationfailack")
+                    print(f"Node {mac} Use 5-second hold for calibration.")
+                elif status in ['calibrating', 'baselining']:
+                    send_node_command(mac, "actiondenied:busy")
+                    print(f"Node {mac} Action denied. Device is currently busy.")
+
+        elif event_type == "event_button2_calibration_request":
+            # 5-second hold -> calibration request (HVAC only, one-time)
+            if "Dryer" in app_type:
+                send_node_command(mac, "calibrationfailack")
+                print(f"Node {mac} (Dryer) Calibration not supported.")
             else:
                 if status == 'calibration_needed':
                     cur.execute("UPDATE appliances SET operational_status = 'calibrating', calibration_started_at = NOW() WHERE id = %s", (appliance_id,))
                     conn.commit()
                     send_node_command(mac, "startcalibration")
                     print(f"Node {mac} (HVAC) Calibration STARTED.")
-                elif status in ['pending_baseline', 'normal']:
-                    cur.execute("UPDATE appliances SET operational_status = 'baselining', baselining_since = NOW() WHERE id = %s", (appliance_id,))
-                    conn.commit()
-                    send_node_command(mac, "baselinestartack")
-                    print(f"Node {mac} (HVAC) 10-Minute Baseline Recording Started.")
                 elif status in ['calibrating', 'baselining']:
                     send_node_command(mac, "actiondenied:busy")
                     print(f"Node {mac} Action denied. Device is currently busy.")
+                else:
+                    send_node_command(mac, "calibrationfailack")
+                    print(f"Node {mac} Calibration already done or not needed.")
 
         elif event_type == "calibration_success_request":
             if status == 'calibrating':
@@ -1166,28 +1185,16 @@ def dryer_analytics(appliance_id):
         in_cycle = False
         current_cycle = {}
         
-        ignition_count = 0
-        last_i = 0
-        peaking = False
-        peak_consecutive_drops = 0
+        # Per-cycle peak detection state
+        _prev_current = 0.0
+        _peak_rising = False
+        _peak_max = 0.0
+        _peak_drops = 0
+        _peak_values = []
         
         for r in readings:
             time_val, tex, rhex, press, imotor = r
             imotor = float(imotor) if imotor else 0.0
-            
-            if imotor - last_i > 0.2: 
-                peaking = True
-                peak_consecutive_drops = 0
-            elif peaking and imotor < last_i:
-                peak_consecutive_drops += 1
-                if peak_consecutive_drops >= 2:
-                    ignition_count += 1
-                    peaking = False
-                    peak_consecutive_drops = 0
-            else:
-                peak_consecutive_drops = 0
-                
-            last_i = imotor
 
             if imotor > 0.5 and not in_cycle:
                 in_cycle = True
@@ -1197,37 +1204,58 @@ def dryer_analytics(appliance_id):
                     "max_temp": tex,
                     "start_rh": rhex,
                     "_rh_history": [],
-                    "ignition_count": 0,
-                    "_readings_count": 0,
-                    "_sum_current": 0
+                    "_currents": []
                 }
-                ignition_count = 0
-                last_i = imotor
-                peaking = False
-                peak_consecutive_drops = 0
+                _prev_current = imotor
+                _peak_rising = False
+                _peak_max = 0.0
+                _peak_drops = 0
+                _peak_values = []
                 
             if in_cycle:
                 current_cycle["max_temp"] = max(current_cycle["max_temp"], tex)
                 current_cycle["min_temp"] = min(current_cycle["min_temp"], tex)
                 current_cycle["_rh_history"].append(rhex)
-                current_cycle["_readings_count"] += 1
-                current_cycle["_sum_current"] += imotor
-
+                current_cycle["_currents"].append(imotor)
+                
+                # --- CURRENT PEAK DETECTION ---
+                # Peak = current goes up, then goes down for 3 consecutive points
+                if imotor > _prev_current:
+                    # Rising
+                    _peak_rising = True
+                    _peak_drops = 0
+                    if imotor > _peak_max:
+                        _peak_max = imotor
+                elif _peak_rising and imotor < _prev_current:
+                    # Falling after rising
+                    _peak_drops += 1
+                    if _peak_drops >= 3:
+                        # Peak confirmed
+                        _peak_values.append(_peak_max)
+                        _peak_rising = False
+                        _peak_max = 0.0
+                        _peak_drops = 0
+                else:
+                    _peak_drops = 0
+                    
+                _prev_current = imotor
+                
             if imotor < 0.2 and in_cycle:
                 in_cycle = False
                 current_cycle["end_time"] = time_val
                 duration = current_cycle["end_time"] - current_cycle["start_time"]
                 current_cycle["duration_minutes"] = round(duration.total_seconds() / 60, 1)
                 
-                current_cycle["ignition_count"] = ignition_count
-                current_cycle["avg_current"] = round(current_cycle["_sum_current"] / current_cycle["_readings_count"], 2)
-                
                 last_10 = current_cycle["_rh_history"][-10:] if len(current_cycle["_rh_history"]) > 10 else current_cycle["_rh_history"]
                 current_cycle["end_rh_avg"] = round(sum(last_10) / len(last_10), 2) if last_10 else current_cycle["start_rh"]
                 
+                currents = current_cycle["_currents"]
+                current_cycle["current_consumption"] = round(sum(currents), 2)
+                current_cycle["current_spike_avg"] = round(sum(_peak_values) / len(_peak_values), 2) if _peak_values else 0.0
+                current_cycle["ignition_count"] = len(_peak_values)
+                
                 del current_cycle["_rh_history"]
-                del current_cycle["_readings_count"]
-                del current_cycle["_sum_current"]
+                del current_cycle["_currents"]
                 
                 current_cycle["start_time"] = current_cycle["start_time"].isoformat()
                 current_cycle["end_time"] = current_cycle["end_time"].isoformat()
