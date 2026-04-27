@@ -1,0 +1,1453 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IoT Monitoring</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js/dist/chart.umd.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3.3.0/build/global/luxon.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+    <style>
+        :root {
+            --bg: #F8FAFC;
+            --surface: #FFFFFF;
+            --text: #1E293B;
+            --text-muted: #64748B;
+            --primary: #2563EB;
+            --primary-hover: #1D4ED8;
+            --danger: #EF4444;
+            --success: #10B981;
+            --warning: #F59E0B;
+            --border: #E2E8F0;
+            --nav-active: #EFF6FF;
+            --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+            --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            --radius: 12px;
+            --sidebar-width: 260px;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; }
+        body { background: var(--bg); color: var(--text); display: flex; min-height: 100vh; overflow-x: hidden; }
+
+        /* --- SIDEBAR --- */
+        .sidebar {
+            width: var(--sidebar-width);
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            position: fixed;
+            height: 100vh;
+            z-index: 100;
+            transition: transform 0.3s;
+        }
+        .sidebar-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--primary);
+        }
+        .nav-menu {
+            flex: 1;
+            padding: 1.5rem 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .nav-item {
+            padding: 0.8rem 1rem;
+            border-radius: 8px;
+            font-weight: 500;
+            color: var(--text-muted);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            transition: all 0.2s;
+        }
+        .nav-item:hover { background: var(--bg); color: var(--text); }
+        .nav-item.active { background: var(--nav-active); color: var(--primary); }
+
+        /* --- MAIN CONTENT --- */
+        .main-wrapper {
+            flex: 1;
+            margin-left: var(--sidebar-width);
+            display: flex;
+            flex-direction: column;
+            width: calc(100% - var(--sidebar-width));
+        }
+        .navbar {
+            background: var(--surface);
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 90;
+        }
+        .hamburger {
+            display: none;
+            cursor: pointer;
+            font-size: 1.5rem;
+            background: none;
+            border: none;
+            color: var(--text);
+        }
+        .user-menu {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin-left: auto;
+        }
+        .user-name { font-weight: 500; font-size: 0.95rem; }
+        .btn-logout {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
+        .btn-logout:hover { color: var(--danger); }
+        .content-area {
+            padding: 2rem;
+            max-width: 1400px;
+            margin: 0 auto;
+            width: 100%;
+        }
+        .view-section {
+            display: none;
+            animation: fadeIn 0.3s;
+        }
+        .view-section.active { display: block; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .page-header { margin-bottom: 2rem; }
+        .page-title { font-size: 1.5rem; font-weight: 600; }
+
+        /* --- DASHBOARD GRID --- */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            box-shadow: var(--shadow-sm);
+            transition: transform 0.2s, box-shadow 0.2s, border-color 0.3s;
+            display: flex;
+            flex-direction: column;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+        }
+        .card:hover {
+            transform: translateY(-3px);
+            box-shadow: var(--shadow-md);
+            border-color: var(--primary);
+        }
+        .card.no-hover { cursor: default; }
+        .card.no-hover:hover { transform: none; box-shadow: var(--shadow-sm); border-color: var(--border); }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1rem;
+            pointer-events: none;
+        }
+        .card-title { font-size: 1.15rem; font-weight: 600; }
+        .card-subtitle {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 4px;
+        }
+
+        .status-badge {
+            padding: 0.35rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            white-space: nowrap;
+        }
+        .status-normal { background: #DCFCE7; color: #065F46; border: 1px solid #A7F3D0; }
+        .status-warning { background: #FEF3C7; color: #92400E; border: 1px solid #FDE68A; }
+        .status-danger { background: #FEE2E2; color: #991B1B; border: 1px solid #FECACA; }
+        .status-calibrating { background: #FEF08A; color: #92400E; border: 1px solid #FCD34D; animation: pulseBorder 2s infinite; }
+        .status-baselining { background: #E0E7FF; color: #1E40AF; border: 1px solid #BFDBFE; animation: pulseBorder 2s infinite; }
+        .status-pending { background: #E0E7FF; color: #1E40AF; border: 1px solid #BFDBFE; }
+
+        @keyframes pulseBorder {
+            0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4); }
+            70% { box-shadow: 0 0 0 6px rgba(245, 158, 11, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+        }
+
+        .card-data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.75rem;
+            margin-top: auto;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border);
+            pointer-events: none;
+        }
+        .data-point {
+            display: flex;
+            flex-direction: column;
+        }
+        .data-label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            font-weight: 500;
+            margin-bottom: 2px;
+        }
+        .data-value { font-size: 1.1rem; font-weight: 600; }
+        .data-value.highlight { color: var(--primary); }
+
+        /* --- MODAL --- */
+        .detail-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            padding: 2rem;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .detail-overlay.active { display: flex; opacity: 1; }
+        .detail-panel {
+            background: var(--surface);
+            width: 100%;
+            max-width: 960px;
+            max-height: 90vh;
+            border-radius: var(--radius);
+            box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1);
+            display: flex;
+            flex-direction: column;
+            transform: translateY(20px);
+            transition: transform 0.3s;
+        }
+        .detail-overlay.active .detail-panel { transform: translateY(0); }
+        .detail-header {
+            padding: 1.5rem 2rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+        .detail-title { font-size: 1.25rem; font-weight: 600; }
+        .close-btn {
+            background: none; border: none; font-size: 1.5rem; color: var(--text-muted); cursor: pointer;
+        }
+        .close-btn:hover { color: var(--text); }
+        .detail-body {
+            padding: 2rem;
+            overflow-y: auto;
+            flex: 1;
+        }
+        .detail-actions {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+            background: var(--bg);
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px dashed var(--border);
+        }
+
+        /* SPC Charts */
+        .spc-chart-section { margin-bottom: 1.5rem; }
+        .spc-chart-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .spc-chart-wrapper {
+            position: relative;
+            height: 180px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 0.75rem;
+        }
+        .spc-legend {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            margin-top: 0.4rem;
+        }
+        .spc-legend span { display: flex; align-items: center; gap: 4px; }
+        .spc-legend-line { display: inline-block; width: 20px; height: 2px; }
+
+        /* Data Values below charts */
+        .readings-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+            gap: 1rem;
+            padding: 1rem;
+            background: var(--bg);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            margin-bottom: 1.5rem;
+        }
+        .reading-item { display: flex; flex-direction: column; }
+        .reading-label {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+        .reading-value {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: var(--text);
+            margin-top: 2px;
+        }
+        .reading-value.hl { color: var(--primary); }
+        .reading-value.hl-warn { color: var(--warning); }
+
+        /* --- FORMS & BUTTONS --- */
+        .btn {
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            padding: 0.6rem 1.2rem; border-radius: 8px;
+            font-weight: 500; font-size: 0.9rem;
+            cursor: pointer; border: none; transition: 0.2s;
+        }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-primary:disabled { background: #93C5FD; cursor: not-allowed; }
+        .btn-danger { background: #FEF2F2; color: #DC2626; border: 1px solid #FECACA; }
+        .btn-danger:hover { background: #FEE2E2; }
+        .btn-warning { background: #FEF3C7; color: #92400E; border: 1px solid #FDE68A; }
+        .btn-warning:hover { background: #FDE68A; }
+
+        .form-group { margin-bottom: 1.25rem; }
+        .form-label { display: block; margin-bottom: 0.5rem; font-weight: 500; font-size: 0.9rem; }
+        .form-control {
+            width: 100%; padding: 0.75rem 1rem;
+            border: 1px solid var(--border); border-radius: 8px;
+            background: var(--surface); color: var(--text); font-size: 0.95rem;
+        }
+        .form-control:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+
+        .scanner-box {
+            background: var(--nav-active); border: 1px dashed var(--primary);
+            padding: 1.5rem; border-radius: var(--radius); text-align: center; margin-bottom: 1.5rem;
+        }
+        .wiring-guide {
+            background: #F8FAFC; border-left: 4px solid var(--warning);
+            padding: 1rem; border-radius: 4px; margin-top: 1rem; font-size: 0.9rem; display: none;
+        }
+        .wiring-guide ul { margin-left: 1.5rem; margin-top: 0.5rem; color: var(--text-muted); }
+        .empty-state { text-align: center; padding: 4rem 2rem; color: var(--text-muted); }
+
+        .alert { padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; font-weight: 500; }
+        .alert-success { background: #DCFCE7; color: #065F46; border: 1px solid #A7F3D0; }
+        .alert-error { background: #FEE2E2; color: #991B1B; border: 1px solid #FECACA; }
+
+        /* Loading Spinner */
+        .spinner {
+            border: 3px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top: 3px solid white;
+            width: 16px;
+            height: 16px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* Countdown */
+        .countdown-timer { font-size: 1.1rem; font-weight: 700; color: var(--primary); margin-top: 0.5rem; display: inline-block;}
+
+        /* --- MOBILE RESPONSIVE --- */
+        .sidebar-overlay {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5); z-index: 95;
+        }
+        @media (max-width: 768px) {
+            .sidebar { transform: translateX(-100%); }
+            .sidebar.open { transform: translateX(0); }
+            .main-wrapper { margin-left: 0; width: 100%; }
+            .hamburger { display: block; }
+            .sidebar-overlay.active { display: block; }
+            .dashboard-grid { grid-template-columns: 1fr; }
+            .detail-panel { height: 100%; max-height: 100vh; border-radius: 0; transform: translateY(100%); }
+            .detail-overlay { padding: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div id="sidebar-overlay" class="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <aside id="sidebar" class="sidebar">
+        <div class="sidebar-header">
+            <span>IoT Monitoring</span>
+            <button class="hamburger" onclick="toggleSidebar()" style="font-size:1.2rem">&times;</button>
+        </div>
+        <div class="nav-menu">
+            <div class="nav-item active" onclick="switchView('dashboard', this)">
+                <span>📊</span> <span>Dashboard</span>
+            </div>
+            <div class="nav-item" onclick="switchView('add-device', this)">
+                <span>➕</span> <span>Add Device</span>
+            </div>
+        </div>
+    </aside>
+
+    <div class="main-wrapper">
+        <nav class="navbar">
+            <button class="hamburger" onclick="toggleSidebar()">☰</button>
+            <div class="user-menu">
+                <span class="user-name">Hello, {{ current_user.name }}</span>
+                <form action="{{ url_for('logout') }}" method="GET" style="display:inline;">
+                    <button type="submit" class="btn-logout">Logout</button>
+                </form>
+            </div>
+        </nav>
+
+        <div class="content-area">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+              {% if messages %}
+                {% for category, message in messages %}
+                  <div class="alert alert-{{ category }}">{{ message }}</div>
+                {% endfor %}
+              {% endif %}
+            {% endwith %}
+
+            <!-- DASHBOARD VIEW -->
+            <div id="view-dashboard" class="view-section active">
+                <div class="page-header"><h1 class="page-title">Device Dashboard</h1></div>
+
+                {% if appliances %}
+                <div class="dashboard-grid">
+                    {% for a in appliances %}
+                    <div class="card" id="card-{{ a.id }}" data-id="{{ a.id }}" data-name="{{ a.name|replace('"', '&quot;') }}" data-type="{{ a.type }}" data-status="{{ a.status }}" onclick="openDeviceDetail(this)">
+                        <div class="card-header">
+                            <div>
+                                <h3 class="card-title">{{ a.name }}</h3>
+                                <div class="card-subtitle">{{ a.type }} {% if a.subtype %}({{ a.subtype|title }}){% endif %}</div>
+                            </div>
+                            <div>
+                                {% if a.status == 'calibration_needed' %}
+                                    <span class="status-badge status-danger">Calib. Needed</span>
+                                {% elif a.status == 'calibrating' %}
+                                    <span class="status-badge status-calibrating">Calibrating...</span>
+                                {% elif a.status == 'pending_baseline' %}
+                                    <span class="status-badge status-pending">Awaiting Training</span>
+                                {% elif a.status == 'baselining' %}
+                                    <span class="status-badge status-baselining">10-Min Training...</span>
+                                {% elif a.status == 'normal' %}
+                                    <span class="status-badge status-normal">Normal</span>
+                                {% else %}
+                                    <span class="status-badge status-warning">Warning</span>
+                                {% endif %}
+                            </div>
+                        </div>
+
+                        <div class="card-data-grid">
+                            {% if 'Dryer' in a.type %}
+                                <div class="data-point"><span class="data-label">Exhaust Temp</span><span class="data-value" id="mini-t1-{{ a.id }}">-- °C</span></div>
+                                <div class="data-point"><span class="data-label">Current</span><span class="data-value highlight" id="mini-amp-{{ a.id }}">-- A</span></div>
+                            {% else %}
+                                <div class="data-point"><span class="data-label">Delta-T (Ret-Sup)</span><span class="data-value" id="mini-delta-{{ a.id }}">-- °C</span></div>
+                                <div class="data-point"><span class="data-label">Current</span><span class="data-value highlight" id="mini-amp-{{ a.id }}">-- A</span></div>
+                            {% endif %}
+                        </div>
+                        <div id="offline-{{ a.id }}" style="display:none;position:absolute;bottom:0;left:0;right:0;background:var(--warning);color:white;text-align:center;font-size:0.75rem;padding:2px;">Awaiting Sensor Data...</div>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="empty-state">
+                    <div style="font-size:3rem;margin-bottom:1rem">📡</div>
+                    <h3>No Devices Paired Yet</h3>
+                    <p>Click "Add Device" in the left menu to pair your ESP32 node.</p>
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- ADD DEVICE VIEW -->
+            <div id="view-add-device" class="view-section">
+                <div class="page-header"><h1 class="page-title">Add New Appliance</h1></div>
+                <div class="card no-hover" style="max-width:800px; margin:0 auto;">
+                    <div class="scanner-box">
+                        <h3 style="margin-bottom:10px">Looking for New Sensor Nodes?</h3>
+                        <p style="font-size:0.9rem; color:var(--text-muted); margin-bottom:15px">Make sure your ESP32 is powered on. Click scan to discover unpaired MAC addresses.</p>
+                        <button type="button" class="btn btn-primary" onclick="scanNodes()" id="btn-scan"><span>🔍</span> Scan for Unpaired Nodes</button>
+                        <div id="scan-results" style="margin-top:15px; display:none;">
+                            <select id="scanned-mac-select" class="form-control" style="max-width:300px; margin:0 auto; border-color:var(--primary);" onchange="handleMacSelection(this)">
+                                <option value="">-- Select Discovered MAC --</option>
+                            </select>
+                        </div>
+                    </div>
+                    <hr style="border:0; border-top:1px solid var(--border); margin:2rem 0;">
+
+                    <form action="{{ url_for('pair_device') }}" method="POST" id="add-device-form">
+                        <input type="hidden" name="node_id" id="hidden-mac" required>
+                        <div class="form-group">
+                            <label class="form-label">1. Appliance Name</label>
+                            <input type="text" name="name" id="device-name-input" class="form-control" placeholder="e.g., Living Room AC" required onkeyup="checkFormValidity()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">2. Select Appliance Type</label>
+                            <select name="type" class="form-control" id="device-type-select" onchange="updateFormDetails()" required>
+                                <option value="">-- Select Type --</option>
+                                <option value="Split HVAC">Air Conditioner (Split HVAC)</option>
+                                <option value="Gas Dryer">Gas Laundry Dryer</option>
+                            </select>
+                        </div>
+
+                        <div id="dynamic-details" style="display:none;">
+                            <div class="form-group" id="ac-subtype" style="display:none;">
+                                <label class="form-label">HVAC Technology</label>
+                                <select name="subtype" class="form-control">
+                                    <option value="non_inverter">Non-Inverter (Fixed Speed)</option>
+                                    <option value="inverter">Inverter (Variable Speed)</option>
+                                </select>
+                            </div>
+                            <div class="wiring-guide" id="wiring-guide">
+                                <strong>Hardware Wiring for <span id="wire-type-name"></span></strong>
+                                <ul id="wire-list"></ul>
+                                <p style="margin-top:10px; font-size:0.85rem; color:#92400E"><em>After pairing, for HVAC press BOTH buttons 5s on Device to calibrate. For dryer, instantly begin baseline training.</em></p>
+                            </div>
+                            <div style="margin-top:2rem;">
+                                <button type="submit" class="btn btn-primary" id="btn-save-device" disabled style="width:100%; justify-content:center; padding:0.8rem; font-size:1.05rem">Save & Link Appliance</button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- DEVICE DETAIL MODAL -->
+    <div id="detail-overlay" class="detail-overlay" onclick="if(event.target===this)closeDeviceDetail()">
+        <div class="detail-panel">
+            <div class="detail-header">
+                <div class="detail-title" id="detail-title">Device Name</div>
+                <button class="close-btn" onclick="closeDeviceDetail()">&times;</button>
+            </div>
+
+            <div class="detail-body">
+                <!-- Status Action Bar -->
+                <div class="detail-actions" id="detail-action-bar"></div>
+
+                <!-- SPC Charts (Dynamic depending on HVAC or Dryer) -->
+                <div id="spc-charts-section" style="display:none">
+                    <div class="spc-chart-section">
+                        <div class="spc-chart-title" id="title-chart-1">Primary Chart</div>
+                        <div class="spc-chart-wrapper"><canvas id="chart1"></canvas></div>
+                        <div class="spc-legend" id="legend-chart-1"></div>
+                    </div>
+                    <div class="spc-chart-section">
+                        <div class="spc-chart-title" id="title-chart-2">Secondary Chart</div>
+                        <div class="spc-chart-wrapper"><canvas id="chart2"></canvas></div>
+                        <div class="spc-legend" id="legend-chart-2"></div>
+                    </div>
+                    <div class="spc-chart-section">
+                        <div class="spc-chart-title" id="title-chart-3">Current</div>
+                        <div class="spc-chart-wrapper"><canvas id="chart3"></canvas></div>
+                        <div class="spc-legend" id="legend-chart-3"></div>
+                    </div>
+                </div>
+
+                <!-- Live Readings Grid -->
+                <div class="readings-grid" id="readings-grid" style="display:none">
+                    <div class="reading-item"><span class="reading-label" id="lbl-t1">Return Temp</span><span class="reading-value" id="detail-t1">-- °C</span></div>
+                    <div class="reading-item"><span class="reading-label" id="lbl-t2">Supply Temp</span><span class="reading-value" id="detail-t2">-- °C</span></div>
+                    <div class="reading-item" id="row-tcoil"><span class="reading-label">Coil Temp (Ref)</span><span class="reading-value hl" id="detail-t3">-- °C</span></div>
+                    <div class="reading-item"><span class="reading-label" id="lbl-h1">RH Return</span><span class="reading-value" id="detail-h1">-- %</span></div>
+                    <div class="reading-item"><span class="reading-label" id="lbl-h2">RH Supply</span><span class="reading-value" id="detail-h2">-- %</span></div>
+                    <div class="reading-item"><span class="reading-label">Current (SCT)</span><span class="reading-value hl" id="detail-amp">-- A</span></div>
+                    <div class="reading-item"><span class="reading-label" id="lbl-delta">Delta-T (Ret-Sup)</span><span class="reading-value hl-warn" id="detail-delta">-- °C</span></div>
+                </div>
+
+                <!-- Data Table Section -->
+                <div style="margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--border);" id="table-container" style="display:none">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                        <h3 style="font-size: 1.1rem; font-weight: 600;" id="table-title">Analytics Data</h3>
+                        <button class="btn btn-primary" onclick="showExportModal()" id="btn-export" style="display:none;">📄 Export to Excel</button>
+                    </div>
+                    <div style="overflow-x: auto; max-height: 400px; border: 1px solid var(--border); border-radius: var(--radius);">
+                        <table id="data-table" style="width: 100%; border-collapse: collapse; font-size: 0.85rem;">
+                            <thead style="position: sticky; top: 0; background: var(--surface); z-index: 10; border-bottom: 2px solid var(--border);">
+                                <tr id="table-headers"></tr>
+                            </thead>
+                            <tbody id="table-body" style="font-family: monospace;"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Maintenance Table Section -->
+                <div style="margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--border);">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                        <h3 style="font-size: 1.1rem; font-weight: 600;">Maintenance History</h3>
+                    </div>
+                    <div style="overflow-x: auto; max-height: 250px; border: 1px solid var(--border); border-radius: var(--radius);">
+                        <table id="maintenance-table" style="width: 100%; border-collapse: collapse; min-width: 320px;">
+                            <thead style="background: var(--bg); border-bottom: 1px solid var(--border);">
+                                <tr>
+                                    <th style="padding: 0.75rem 1rem; text-align: left; font-weight: 600; white-space: nowrap;">Maintenance Date</th>
+                                </tr>
+                            </thead>
+                            <tbody id="maintenance-body">
+                                <tr><td style="text-align:center; padding:2rem; color:var(--text-muted)">No maintenance records yet.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Bottom Buttons -->
+                <div style="margin-top:1rem; padding-top:1rem; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:1rem;">
+                    <button class="btn btn-warning" onclick="rebaselineDevice()" id="btn-rebaseline" style="display:none;">Restart Baseline</button>
+                    <form id="forget-form" method="POST" onsubmit="return confirm('Are you sure you want to forget this device?');">
+                        <button type="submit" class="btn btn-danger">Forget Device</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Export Modal -->
+    <div id="export-overlay" class="detail-overlay" onclick="if(event.target===this)closeExportModal()" style="z-index: 1100;">
+        <div class="detail-panel" style="max-width: 500px;">
+            <div class="detail-header">
+                <div class="detail-title">Export Data to Excel</div>
+                <button class="close-btn" onclick="closeExportModal()">&times;</button>
+            </div>
+            <div class="detail-body">
+                <div class="form-group">
+                    <label class="form-label">Export Range</label>
+                    <select id="export-range" class="form-control" onchange="toggleDateInputs()">
+                        <option value="all">All Data Since Baseline Set</option>
+                        <option value="custom">Custom Date Range</option>
+                    </select>
+                </div>
+                <div id="custom-date-inputs" style="display:none;">
+                    <div class="form-group">
+                        <label class="form-label">Start Date</label>
+                        <input type="datetime-local" id="export-start" class="form-control">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">End Date</label>
+                        <input type="datetime-local" id="export-end" class="form-control">
+                    </div>
+                </div>
+                <button class="btn btn-primary" onclick="downloadExcel()" style="width:100%; justify-content:center; margin-top:1rem;">
+                    Download Excel File
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentDetailId = null;
+        let chart1 = null, chart2 = null, chart3 = null;
+        let spcLimits = {};
+        let statusPollInterval = null;
+        let latestChartTimeMs = Date.now();
+        let baselineTimerInterval = null;
+
+        /* --- NAVIGATION --- */
+        function toggleSidebar() {
+            document.getElementById('sidebar').classList.toggle('open');
+            document.getElementById('sidebar-overlay').classList.toggle('active');
+        }
+        function switchView(viewId, el) {
+            document.querySelectorAll('.view-section').forEach(e => e.classList.remove('active'));
+            document.getElementById('view-' + viewId).classList.add('active');
+            document.querySelectorAll('.nav-item').forEach(e => e.classList.remove('active'));
+            el.classList.add('active');
+            if (window.innerWidth <= 768) toggleSidebar();
+        }
+
+        /* --- ADD DEVICE --- */
+        function handleMacSelection(sel) {
+            document.getElementById('hidden-mac').value = sel.value;
+            checkFormValidity();
+        }
+        function checkFormValidity() {
+            const mac = document.getElementById('hidden-mac').value;
+            const name = document.getElementById('device-name-input').value;
+            const type = document.getElementById('device-type-select').value;
+            const btn = document.getElementById('btn-save-device');
+            btn.disabled = !(mac && name.trim().length > 0 && type);
+        }
+        function scanNodes() {
+            const btn = document.getElementById('btn-scan');
+            btn.innerHTML = '<span class="spinner"></span> Scanning...';
+            btn.disabled = true;
+            fetch('/api/unpaired_nodes').then(r => r.json()).then(data => {
+                btn.innerHTML = '<span>🔍</span> Scan for Unpaired Nodes';
+                btn.disabled = false;
+                const box = document.getElementById('scan-results');
+                const sel = document.getElementById('scanned-mac-select');
+                sel.innerHTML = '<option value="">-- Select Discovered MAC --</option>';
+                if (!data.length) {
+                    alert("No unpaired nodes found.");
+                    box.style.display = 'none';
+                    return;
+                }
+                data.forEach(n => {
+                    let o = document.createElement('option');
+                    o.value = n.id; o.text = n.mac_address;
+                    sel.appendChild(o);
+                });
+                box.style.display = 'block';
+            });
+        }
+        function updateFormDetails() {
+            const type = document.getElementById('device-type-select').value;
+            const dc = document.getElementById('dynamic-details');
+            const ac = document.getElementById('ac-subtype');
+            const wg = document.getElementById('wiring-guide');
+            const wl = document.getElementById('wire-list');
+            checkFormValidity();
+            document.getElementById('wire-type-name').innerText = type;
+            if (!type) { dc.style.display = 'none'; return; }
+            dc.style.display = 'block';
+            wg.style.display = 'block';
+
+            if (type === 'Split HVAC') {
+                ac.style.display = 'block';
+                wl.innerHTML = `
+                    <li><strong>DHT22 (Port 1):</strong> AC Return (Top intake)</li>
+                    <li><strong>DHT22 (Port 2):</strong> AC Supply (Cold output)</li>
+                    <li><strong>DS18B20 (Port 3):</strong> Evaporator coil</li>
+                    <li><strong>ZHT103C (Port 6):</strong> Compressor live wire</li>
+                `;
+            } else {
+                ac.style.display = 'none';
+                wl.innerHTML = `
+                    <li><strong>BME280 (Port 4):</strong> Exhaust duct</li>
+                    <li><strong>SCT (Port 6):</strong> Motor live wire</li>
+                `;
+            }
+        }
+
+        /* --- DETAIL MODAL --- */
+        function openDeviceDetail(el) {
+            try {
+                const id = el.dataset.id;
+                const name = el.dataset.name;
+                const type = el.dataset.type;
+                const status = el.dataset.status;
+                const isHVAC = type.includes('HVAC');
+
+                currentDetailId = id;
+                document.getElementById('detail-title').innerText = name;
+                document.getElementById('forget-form').action = '/devices/' + id + '/forget';
+
+                // Show/hide grid details
+                document.getElementById('row-tcoil').style.display = isHVAC ? 'flex' : 'none';
+                document.getElementById('lbl-t1').innerText = isHVAC ? 'Return Temp' : 'Exhaust Temp';
+                document.getElementById('lbl-t2').parentElement.style.display = isHVAC ? 'flex' : 'none';
+                document.getElementById('lbl-t2').innerText = 'Supply Temp';
+                document.getElementById('lbl-h1').innerText = isHVAC ? 'RH Return' : 'RH Exhaust';
+                document.getElementById('lbl-h2').parentElement.style.display = isHVAC ? 'flex' : 'none';
+                document.getElementById('lbl-h2').innerText = 'RH Supply';
+                document.getElementById('lbl-delta').innerText = isHVAC ? 'Delta-T (Ret-Sup)' : 'Pressure (hPa)';
+                document.getElementById('detail-delta').className = isHVAC ? 'reading-value hl-warn' : 'reading-value';
+
+                // We want charts visible as long as it's not calibrating.
+                const hasGraphs = (status !== 'calibration_needed' && status !== 'calibrating');
+                document.getElementById('spc-charts-section').style.display = hasGraphs ? 'block' : 'none';
+                document.getElementById('readings-grid').style.display = hasGraphs ? 'grid' : 'none';
+
+                buildActionBar(status, id, isHVAC);
+                buildStatusPolling(id, type);
+
+                if (status === 'normal') {
+                    document.getElementById('btn-export').style.display = 'inline-flex';
+                    document.getElementById('btn-rebaseline').style.display = 'inline-flex';
+                } else {
+                    document.getElementById('btn-export').style.display = 'none';
+                    document.getElementById('btn-rebaseline').style.display = 'none';
+                }
+
+                updateDataTable();
+                updateMaintenanceTable();
+
+                if (hasGraphs) {
+                    try {
+                        initCharts(id, isHVAC);
+                    } catch(e) {
+                        console.error("Chart init failed", e);
+                    }
+                }
+                updateDetailData();
+                document.getElementById('detail-overlay').classList.add('active');
+            } catch(e) {
+                console.error("openDeviceDetail error", e);
+                alert("UI error, press F12 and check Console.");
+            }
+        }
+
+        function closeDeviceDetail() {
+            document.getElementById('detail-overlay').classList.remove('active');
+            currentDetailId = null;
+            if (statusPollInterval) { clearInterval(statusPollInterval); statusPollInterval = null; }
+            if (baselineTimerInterval) { clearInterval(baselineTimerInterval); baselineTimerInterval = null; }
+
+            [chart1, chart2, chart3].forEach(c => { if(c) c.destroy(); });
+            chart1 = chart2 = chart3 = null;
+            spcLimits = {};
+            latestChartTimeMs = Date.now();
+        }
+
+        /* --- REMOTE BASELINE --- */
+        function startRemoteBaseline(id) {
+            const btn = document.getElementById('btn-remote-baseline');
+            btn.innerHTML = '<span class="spinner"></span> Starting...';
+            btn.disabled = true;
+
+            fetch('/api/device/' + id + '/remote_baseline', {method: 'POST'})
+            .then(r => r.json())
+            .then(data => {
+                if(data.success) {
+                    // Update immediate UI
+                    const card = document.querySelector(`.card[data-id="${id}"]`);
+                    if(card) { card.dataset.status = 'baselining'; }
+                    const isHVAC = card.dataset.type.includes('HVAC');
+                    buildActionBar('baselining', id, isHVAC);
+                } else {
+                    alert(data.error);
+                    btn.innerHTML = 'Start 10-Min Baseline';
+                    btn.disabled = false;
+                }
+            }).catch(e => {
+                alert("Failed to connect");
+                btn.innerHTML = 'Start 10-Min Baseline';
+                btn.disabled = false;
+            });
+        }
+
+        function cancelRemoteBaseline(id) {
+            // Optional: you can add a new backend endpoint to cancel, or use an existing state reset logic.
+            alert("Cancel baseline requested. (Ensure backend logic handles this to reset to pending_baseline)");
+        }
+
+        function rebaselineDevice() {
+            if(confirm("Are you sure you want to discard your old baseline and retrain the 10-minute window?")) {
+                startRemoteBaseline(currentDetailId);
+            }
+        }
+
+        /* --- ACTION BAR BUILDER --- */
+        function buildActionBar(status, id, isHVAC) {
+            const bar = document.getElementById('detail-action-bar');
+            if (baselineTimerInterval) { clearInterval(baselineTimerInterval); baselineTimerInterval = null; }
+
+            if (status === 'calibration_needed') {
+                if (isHVAC) {
+                    bar.innerHTML = `
+                        <div style="flex:1">
+                            <h4 style="color:var(--danger); margin-bottom:5px">Calibration Required</h4>
+                            <p style="font-size:0.85rem; color:var(--text-muted)">
+                                1. Place DHT1 & DHT2 together at the AC supply mouth.<br>
+                                2. <strong>Hold Button 2 on ESP32 for 5 seconds</strong> (buzzer beeps 1x).<br>
+                                3. Wait for Tcoil to drop 8°C. Buzzer beeps 3x when done.
+                            </p>
+                        </div>
+                        <div style="display:flex; align-items:center">
+                            <span class="status-badge status-danger">Waiting for Hardware</span>
+                        </div>
+                    `;
+                }
+            } else if (status === 'calibrating') {
+                bar.innerHTML = `
+                    <div style="flex:1">
+                        <h4 style="color:var(--warning); margin-bottom:5px">Calibrating in progress...</h4>
+                        <p style="font-size:0.85rem; color:var(--text-muted)">Do not move the sensors. Waiting for Coil Temp to drop 8°C.</p>
+                    </div>
+                    <div style="display:flex; align-items:center">
+                        <span class="status-badge status-calibrating">Hardware Calibrating</span>
+                    </div>
+                `;
+            } else if (status === 'pending_baseline') {
+                if (isHVAC) {
+                    bar.innerHTML = `
+                        <div style="flex:1">
+                            <h4 style="color:var(--primary); margin-bottom:5px">Ready for Baseline Training</h4>
+                            <p style="font-size:0.85rem; color:var(--text-muted)">
+                                Calibration done!<br>
+                                1. Move sensors to proper positions (Return & Supply vents).<br>
+                                2. Turn AC On.<br>
+                                3. Click the Start button below or hold Button 2 for 2s on the device.
+                            </p>
+                            <div style="margin-top:10px;">
+                                <button id="btn-remote-baseline" class="btn btn-primary" onclick="startRemoteBaseline('${id}')">Start 10-Min Baseline</button>
+                            </div>
+                        </div>
+                        <div style="display:flex; align-items:center">
+                            <span class="status-badge status-pending">Awaiting Training</span>
+                        </div>
+                    `;
+                } else {
+                    bar.innerHTML = `
+                        <div style="flex:1">
+                            <h4 style="color:var(--primary); margin-bottom:5px">Ready for Baseline Training</h4>
+                            <p style="font-size:0.85rem; color:var(--text-muted)">
+                                1. Ensure sensors are installed in the exhaust duct.<br>
+                                2. Turn Gas Dryer On.<br>
+                                3. Click the Start button below or hold Button 2 for 2s on the device.
+                            </p>
+                            <div style="margin-top:10px;">
+                                <button id="btn-remote-baseline" class="btn btn-primary" onclick="startRemoteBaseline('${id}')">Start 10-Min Baseline</button>
+                            </div>
+                        </div>
+                        <div style="display:flex; align-items:center">
+                            <span class="status-badge status-pending">Awaiting Training</span>
+                        </div>
+                    `;
+                }
+                    } else if (status === 'baselining') {
+        bar.innerHTML = `
+            <div style="flex:1;">
+                <h4 style="color:var(--primary); margin-bottom:5px;">10-Minute Baseline Recording in Progress...</h4>
+                <p style="font-size:0.85rem; color:var(--text-muted);">Do not turn off the appliance. 
+                <span id="timer-${id}" class="countdown-timer">Syncing...</span> remaining.</p>
+            </div>
+            <div style="display:flex; align-items:center;">
+                <span class="status-badge status-baselining">Recording Data...</span>
+            </div>
+        `;
+        
+        // Ping the backend for the exact remaining seconds
+        fetch(`/api/device/${id}/spc_limits`)
+            .then(r => r.json())
+            .then(d => {
+                startCountdownUI(id, d.remaining_seconds !== undefined ? d.remaining_seconds : 600);
+            })
+            .catch(() => startCountdownUI(id, 600)); // Fallback to 10 mins if network fails
+    } else {
+                bar.innerHTML = `
+                    <div style="flex:1">
+                        <h4 style="color:var(--success); margin-bottom:5px">System Normal & Actively Monitoring</h4>
+                        <p style="font-size:0.85rem; color:var(--text-muted)">Baselines set. To overwrite them, click 'Restart Baseline' below.</p>
+                    </div>
+                `;
+            }
+        }
+
+            function startCountdownUI(id, seconds) {
+        // 1. Clear any old timers so they don't overlap and speed up the clock
+        if (baselineTimerInterval) {
+            clearInterval(baselineTimerInterval);
+            baselineTimerInterval = null;
+        }
+
+        let remain = seconds;
+        let el = document.getElementById(`timer-${id}`);
+
+        // 2. Create a small helper function so we can call it immediately
+        function updateTimerDisplay() {
+            if (el) {
+                let m = Math.floor(remain / 60);
+                let s = remain % 60;
+                el.innerText = `${m}:${s < 10 ? '0' : ''}${s}`;
+            }
+        }
+
+        // 3. Update the UI instantly so the user doesn't see "Syncing..." for 1 second
+        updateTimerDisplay();
+
+        // 4. Start the 1-second interval loop
+        baselineTimerInterval = setInterval(() => {
+            remain--;
+            updateTimerDisplay();
+            if (remain <= 0) {
+                clearInterval(baselineTimerInterval);
+            }
+        }, 1000);
+    }
+
+        /* --- STATUS POLLING --- */
+        function buildStatusPolling(id, type) {
+            const isHVAC = type.includes('HVAC');
+            if (statusPollInterval) clearInterval(statusPollInterval);
+            statusPollInterval = setInterval(() => {
+                const card = document.querySelector(`.card[data-id="${id}"]`);
+                if (!card) return;
+                const oldStatus = card.dataset.status;
+                fetch('/api/device/' + id + '/spc_limits').then(r => r.json()).then(data => {
+                    if (!data.error && data.status) {
+                        if (data.status !== oldStatus) {
+                            card.dataset.status = data.status;
+                            // Update badge on card
+                            const badge = card.querySelector('.status-badge');
+                            if (badge) {
+                                if (data.status === 'normal') { badge.className = 'status-badge status-normal'; badge.innerText = 'Normal'; }
+                                else if (data.status === 'baselining') { badge.className = 'status-badge status-baselining'; badge.innerText = '10-Min Training...'; }
+                                else if (data.status === 'pending_baseline') { badge.className = 'status-badge status-pending'; badge.innerText = 'Awaiting Training'; }
+                                else if (data.status === 'calibration_needed') { badge.className = 'status-badge status-danger'; badge.innerText = 'Calib. Needed'; }
+                                else if (data.status === 'calibrating') { badge.className = 'status-badge status-calibrating'; badge.innerText = 'Calibrating...'; }
+                            }
+                            // Update action bar in modal
+                            if (currentDetailId == id) {
+                                buildActionBar(data.status, id, isHVAC);
+                                if (data.status === 'normal') {
+                                    document.getElementById('btn-export').style.display = 'inline-flex';
+                                    document.getElementById('btn-rebaseline').style.display = 'inline-flex';
+                                    updateDataTable();
+                                }
+                            }
+                        }
+                        if (data.status === 'normal') {
+                            spcLimits = data;
+                            applySPCLines();
+                        }
+                    }
+                }).catch(()=>{});
+            }, 4000);
+        }
+
+        /* --- DATA TABLES --- */
+       function updateMaintenanceTable() {
+        if (!currentDetailId) return;
+        
+        fetch('/api/device/' + currentDetailId + '/maintenance_logs')
+        .then(r => r.json())
+        .then(data => {
+            const tbody = document.getElementById('maintenance-body');
+            if (!data || data.length === 0) {
+                tbody.innerHTML = '<tr><td style="text-align:center; padding:2rem; color:var(--text-muted)">No maintenance records yet.</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = '';
+            
+            // Just loop through the timestamps and display them
+            data.forEach(item => {
+                const tr = document.createElement('tr');
+                const dateObj = new Date(item);
+                
+                tr.innerHTML = `
+                    <td style="padding: 0.75rem 1rem; text-align: left; color: var(--text); border-bottom: 1px solid var(--border);">
+                        ${dateObj.toLocaleDateString()} ${dateObj.toLocaleTimeString()}
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }).catch(e => {
+            console.error("Error loading maintenance logs:", e);
+            document.getElementById('maintenance-body').innerHTML = '<tr><td style="text-align:center; padding:2rem; color:var(--danger)">Error loading logs.</td></tr>';
+        });
+    }
+
+        function updateDataTable() {
+    if (!currentDetailId) return;
+    const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
+    if (!card) return;
+    const isHVAC = card.dataset.type.includes('HVAC');
+    const status = card.dataset.status;
+    
+    if (status !== 'normal') {
+        document.getElementById('table-body').innerHTML = `<tr><td colspan="8" style="text-align:center; padding:2rem; color:var(--text-muted);">Data table will appear after baseline training is complete.</td></tr>`;
+        return;
+    }
+    
+    // Fetch the correct analytics table data (Raw readings for Dryer, Daily Averages for HVAC)
+    const endpoint = isHVAC ? `/api/device/${currentDetailId}/hvac_analytics` : `/api/device/${currentDetailId}/table_data`;
+    
+    fetch(endpoint)
+        .then(r => r.json())
+        .then(data => {
+            const tbody = document.getElementById('table-body');
+            const headers = document.getElementById('table-headers');
+            
+            if (!data || data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:2rem; color:var(--text-muted);">No data available yet.</td></tr>`;
+                return;
+            }
+            
+            // Rebuild Headers
+            headers.innerHTML = '';
+            if (isHVAC) {
+                document.getElementById('table-title').innerText = "HVAC Daily Averages (Compressor Running)";
+                ['Date', 'Avg Intake (°C)', 'Avg Exit (°C)', 'Avg Coil (°C)'].forEach(h => {
+                    const th = document.createElement('th');
+                    th.innerText = h;
+                    th.style.cssText = "padding: 0.75rem 1rem; text-align: left; font-weight: 600; white-space: nowrap;";
+                    headers.appendChild(th);
+                });
+            } else {
+                document.getElementById('table-title').innerText = "Dryer Telemetry History";
+                ['Time', 'Exhaust Temp (°C)', 'Exhaust RH (%)', 'Pressure (hPa)', 'Current (A)'].forEach(h => {
+                    const th = document.createElement('th');
+                    th.innerText = h;
+                    th.style.cssText = "padding: 0.75rem 1rem; text-align: left; font-weight: 600; white-space: nowrap;";
+                    headers.appendChild(th);
+                });
+            }
+            
+            // Rebuild Rows
+            tbody.innerHTML = '';
+            data.forEach((row, idx) => {
+                const tr = document.createElement('tr');
+                tr.style.cssText = idx % 2 === 0 ? "background: var(--bg);" : "";
+                
+                if (isHVAC) {
+                    const dateObj = new Date(row.date).toLocaleDateString();
+                    tr.innerHTML = `
+                        <td style="padding: 0.5rem 1rem; white-space: nowrap;">${dateObj}</td>
+                        <td style="padding: 0.5rem 1rem;">${row.avg_intake} °C</td>
+                        <td style="padding: 0.5rem 1rem;">${row.avg_exit} °C</td>
+                        <td style="padding: 0.5rem 1rem;">${row.avg_coil} °C</td>
+                    `;
+                } else {
+                    const timeObj = new Date(row.time).toLocaleTimeString();
+                    tr.innerHTML = `
+                        <td style="padding: 0.5rem 1rem; white-space: nowrap;">${timeObj}</td>
+                        <td style="padding: 0.5rem 1rem;">${row.Texhaust}</td>
+                        <td style="padding: 0.5rem 1rem;">${row.RHexhaust}</td>
+                        <td style="padding: 0.5rem 1rem;">${row.Pressure}</td>
+                        <td style="padding: 0.5rem 1rem;">${row.Imotor}</td>
+                    `;
+                }
+                tbody.appendChild(tr);
+            });
+        })
+        .catch(e => console.error("Table fetch error:", e));
+}
+
+        /* --- EXPORT --- */
+        function showExportModal() {
+            document.getElementById('export-overlay').classList.add('active');
+            const now = new Date();
+            const weekAgo = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
+            const formatLocal = (d) => new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
+            document.getElementById('export-end').value = formatLocal(now);
+            document.getElementById('export-start').value = formatLocal(weekAgo);
+        }
+        function closeExportModal() {
+            document.getElementById('export-overlay').classList.remove('active');
+        }
+        function toggleDateInputs() {
+            const range = document.getElementById('export-range').value;
+            document.getElementById('custom-date-inputs').style.display = range === 'custom' ? 'block' : 'none';
+        }
+        function downloadExcel() {
+            if (!currentDetailId) return;
+            const range = document.getElementById('export-range').value;
+            let url = '/api/device/' + currentDetailId + '/export_excel';
+            if (range === 'custom') {
+                const start = document.getElementById('export-start').value;
+                const end = document.getElementById('export-end').value;
+                if (!start || !end) { alert("Please select both start and end dates."); return; }
+                url += `?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}`;
+            }
+            window.location.href = url;
+            closeExportModal();
+        }
+
+        /* --- CHARTS --- */
+        function makeSPCChartOptions(yLabel) {
+            return {
+                responsive: true, maintainAspectRatio: false, animation: false,
+                scales: {
+                    x: { type: 'time', time: { unit: 'minute', tooltipFormat: 'HH:mm:ss' }, ticks: { maxTicksLimit: 6, font: { size: 10 } } },
+                    y: { title: { display: true, text: yLabel, font: { size: 10 } }, ticks: { font: { size: 10 } } }
+                },
+                plugins: { legend: { display: false } }
+            };
+        }
+
+        function updateChartWindows(maxTimeMs) {
+            const minTimeMs = maxTimeMs - (6 * 60 * 60 * 1000); // exactly 6 hours back
+            [chart1, chart2, chart3].forEach(c => {
+                if (c && c.options && c.options.scales && c.options.scales.x) {
+                    c.options.scales.x.min = minTimeMs;
+                    c.options.scales.x.max = maxTimeMs;
+                }
+            });
+        }
+
+        function initCharts(id, isHVAC) {
+            [chart1, chart2, chart3].forEach(c => { if(c) c.destroy(); });
+
+            const mkDataset = (label, color, dash, fill=false) => ({
+                label: label, data: [], borderColor: color, backgroundColor: fill ? color+'33' : 'transparent',
+                borderWidth: dash.length ? 1.5 : 2, borderDash: dash, pointRadius: dash.length ? 0 : 2, tension: 0.3, fill: fill
+            });
+
+            if (isHVAC) {
+                document.getElementById('title-chart-1').innerText = "T Return minus Supply Temperature";
+                document.getElementById('legend-chart-1').innerHTML = `
+                    <span><span class="spc-legend-line" style="background:#2563EB"></span>T live</span>
+                    <span><span class="spc-legend-line" style="background:#EF4444; border-top:2px dashed #EF4444"></span>UCL</span>
+                    <span><span class="spc-legend-line" style="background:#64748B; border-top:2px dashed #64748B"></span>Mean</span>
+                    <span><span class="spc-legend-line" style="background:#3B82F6; border-top:2px dashed #3B82F6"></span>LCL</span>
+                `;
+                chart1 = new Chart(document.getElementById('chart1').getContext('2d'), {
+                    type: 'line', data: { datasets: [
+                        mkDataset('T', '#2563EB', []), mkDataset('UCL', '#EF4444', [6,3]), 
+                        mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
+                    ] }, options: makeSPCChartOptions('°C')
+                });
+
+                document.getElementById('title-chart-2').innerText = "Coil Temperature (Evaporator)";
+                document.getElementById('legend-chart-2').innerHTML = `
+                    <span><span class="spc-legend-line" style="background:#10B981"></span>Tcoil live</span>
+                    <span><span class="spc-legend-line" style="background:#EF4444"></span>UCL</span>
+                    <span><span class="spc-legend-line" style="background:#64748B"></span>Mean</span>
+                    <span><span class="spc-legend-line" style="background:#3B82F6"></span>LCL</span>
+                `;
+                chart2 = new Chart(document.getElementById('chart2').getContext('2d'), {
+                    type: 'line', data: { datasets: [
+                        mkDataset('Tcoil', '#10B981', []), mkDataset('UCL', '#EF4444', [6,3]), 
+                        mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
+                    ] }, options: makeSPCChartOptions('°C')
+                });
+
+                document.getElementById('title-chart-3').innerText = "Compressor Current";
+                document.getElementById('legend-chart-3').innerHTML = `
+                    <span><span class="spc-legend-line" style="background:#F59E0B"></span>Current live</span>
+                    <span><span class="spc-legend-line" style="background:#EF4444"></span>UCL Max</span>
+                    <span><span class="spc-legend-line" style="background:#64748B"></span>Mean</span>
+                    <span><span class="spc-legend-line" style="background:#3B82F6"></span>LCL Min</span>
+                `;
+                chart3 = new Chart(document.getElementById('chart3').getContext('2d'), {
+                    type: 'line', data: { datasets: [
+                        mkDataset('Current', '#F59E0B', [], true), mkDataset('UCL', '#EF4444', [6,3]), 
+                        mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
+                    ] }, options: makeSPCChartOptions('A')
+                });
+
+            } else {
+                // Dryer Charts
+                document.getElementById('title-chart-1').innerText = "Exhaust Temperature & Humidity";
+                document.getElementById('legend-chart-1').innerHTML = `
+                    <span><span class="spc-legend-line" style="background:#DC2626"></span>Temp °C</span>
+                    <span><span class="spc-legend-line" style="background:#0284C7"></span>RH %</span>
+                `;
+                chart1 = new Chart(document.getElementById('chart1').getContext('2d'), {
+                    type: 'line', data: { datasets: [
+                        mkDataset('Temp °C', '#DC2626', []), mkDataset('RH %', '#0284C7', [])
+                    ] }, options: makeSPCChartOptions('Val')
+                });
+
+                document.getElementById('title-chart-2').innerText = "Exhaust Pressure";
+                document.getElementById('legend-chart-2').innerHTML = `
+                    <span><span class="spc-legend-line" style="background:#059669"></span>Pressure hPa</span>
+                `;
+                chart2 = new Chart(document.getElementById('chart2').getContext('2d'), {
+                    type: 'line', data: { datasets: [
+                        mkDataset('Pressure', '#059669', [], true)
+                    ] }, options: makeSPCChartOptions('hPa')
+                });
+
+                document.getElementById('title-chart-3').innerText = "Motor Current (Gas Ignition Spikes)";
+                document.getElementById('legend-chart-3').innerHTML = `
+                    <span><span class="spc-legend-line" style="background:#F59E0B"></span>Current A</span>
+                `;
+                chart3 = new Chart(document.getElementById('chart3').getContext('2d'), {
+                    type: 'line', data: { datasets: [
+                        mkDataset('Current A', '#F59E0B', [], true)
+                    ] }, options: makeSPCChartOptions('A')
+                });
+            }
+
+               // Fetch history
+    fetch(`/api/device/${id}/latest_n?limit=4500`)
+        .then(r => r.json())
+        .then(hist => {
+            if (!hist || hist.error || hist.length === 0) return;
+            
+            const newestTimeMs = new Date(hist[hist.length - 1].time).getTime();
+            latestChartTimeMs = newestTimeMs;
+            
+            hist.forEach(d => {
+                if (isHVAC) {
+                    // Correctly load HVAC history without the [0] arrays
+                    pushToCharts(new Date(d.time), Math.abs(d.Treturn - d.Tsupply), d.Tcoil, d.Icompressor, false, isHVAC);
+                } else {
+                    // Correctly load Dryer history using real dryer variables
+                    pushToCharts(new Date(d.time), [d.Texhaust, d.RHexhaust], d.Pressure, d.Imotor, false, isHVAC);
+                }
+            });
+            
+            if (isHVAC && spcLimits && spcLimits.delta_t) {
+                applySPCLines();
+            }
+            
+            [chart1, chart2, chart3].forEach(c => {
+                if (c) c.update('none');
+            });
+        })
+        .catch(e => console.error("History fetch error:", e));
+        }
+
+        function applySPCLines() {
+            if (!spcLimits || !spcLimits.deltat) return;
+            const maxMs = latestChartTimeMs;
+            const minMs = maxMs - (6 * 60 * 60 * 1000);
+
+            function setLines(chart, limits) {
+                if (!chart || !limits) return;
+                [limits.ucl, limits.mean, limits.lcl].forEach((val, i) => {
+                    chart.data.datasets[Math.floor(i)+1].data = [{x: minMs, y: val}, {x: maxMs, y: val}];
+                });
+                chart.update('quiet');
+            }
+            setLines(chart1, spcLimits.deltat);
+            setLines(chart2, spcLimits.tcoil);
+            setLines(chart3, spcLimits.current);
+        }
+
+        function pushToCharts(time, val1, val2, val3, doUpdate=true, isHVAC=true) {
+            const timeMs = time instanceof Date ? time.getTime() : time;
+            if (timeMs > latestChartTimeMs) latestChartTimeMs = timeMs;
+            const cutoffMs = latestChartTimeMs - (6.1 * 60 * 60 * 1000);
+
+            function updateDataset(chart, dsIndex, val) {
+                if (!chart) return;
+                const ds = chart.data.datasets[dsIndex].data;
+                ds.push({x: timeMs, y: val});
+                while (ds.length > 0 && ds[0].x < cutoffMs) ds.shift();
+            }
+
+            if(isHVAC) {
+                updateDataset(chart1, 0, val1); // Delta
+                updateDataset(chart2, 0, val2); // Tcoil
+                updateDataset(chart3, 0, val3); // Curr
+            } else {
+                updateDataset(chart1, 0, val1[0]); // Temp
+                updateDataset(chart1, 1, val1[1]); // RH
+                updateDataset(chart2, 0, val2);    // Pres
+                updateDataset(chart3, 0, val3);    // Curr
+            }
+
+            if (doUpdate) {
+                updateChartWindows(latestChartTimeMs);
+                [chart1, chart2, chart3].forEach(c => { if(c) c.update('quiet'); });
+                if (isHVAC && spcLimits && spcLimits.deltat) applySPCLines();
+            }
+        }
+
+        /* --- LIVE DATA POLLING --- */
+        function updateMiniCards() {
+        document.querySelectorAll('.card[data-id]').forEach(card => {
+        const id = card.dataset.id;
+        const type = card.dataset.type;
+        
+        fetch(`/api/node/${id}/latest`)
+            .then(r => {
+                if (!r.ok) throw new Error("Offline");
+                return r.json();
+            })
+            .then(data => {
+                if (data.error) throw new Error("Error");
+                document.getElementById(`offline-${id}`).style.display = 'none';
+                
+                if (type.includes("HVAC")) {
+                    const delta = Math.abs(data.Treturn - data.Tsupply).toFixed(1);
+                    const elD = document.getElementById(`mini-delta-${id}`);
+                    if (elD) elD.innerText = delta + ' °C';
+                    const elA = document.getElementById(`mini-amp-${id}`);
+                    if (elA) elA.innerText = data.Icompressor.toFixed(2) + ' A';
+                } else {
+                    const elT = document.getElementById(`mini-t1-${id}`);
+                    if (elT) elT.innerText = data.Texhaust.toFixed(1) + ' °C';
+                    const elA = document.getElementById(`mini-amp-${id}`);
+                    if (elA) elA.innerText = data.Imotor.toFixed(2) + ' A';
+                }
+            })
+            .catch(() => {
+                document.getElementById(`offline-${id}`).style.display = 'block';
+            });
+    });
+}
+
+        function updateDetailData() {
+    if (!currentDetailId) return;
+    const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
+    if (!card) return;
+    const isHVAC = card.dataset.type.includes('HVAC');
+    
+    fetch(`/api/device/${currentDetailId}/latest`)
+        .then(r => r.json())
+        .then(data => {
+            if (data.error) return;
+            const now = new Date(data.time);
+            
+            if (isHVAC) {
+                const delta = Math.abs(data.Treturn - data.Tsupply);
+                document.getElementById('detail-t1').innerText = data.Treturn.toFixed(1) + ' °C';
+                document.getElementById('detail-t2').innerText = data.Tsupply.toFixed(1) + ' °C';
+                document.getElementById('detail-t3').innerText = data.Tcoil.toFixed(1) + ' °C';
+                document.getElementById('detail-h1').innerText = data.RHreturn.toFixed(1) + ' %';
+                document.getElementById('detail-h2').innerText = data.RHsupply.toFixed(1) + ' %';
+                document.getElementById('detail-amp').innerText = data.Icompressor.toFixed(2) + ' A';
+                document.getElementById('detail-delta').innerText = delta.toFixed(1) + ' °C';
+                
+                pushToCharts(now, delta, data.Tcoil, data.Icompressor, true, isHVAC);
+            } else {
+                document.getElementById('detail-t1').innerText = data.Texhaust.toFixed(1) + ' °C';
+                document.getElementById('detail-h1').innerText = data.RHexhaust.toFixed(1) + ' %';
+                document.getElementById('detail-delta').innerText = data.Pressure.toFixed(1) + ' hPa';
+                document.getElementById('detail-amp').innerText = data.Imotor.toFixed(2) + ' A';
+                
+                pushToCharts(now, [data.Texhaust, data.RHexhaust], data.Pressure, data.Imotor, true, isHVAC);
+            }
+        })
+        .catch(e => console.error("Error updating detail data:", e));
+}
+
+        window.onload = () => {
+            updateMiniCards();
+            setInterval(updateMiniCards, 5000);
+            setInterval(updateDetailData, 5000);
+        };
+    </script>
+
+
+<script>
+/* DRYER TITLE FIX */
+document.addEventListener("DOMContentLoaded", function() {
+    setInterval(() => {
+        document.querySelectorAll('h3').forEach(el => {
+            if (el.innerText.includes('HVAC Daily Averages')) {
+                if (el.closest('.bg-white').innerText.includes('Dryer')) {
+                    el.innerText = 'Dryer Cycle Analytics';
+                }
+            }
+        });
+    }, 1000);
+});
+</script>
+</body>
+
+
+</html>

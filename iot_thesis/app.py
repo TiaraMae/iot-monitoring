@@ -1,0 +1,1506 @@
+import os
+import io
+import sys
+import json
+import time
+import math
+import random
+import threading
+import statistics
+from datetime import datetime, timedelta
+import numpy as np
+
+import psycopg2
+import psycopg2.errors
+import bcrypt
+import paho.mqtt.client as mqtt
+from openpyxl import Workbook
+from openpyxl.styles import Font, Alignment, PatternFill
+
+from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, send_file
+from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+
+app = Flask(__name__)
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'iot-thesis-secret-change-this-in-production')
+
+# --- CONFIGURATION ---
+MQTT_HOST = os.getenv("MQTT_HOST", "d57bf82836a7485d9b67b270c681fe6e.s1.eu.hivemq.cloud")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "8883"))
+MQTT_USER = os.getenv("MQTT_USER", "esp32user")
+MQTT_PASS = os.getenv("MQTT_PASS", "IoTTHESIS1")
+
+SENSOR_CALIBRATION_MAP = {}
+DEFAULT = 15.0
+
+UNPAIRED_CACHE = {} 
+DEDUPE_CACHE = {}
+EVENT_DEDUPE_CACHE = {}
+
+CLIENT_ID = f"FlaskBackend_{random.randint(10000, 99999)}"
+
+# --- MQTT Setup ---
+mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID, protocol=mqtt.MQTTv5)
+mqtt_client.username_pw_set(MQTT_USER, MQTT_PASS)
+mqtt_client.tls_set()
+
+login_manager = LoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
+
+from psycopg2 import pool
+try:
+    db_pool = psycopg2.pool.SimpleConnectionPool(
+        1, 10,
+        host=os.getenv("DB_HOST", "localhost"),
+        port=int(os.getenv("DB_PORT", "5432")),
+        dbname=os.getenv("DB_NAME", "iot_db"),
+        user=os.getenv("DB_USER", "postgres"),
+        password=os.getenv("DB_PASSWORD", "IOTTHESIS")
+    )
+except Exception as e:
+    print(f"DB Pool Error: {e}")
+    db_pool = None
+
+def get_conn():
+    try:
+        if db_pool:
+            return db_pool.getconn()
+    except Exception as e:
+        print(f"DB Get Connection Error: {e}")
+    return None
+
+def release_conn(conn):
+    if db_pool and conn:
+        db_pool.putconn(conn)
+
+class User(UserMixin):
+    def __init__(self, id, email, name):
+        self.id = id
+        self.email = email
+        self.name = name
+
+@login_manager.user_loader
+def load_user(user_id):
+    conn = get_conn()
+    if not conn: return None
+    cur = conn.cursor()
+    cur.execute("SELECT id, email, name FROM users WHERE id = %s", (user_id,))
+    row = cur.fetchone()
+    cur.close()
+    release_conn(conn)
+    return User(row[0], row[1], row[2]) if row else None
+
+def get_appliance_calibration(appliance_id):
+    conn = get_conn()
+    default_cal = {
+        'type': 'HVAC', 
+        't1_m': 1.0, 't1_c': 0.0, 
+        'h1_m': 1.0, 'h1_c': 0.0, 
+        't2_m': 1.0, 't2_c': 0.0, 
+        'h2_m': 1.0, 'h2_c': 0.0,
+        'tcoil_c': 0.0, 'icompressor_offset': 0.0, 'tcoil_m': 1.0,
+    }
+    if not conn: return default_cal
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT type, treturn_slope, treturn_intercept, 
+                   rhreturn_slope, rhreturn_intercept,
+                   tsupply_slope, tsupply_intercept, 
+                   rhsupply_slope, rhsupply_intercept,
+                   tcoil_offset, icompressor_offset, tcoil_slope
+            FROM appliances WHERE id = %s
+        """, (appliance_id,))
+        row = cur.fetchone()
+        cur.close()
+        release_conn(conn)
+        if not row: return default_cal
+        
+        return {
+            'type': row[0],
+            't1_m': row[1] if row[1] is not None else 1.0,
+            't1_c': row[2] if row[2] is not None else 0.0,
+            'h1_m': row[3] if row[3] is not None else 1.0,
+            'h1_c': row[4] if row[4] is not None else 0.0,
+            't2_m': row[5] if row[5] is not None else 1.0,
+            't2_c': row[6] if row[6] is not None else 0.0,
+            'h2_m': row[7] if row[7] is not None else 1.0,
+            'h2_c': row[8] if row[8] is not None else 0.0,
+            'tcoil_c': row[9] if row[9] is not None else 0.0,
+            'icompressor_offset': row[10] if row[10] is not None else 0.0,
+            'tcoil_m': row[11] if row[11] is not None else 1.0,
+        }
+    except Exception as e:
+        print(f"Error getting calibration: {e}")
+        if conn: release_conn(conn)
+        return default_cal
+
+def apply_calibration(raw_val, m, c):
+    if raw_val is None: return 0.0
+    return (float(raw_val) * float(m)) + float(c)
+
+def latest_row_for_appliance(appliance_id):
+    conn = get_conn()
+    if not conn: return None, None
+    cur = conn.cursor()
+    
+    cur.execute("SELECT type FROM appliances WHERE id = %s", (appliance_id,))
+    type_row = cur.fetchone()
+    if not type_row:
+        cur.close()
+        release_conn(conn)
+        return None, None
+        
+    dev_type = type_row[0]
+    
+    if "Dryer" in dev_type:
+        cur.execute("""
+            SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor
+            FROM dryer_readings dr
+            JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
+            WHERE sn.appliance_id = %s
+            ORDER BY dr.time DESC LIMIT 1
+        """, (appliance_id,))
+    else:
+        cur.execute("""
+            SELECT sr.time, sr.treturn, sr.rhreturn, sr.tsupply, sr.rhsupply, sr.tcoil, sr.icompressor
+            FROM hvac_readings sr
+            JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
+            WHERE sn.appliance_id = %s
+            ORDER BY sr.time DESC LIMIT 1
+        """, (appliance_id,))
+        
+    row = cur.fetchone()
+    cur.close()
+    release_conn(conn)
+    return row, dev_type
+
+def latest_n_rows_for_appliance(appliance_id, limit):
+    conn = get_conn()
+    if not conn: return [], "Unknown"
+    cur = conn.cursor()
+    
+    # FIX: We now fetch created_at to use as the absolute earliest cutoff date
+    cur.execute("SELECT type, baselining_since, created_at FROM appliances WHERE id = %s", (appliance_id,))
+    type_row = cur.fetchone()
+    if not type_row: return [], "Unknown"
+    
+    dev_type, base_since, created_at = type_row[0], type_row[1], type_row[2]
+    
+    # Use baselining_since if it exists, OTHERWISE strictly use the time it was paired
+    cutoff_time = base_since if base_since else created_at
+
+    if "Dryer" in dev_type:
+        cur.execute("""
+            SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor
+            FROM dryer_readings dr
+            JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
+            WHERE sn.appliance_id = %s AND dr.time >= %s
+            ORDER BY dr.time DESC LIMIT %s
+        """, (appliance_id, cutoff_time, limit))
+    else:
+        cur.execute("""
+            SELECT sr.time, sr.treturn, sr.rhreturn, sr.tsupply, sr.rhsupply, sr.tcoil, sr.icompressor
+            FROM hvac_readings sr
+            JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
+            WHERE sn.appliance_id = %s AND sr.time >= %s
+            ORDER BY sr.time DESC LIMIT %s
+        """, (appliance_id, cutoff_time, limit))
+        
+    rows = cur.fetchall()
+    cur.close()
+    release_conn(conn)
+    return rows[::-1], dev_type
+
+def get_appliances_for_user(user_id):
+    conn = get_conn()
+    if not conn: return []
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, name, type, brand, location, created_at, operational_status, sub_type
+        FROM appliances WHERE user_id = %s ORDER BY created_at
+    """, (user_id,))
+    rows = cur.fetchall()
+    cur.close()
+    release_conn(conn)
+    return [{'id':r[0],'name':r[1],'type':r[2],'brand':r[3],'location':r[4],
+             'created_at':r[5], 'status':r[6], 'sub_type':r[7]} for r in rows]
+
+def unpaired_nodes():
+    conn = get_conn()
+    if not conn: return []
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT sn.id, sn.mac_address, sn.status
+        FROM sensor_nodes sn
+        WHERE sn.status = 'unpaired' AND sn.last_seen >= NOW() - INTERVAL '30 seconds'
+        ORDER BY sn.id
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    release_conn(conn)
+    return [{'id':r[0], 'mac_address':r[1], 'status':r[2], 'readings':{}} for r in rows]
+
+def get_all_nodes_for_user(user_id):
+    conn = get_conn()
+    if not conn: return []
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT sn.id, sn.mac_address, sn.status, a.name
+        FROM sensor_nodes sn
+        LEFT JOIN appliances a ON sn.appliance_id = a.id
+        WHERE a.user_id = %s OR sn.status = 'unpaired'
+        ORDER BY sn.id
+    """, (user_id,))
+    rows = cur.fetchall()
+    cur.close()
+    release_conn(conn)
+    return [{'id':r[0], 'mac_address':r[1], 'status':r[2], 'appliance':r[3] or 'Unpaired'} for r in rows]
+
+def send_node_command(mac, command_str):
+    if not mqtt_client.is_connected():
+        print(f"Cannot send command {command_str} to {mac}, MQTT disconnected.")
+        return
+    mqtt_client.publish(f"iot/nodes/{mac}/control", command_str)
+    print(f"Backend -> Node {mac}: {command_str}")
+
+def do_set_baseline_calculated(appliance_id, since_time):
+    conn = get_conn()
+    if not conn: return False, "DB connection error"
+    cur = conn.cursor()
+    
+    cur.execute("SELECT sub_type, type FROM appliances WHERE id = %s", (appliance_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        release_conn(conn)
+        return False, "Not found"
+        
+    sub_type, dev_type = row[0], row[1]
+    if not sub_type: sub_type = 'noninverter'
+    
+    if "Dryer" in dev_type:
+        cur.execute("""
+            SELECT dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor
+            FROM dryer_readings dr
+            JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
+            WHERE sn.appliance_id = %s AND dr.time >= %s
+        """, (appliance_id, since_time))
+    else:
+        cur.execute("""
+            SELECT sr.treturn, sr.rhreturn, sr.tsupply, sr.rhsupply, sr.tcoil, sr.icompressor
+            FROM hvac_readings sr
+            JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
+            WHERE sn.appliance_id = %s AND sr.time >= %s
+        """, (appliance_id, since_time))
+        
+    rows = cur.fetchall()
+    
+    if len(rows) < 30:
+        return False, "Not enough data recorded. Make sure AC/Dryer is running."
+        
+    cal = get_appliance_calibration(appliance_id)
+    
+    try:
+        if "Dryer" in dev_type:
+            heat_rises, currents, pressures = [], [], []
+            rhex_list = []
+            
+            for r in rows:
+                t_ex = apply_calibration(r[0], cal['t1_m'], cal['t1_c'])
+                rh_ex = apply_calibration(r[1], cal['h1_m'], cal['h1_c'])
+                heat_rises.append(t_ex)
+                rhex_list.append(rh_ex)
+                pressures.append(r[2] or 0.0)
+                currents.append(r[3] or 0)
+                
+            hr_mean = statistics.mean(heat_rises)
+            hr_std = statistics.stdev(heat_rises) if len(heat_rises)>1 else 0
+            
+            rhex_mean = statistics.mean(rhex_list)
+            rhex_std = statistics.stdev(rhex_list) if len(rhex_list)>1 else 0
+            
+            pres_mean = statistics.mean(pressures)
+            pres_std = statistics.stdev(pressures) if len(pressures)>1 else 0
+            
+            curr_mean = statistics.mean(currents)
+            
+            cur.execute("""
+                UPDATE appliances
+                SET baseline_heat_rise_mean=%s, baseline_heat_rise_std=%s,
+                    baseline_rh_exhaust_mean=%s, baseline_rh_exhaust_std=%s,
+                    baseline_pressure_mean=%s, baseline_pressure_std=%s,
+                    threshold_current_min=%s, threshold_current_max=%s,
+                    operational_status='normal'
+                WHERE id=%s
+            """, (hr_mean, hr_std, rhex_mean, rhex_std, pres_mean, pres_std, curr_mean*0.8, curr_mean*1.5, appliance_id))
+            
+        else:
+            deltas, coil_temps, currents = [], [], []
+            rhret_list, rhsup_list = [], []
+            
+            for r in rows:
+                t_ret = apply_calibration(r[0], cal['t1_m'], cal['t1_c'])
+                rh_ret = apply_calibration(r[1], cal['h1_m'], cal['h1_c'])
+                t_sup = apply_calibration(r[2], cal['t2_m'], cal['t2_c'])
+                rh_sup = apply_calibration(r[3], cal['h2_m'], cal['h2_c'])
+                
+                deltas.append(abs(t_ret - t_sup))
+                rhret_list.append(rh_ret)
+                rhsup_list.append(rh_sup)
+                coil_temps.append(apply_calibration(r[4], cal['tcoil_m'], cal['tcoil_c']))
+                currents.append((r[5] or 0) + cal['icompressor_offset'])
+                
+            dt_mean = statistics.mean(deltas)
+            dt_std = statistics.stdev(deltas) if len(deltas)>1 else 0
+            
+            rhret_mean = statistics.mean(rhret_list)
+            rhret_std = statistics.stdev(rhret_list) if len(rhret_list)>1 else 0
+            
+            rhsup_mean = statistics.mean(rhsup_list)
+            rhsup_std = statistics.stdev(rhsup_list) if len(rhsup_list)>1 else 0
+            
+            tc_mean = statistics.mean(coil_temps)
+            tc_std = statistics.stdev(coil_temps) if len(coil_temps)>1 else 0
+            
+            curr_mean = statistics.mean(currents)
+            curr_std = 0
+            if sub_type == 'inverter':
+                curr_std = statistics.stdev(currents) if len(currents)>1 else 0
+                cur.execute("""
+                    UPDATE appliances
+                    SET baseline_deltat_mean=%s, baseline_deltat_std=%s,
+                        baseline_tcoil_mean=%s, baseline_tcoil_std=%s,
+                        baseline_rh_return_mean=%s, baseline_rh_return_std=%s,
+                        baseline_rh_supply_mean=%s, baseline_rh_supply_std=%s,
+                        baseline_current_mean=%s, baseline_current_std=%s,
+                        operational_status='normal'
+                    WHERE id=%s
+                """, (dt_mean, dt_std, tc_mean, tc_std, rhret_mean, rhret_std, rhsup_mean, rhsup_std, curr_mean, curr_std, appliance_id))
+            else:
+                cur.execute("""
+                    UPDATE appliances
+                    SET baseline_deltat_mean=%s, baseline_deltat_std=%s,
+                        baseline_tcoil_mean=%s, baseline_tcoil_std=%s,
+                        baseline_rh_return_mean=%s, baseline_rh_return_std=%s,
+                        baseline_rh_supply_mean=%s, baseline_rh_supply_std=%s,
+                        threshold_current_min=%s, threshold_current_max=%s,
+                        operational_status='normal'
+                    WHERE id=%s
+                """, (dt_mean, dt_std, tc_mean, tc_std, rhret_mean, rhret_std, rhsup_mean, rhsup_std, curr_mean*0.8, curr_mean*1.5, appliance_id))
+        
+        conn.commit()
+        return True, "Baseline Set Successfully!"
+    except Exception as e:
+        conn.rollback()
+        return False, str(e)
+    finally:
+        cur.close()
+        release_conn(conn)
+
+def handle_node_events(mac, payload):
+    try:
+        data = json.loads(payload)
+        event_type = data.get("event")
+        
+        event_hash = f"{mac}_{event_type}"
+        now_time = time.time()
+        
+        if event_hash in EVENT_DEDUPE_CACHE:
+            if now_time - EVENT_DEDUPE_CACHE[event_hash] < 5.0:
+                print(f"Duplicate event {event_type} from {mac} ignored (in-memory dedup).")
+                return
+                
+        EVENT_DEDUPE_CACHE[event_hash] = now_time
+        
+        conn = get_conn()
+        if not conn: return
+        cur = conn.cursor()
+        
+        cur.execute("SELECT appliance_id, status FROM sensor_nodes WHERE mac_address = %s", (mac,))
+        node_row = cur.fetchone()
+        
+        if event_type == "event_request_config":
+            if not node_row or not node_row[0] or node_row[1] != 'paired':
+                send_node_command(mac, "settype:unpaired")
+            else:
+                appliance_id = node_row[0]
+                cur.execute("SELECT type, operational_status FROM appliances WHERE id = %s", (appliance_id,))
+                row = cur.fetchone()
+                if row:
+                    app_type, app_status = row[0], row[1]
+                    
+                    if app_status == 'calibrating':
+                        cur.execute("UPDATE appliances SET operational_status='calibration_needed' WHERE id=%s", (appliance_id,))
+                        conn.commit()
+                        app_status = 'calibration_needed'
+                    elif app_status == 'baselining':
+                        cur.execute("UPDATE appliances SET operational_status='pending_baseline' WHERE id=%s", (appliance_id,))
+                        conn.commit()
+                        app_status = 'pending_baseline'
+                        
+                    if "Dryer" in app_type:
+                        send_node_command(mac, "settype:dryer")
+                    else:
+                        send_node_command(mac, "settype:hvac")
+                        
+                    if app_status == 'pending_baseline':
+                        send_node_command(mac, "restore:baselinepending")
+                    elif app_status == 'normal':
+                        send_node_command(mac, "restore:normal")
+                    else:
+                        send_node_command(mac, "restore:calibrationneeded")
+            cur.close()
+            release_conn(conn)
+            return
+
+        if not node_row or not node_row[0] or node_row[1] != 'paired':
+            if event_type in ["event_button2_action_request"]:
+                send_node_command(mac, "actiondenied:busy")
+            else:
+                send_node_command(mac, "baselinefailack")
+            cur.close()
+            release_conn(conn)
+            return
+            
+        appliance_id = node_row[0]
+        cur.execute("SELECT operational_status, type FROM appliances WHERE id = %s", (appliance_id,))
+        stat_row = cur.fetchone()
+        if not stat_row:
+            cur.close()
+            release_conn(conn)
+            return
+            
+        status, app_type = stat_row[0], stat_row[1]
+        
+        if event_type == "event_button2_action_request":
+            if "Dryer" in app_type:
+                if status in ['calibration_needed', 'pending_baseline', 'normal']:
+                    cur.execute("UPDATE appliances SET operational_status = 'baselining', baselining_since = NOW() WHERE id = %s", (appliance_id,))
+                    conn.commit()
+                    send_node_command(mac, "baselinestartack")
+                    print(f"Node {mac} (Dryer) 10-Minute Baseline Recording Started.")
+                elif status == 'baselining':
+                    send_node_command(mac, "baselinefailack")
+            else:
+                if status == 'calibration_needed':
+                    cur.execute("UPDATE appliances SET operational_status = 'calibrating', calibration_started_at = NOW() WHERE id = %s", (appliance_id,))
+                    conn.commit()
+                    send_node_command(mac, "startcalibration")
+                    print(f"Node {mac} (HVAC) Calibration STARTED.")
+                elif status in ['pending_baseline', 'normal']:
+                    cur.execute("UPDATE appliances SET operational_status = 'baselining', baselining_since = NOW() WHERE id = %s", (appliance_id,))
+                    conn.commit()
+                    send_node_command(mac, "baselinestartack")
+                    print(f"Node {mac} (HVAC) 10-Minute Baseline Recording Started.")
+                elif status in ['calibrating', 'baselining']:
+                    send_node_command(mac, "actiondenied:busy")
+                    print(f"Node {mac} Action denied. Device is currently busy.")
+
+        elif event_type == "calibration_success_request":
+            if status == 'calibrating':
+                base_data = data.get("base")
+                final_data = data.get("final")
+                
+                if base_data and final_data:
+                    try:
+                        t1_delta = abs(float(base_data.get("t1", 0)) - float(final_data.get("t1", 0)))
+                        t2_delta = abs(float(base_data.get("t2", 0)) - float(final_data.get("t2", 0)))
+                        t3_delta = abs(float(base_data.get("t3", 0)) - float(final_data.get("t3", 0)))
+                    except (ValueError, TypeError):
+                        t1_delta = 0.0
+                        t2_delta = 0.0
+                        t3_delta = 0.0
+                        
+                    if t3_delta < 7.5 or t2_delta < 2.5 or t1_delta < 2.5:
+                        cur.execute("UPDATE appliances SET operational_status='calibration_needed' WHERE id=%s", (appliance_id,))
+                        conn.commit()
+                        send_node_command(mac, "calibrationfailack")
+                        print (f"Node {mac} Calibration REJECTED.\n"
+                               f"Sensors didn't drop enough T3:{t3_delta:.1f}C, T2:{t2_delta:.1f}C, T1:{t1_delta:.1f}C.\n"
+                               f"Check physical sensor placement!")
+                    else:
+                        def safe_polyfit(x1, x2, y1, y2):
+                            try:
+                                x1, x2, y1, y2 = float(x1), float(x2), float(y1), float(y2)
+                                if abs(x1 - x2) < 0.1: return 1.0, 0.0
+                                coeffs = np.polyfit([x1, x2], [y1, y2], 1)
+                                return float(coeffs[0]), float(coeffs[1])
+                            except Exception:
+                                return 1.0, 0.0
+
+                        t1_m, t1_c = safe_polyfit(base_data.get("t1", 0), final_data.get("t1", 0), base_data.get("t3", 0), final_data.get("t3", 0))
+                        t2_m, t2_c = safe_polyfit(base_data.get("t2", 0), final_data.get("t2", 0), base_data.get("t3", 0), final_data.get("t3", 0))
+                        h2_m, h2_c = safe_polyfit(base_data.get("h2", 0), final_data.get("h2", 0), base_data.get("h1", 0), final_data.get("h1", 0))
+                        
+                        cur.execute("""
+                            UPDATE appliances SET 
+                                treturn_slope=%s, treturn_intercept=%s, 
+                                rh_return_slope=1.0, rhreturn_intercept=0.0,
+                                tsupply_slope=%s, tsupply_intercept=%s,
+                                rhsupply_slope=%s, rhsupply_intercept=%s,
+                                tcoil_slope=1.0, tcoil_offset=0.0,
+                                operational_status='pending_baseline'
+                            WHERE id=%s AND operational_status='calibrating'
+                        """, (t1_m, t1_c, t2_m, t2_c, h2_m, h2_c, appliance_id))
+                        conn.commit()
+                        send_node_command(mac, "calibrationsuccessack")
+                        print(f"Node {mac} Multi-Point Linear Calibration SUCCESS.")
+                else:
+                    send_node_command(mac, "calibrationfailack")
+
+        elif event_type == "calibration_fail_request":
+            if status == 'calibrating':
+                cur.execute("UPDATE appliances SET operational_status = 'calibration_needed' WHERE id = %s", (appliance_id,))
+                conn.commit()
+                send_node_command(mac, "calibrationfailack")
+
+        elif event_type == "maintenance_request":
+            if status == 'normal':
+                cur.execute("INSERT INTO sensor_events (sensor_node_mac, event_type, timestamp) VALUES (%s,%s,%s)",
+                            (mac, 'maintenance', datetime.now()))
+                conn.commit()
+                send_node_command(mac, "maintenanceack")
+
+        cur.close()
+        release_conn(conn)
+    except Exception as e:
+        print(f"Error handling event: {e}")
+
+def on_mqtt_connect(client, userdata, flags, rc, properties=None):
+    if rc == 0:
+        print(f"MQTT Connected Successfully! ID: {client._client_id}")
+        client.subscribe("iot/nodes/+/events")
+        client.subscribe("iot/nodes/+/telemetry")
+    else:
+        print(f"MQTT Connection Failed with Code {rc}")
+
+def on_mqtt_message(client, userdata, msg):
+    try:
+        payload = msg.payload.decode()
+        topic = msg.topic
+        parts = topic.split("/")
+        
+        # Topic is "iot/nodes/<mac>/events" or "iot/nodes/<mac>/telemetry"
+        if len(parts) < 4: return
+        mac = parts[2]
+        
+        if "events" in topic:
+            handle_node_events(mac, payload)
+            return
+            
+        elif "telemetry" in topic:
+            safe_str = payload.replace('nan', 'null')
+            data = json.loads(safe_str)
+            
+            if "ago_ms" in data:
+                actual_time = datetime.now() - timedelta(milliseconds=int(data["ago_ms"]))
+            else:
+                actual_time = datetime.now() - timedelta(seconds=int(data.get("ago", 0)))
+                
+            if mac in DEDUPE_CACHE:
+                diff = abs((actual_time - DEDUPE_CACHE[mac]).total_seconds())
+                if diff < 1.0:
+                    return 
+            
+            DEDUPE_CACHE[mac] = actual_time
+
+            conn = get_conn()
+            if conn:
+                cur = conn.cursor()
+                cur.execute("""
+                    SELECT sn.id, sn.appliance_id, a.type, a.operational_status 
+                    FROM sensor_nodes sn 
+                    LEFT JOIN appliances a ON sn.appliance_id = a.id
+                    WHERE sn.mac_address = %s
+                """, (mac,))
+                row = cur.fetchone()
+                
+                if not row:
+                    cur.execute("INSERT INTO sensor_nodes (mac_address, status, last_seen) VALUES (%s, 'unpaired', NOW()) RETURNING id", (mac,))
+                    sensor_node_id = cur.fetchone()[0]
+                    appliance_id = None
+                    appliance_type = None
+                    conn.commit()
+                else:
+                    sensor_node_id, appliance_id, appliance_type, _ = row
+                    cur.execute("UPDATE sensor_nodes SET last_seen = NOW() WHERE id = %s", (sensor_node_id,))
+                    conn.commit()
+                
+                raw_amps = data.get("CurrentA", 0.0) 
+                final_amps = 0.0
+                if raw_amps is not None:
+                    try:
+                        final_amps = float(raw_amps)
+                    except:
+                        final_amps = 0.0
+
+                if appliance_type:
+                    if "Dryer" in appliance_type:
+                        cur.execute("""
+                            INSERT INTO dryer_readings (sensor_node_id, texhaust, rh_exhaust, pressure, imotor, time)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                        """, (sensor_node_id, data.get("BME280Temp"), data.get("BME280Hum"), data.get("BME280Pres"), final_amps, actual_time))
+                    else:
+                        cur.execute("""
+                            INSERT INTO hvac_readings (sensor_node_id, treturn, rhreturn, tsupply, rh_upply, tcoil, icompressor, time)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (sensor_node_id, data.get("DHT1Temp"), data.get("DHT1Hum"), data.get("DHT2Temp"), data.get("DHT2Hum"), data.get("DS18B20Temp"), final_amps, actual_time))
+                    conn.commit()
+                else:
+                    UNPAIRED_CACHE[sensor_node_id] = {
+                        "data": data,
+                        "amps": final_amps,
+                        "time": actual_time,
+                        "mac": mac
+                    }
+                    
+                cur.close()
+                release_conn(conn)
+    except Exception as e:
+        print(f"MQTT Message Error: {e}")
+
+mqtt_client.on_connect = on_mqtt_connect
+mqtt_client.on_message = on_mqtt_message
+
+# --- ROUTES ---
+
+@app.route('/')
+def landing():
+    return redirect(url_for('dashboard')) if current_user.is_authenticated else redirect(url_for('login'))
+
+@app.route('/dashboard')
+@login_required
+def dashboard():
+    return render_template('dashboard.html', 
+                           user=current_user, 
+                           appliances=get_appliances_for_user(current_user.id),
+                           unpaired_nodes=unpaired_nodes(),
+                           all_nodes=get_all_nodes_for_user(current_user.id))
+
+@app.route('/api/unpaired_nodes')
+@login_required
+def api_unpaired():
+    return jsonify(unpaired_nodes())
+
+@app.route('/api/node/<int:node_id>/latest')
+@login_required
+def api_node_latest(node_id):
+    if node_id in UNPAIRED_CACHE:
+        cache = UNPAIRED_CACHE[node_id]
+        d = cache["data"]
+        
+        if "BME280Temp" in d:
+            return jsonify({
+                "time": cache["time"].isoformat(),
+                "Texhaust": d.get("BME280Temp", 0),
+                "RHexhaust": d.get("BME280Hum", 0),
+                "Pressure": d.get("BME280Pres", 0),
+                "Imotor": cache.get("amps", 0),
+                "cal_state": d.get("cal_state", "idle")
+            })
+        else:
+            return jsonify({
+                "time": cache["time"].isoformat(),
+                "Treturn": d.get("DHT1Temp", 0),
+                "RHreturn": d.get("DHT1Hum", 0),
+                "Tsupply": d.get("DHT2Temp", 0),
+                "RHsupply": d.get("DHT2Hum", 0),
+                "Tcoil": d.get("DS18B20Temp", 0),
+                "Icompressor": cache.get("amps", 0),
+                "cal_state": d.get("cal_state", "idle")
+            })
+            
+    return jsonify({'error': 'Node not in cache'}), 404
+
+@app.route('/api/device/<int:appliance_id>/latest')
+@login_required
+def api_device_latest(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify({'error': 'db'}), 500
+    cur = conn.cursor()
+    cur.execute("SELECT operational_status, type FROM appliances WHERE id = %s", (appliance_id,))
+    status_row = cur.fetchone()
+    cur.close()
+    release_conn(conn)
+    
+    if not status_row: return jsonify({'error': 'not found'}), 404
+    
+    if "Dryer" not in status_row[1] and status_row[0] in ['calibration_needed', 'calibrating', 'pending_baseline']:
+        return jsonify({'error': 'No data until baseline start'}), 200
+
+    row_data, dev_type = latest_row_for_appliance(appliance_id)
+    if not row_data: return jsonify({'error':'no data'}), 404
+    
+    cal = get_appliance_calibration(appliance_id)
+    if 't1_m' not in cal: return jsonify({'error': 'Device deleted or math missing'}), 404
+    
+    time_val = row_data[0]
+    
+    if "Dryer" in dev_type:
+        return jsonify({
+            'time': time_val.isoformat(),
+            'Texhaust': apply_calibration(row_data[1], cal['t1_m'], cal['t1_c']),
+            'RHexhaust': apply_calibration(row_data[2], cal['h1_m'], cal['h1_c']),
+            'Pressure': row_data[3] or 0.0,
+            'Imotor': max(0.0, (row_data[4] or 0) + cal['icompressor_offset']),
+            'type': dev_type
+        })
+    else:
+        return jsonify({
+            'time': time_val.isoformat(),
+            'Treturn': apply_calibration(row_data[1], cal['t1_m'], cal['t1_c']),
+            'RHreturn': apply_calibration(row_data[2], cal['h1_m'], cal['h1_c']),
+            'Tsupply': apply_calibration(row_data[3], cal['t2_m'], cal['t2_c']),
+            'RHsupply': apply_calibration(row_data[4], cal['h2_m'], cal['h2_c']),
+            'Tcoil': apply_calibration(row_data[5], cal['tcoil_m'], cal['tcoil_c']),
+            'Icompressor': (row_data[6] or 0) + cal['icompressor_offset'],
+            'type': dev_type
+        })
+
+@app.route('/api/device/<int:appliance_id>/latest_n')
+@login_required
+def api_device_latest_n(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify([]), 500
+    cur = conn.cursor()
+    cur.execute("SELECT operational_status, type FROM appliances WHERE id = %s", (appliance_id,))
+    status_row = cur.fetchone()
+    cur.close()
+    release_conn(conn)
+    
+    if not status_row or ("Dryer" not in status_row[1] and status_row[0] in ['calibration_needed', 'calibrating', 'pending_baseline']):
+        return jsonify([]), 200
+
+    limit = int(request.args.get('limit', 120))
+    rows, dev_type = latest_n_rows_for_appliance(appliance_id, limit)
+    
+    cal = get_appliance_calibration(appliance_id)
+    if 't1_m' not in cal: return jsonify([])
+
+    result = []
+    for r in rows:
+        time_val = r[0]
+        if "Dryer" in dev_type:
+            result.append({
+                'time': time_val.isoformat(),
+                'Texhaust': apply_calibration(r[1], cal['t1_m'], cal['t1_c']),
+                'RHexhaust': apply_calibration(r[2], cal['h1_m'], cal['h1_c']),
+                'Pressure': r[3] or 0.0,
+                'Imotor': max(0.0, (r[4] or 0) + cal['icompressor_offset'])
+            })
+        else:
+            result.append({
+                'time': time_val.isoformat(),
+                'Treturn': apply_calibration(r[1], cal['t1_m'], cal['t1_c']),
+                'RHreturn': apply_calibration(r[2], cal['h1_m'], cal['h1_c']),
+                'Tsupply': apply_calibration(r[3], cal['t2_m'], cal['t2_c']),
+                'RHsupply': apply_calibration(r[4], cal['h2_m'], cal['h2_c']),
+                'Tcoil': apply_calibration(r[5], cal['tcoil_m'], cal['tcoil_c']),
+                'Icompressor': (r[6] or 0) + cal['icompressor_offset']
+            })
+            
+    return jsonify(result)
+
+@app.route('/api/device/<int:appliance_id>/table_data')
+@login_required
+def get_table_data(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify([]), 500
+    cur = conn.cursor()
+    cur.execute("SELECT operational_status, type FROM appliances WHERE id = %s", (appliance_id,))
+    status_row = cur.fetchone()
+    cur.close()
+    release_conn(conn)
+    
+    if not status_row or ("Dryer" not in status_row[1] and status_row[0] in ['calibration_needed', 'calibrating', 'pending_baseline']):
+        return jsonify([]), 200
+
+    rows, dev_type = latest_n_rows_for_appliance(appliance_id, 120)
+    cal = get_appliance_calibration(appliance_id)
+    if 't1_m' not in cal: return jsonify([])
+
+    result = []
+    for r in reversed(rows):
+        time_val = r[0]
+        t1 = apply_calibration(r[1], cal['t1_m'], cal['t1_c'])
+        h1 = apply_calibration(r[2], cal['h1_m'], cal['h1_c'])
+        
+        if "Dryer" in dev_type:
+            result.append({
+                'time': time_val.isoformat(),
+                'Texhaust': round(t1, 2),
+                'RHexhaust': round(h1, 2),
+                'Pressure': round(r[3] or 0.0, 2),
+                'Imotor': round(max(0.0, (r[4] or 0) + cal['icompressor_offset']), 2)
+            })
+        else:
+            t2 = apply_calibration(r[3], cal['t2_m'], cal['t2_c'])
+            h2 = apply_calibration(r[4], cal['h2_m'], cal['h2_c'])
+            t3 = apply_calibration(r[5], cal['tcoil_m'], cal['tcoil_c'])
+            amp = (r[6] or 0) + cal['icompressor_offset']
+            
+            result.append({
+                'time': time_val.isoformat(),
+                'Treturn': round(t1, 2),
+                'Tsupply': round(t2, 2),
+                'Tcoil': round(t3, 2),
+                'RHreturn': round(h1, 2),
+                'RHsupply': round(h2, 2),
+                'Icompressor': round(amp, 2),
+                'DeltaT': round(abs(t1 - t2), 2)
+            })
+            
+    return jsonify(result)
+
+@app.route('/api/device/<int:appliance_id>/maintenance_logs')
+@login_required
+def get_maintenance_logs(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify([]), 500
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT sn.mac_address FROM sensor_nodes sn WHERE sn.appliance_id = %s LIMIT 1
+    """, (appliance_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close(); release_conn(conn)
+        return jsonify([]), 200
+        
+    cur.execute("""
+        SELECT timestamp FROM sensor_events 
+        WHERE sensor_node_mac = %s AND event_type = 'maintenance' 
+        ORDER BY timestamp DESC
+    """, (row[0],))
+    rows = cur.fetchall()
+    cur.close(); release_conn(conn)
+    
+    return jsonify([r[0].isoformat() for r in rows])
+
+@app.route('/api/device/<int:appliance_id>/export_excel')
+@login_required
+def export_excel(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify({'error': 'db error'}), 500
+    cur = conn.cursor()
+    
+    cur.execute("SELECT name, type, sub_type, operational_status FROM appliances WHERE id = %s", (appliance_id,))
+    app_info = cur.fetchone()
+    if not app_info:
+        cur.close(); release_conn(conn)
+        return jsonify({'error': 'Not found'}), 404
+        
+    app_name, dev_type, sub_type, status = app_info
+    
+    if status != 'normal':
+        cur.close(); release_conn(conn)
+        return jsonify({'error': 'Export only available after baseline is set'}), 400
+
+    start_date = request.args.get('start_date', None)
+    end_date = request.args.get('end_date', None)
+    
+    query_params = [appliance_id]
+    date_filter = ""
+    
+    if start_date:
+        date_filter += " AND r.time >= %s"
+        query_params.append(start_date)
+    if end_date:
+        date_filter += " AND r.time <= %s"
+        query_params.append(end_date)
+        
+    if "Dryer" in dev_type:
+        query = f"""
+            SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor
+            FROM dryer_readings r
+            JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+            WHERE sn.appliance_id = %s {date_filter}
+            ORDER BY r.time ASC
+        """
+    else:
+        query = f"""
+            SELECT r.time, r.treturn, r.rhreturn, r.tsupply, r.rhsupply, r.tcoil, r.icompressor
+            FROM hvac_readings r
+            JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+            WHERE sn.appliance_id = %s {date_filter}
+            ORDER BY r.time ASC
+        """
+        
+    cur.execute(query, tuple(query_params))
+    readings = cur.fetchall()
+    
+    cal = get_appliance_calibration(appliance_id)
+    cur.close(); release_conn(conn)
+    
+    if not readings:
+        return jsonify({'error': 'No data in range'}), 404
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sensor Data"
+    
+    header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+    header_font = Font(color="FFFFFF", bold=True)
+    
+    ws.merge_cells('A1:D1')
+    ws['A1'] = f"Device: {app_name}"
+    ws['A1'].font = Font(size=14, bold=True)
+    
+    ws.merge_cells('A2:D2')
+    ws['A2'] = f"Type: {dev_type} ({sub_type if sub_type else ''})"
+    
+    ws.merge_cells('A3:D3')
+    ws['A3'] = f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+    
+    ws.merge_cells('A4:D4')
+    ws['A4'] = f"Data Points: {len(readings)}"
+
+    row_idx = 6
+    if "Dryer" in dev_type:
+        headers = ["Timestamp", "Exhaust Temp (°C)", "Exhaust RH (%)", "Pressure (hPa)", "Current (A)"]
+    else:
+        headers = ["Timestamp", "Return Temp (°C)", "Supply Temp (°C)", "Coil Temp (°C)", "Return RH (%)", "Supply RH (%)", "Current (A)", "Delta-T (°C)"]
+
+    for col, header in enumerate(headers, start=1):
+        cell = ws.cell(row=row_idx, column=col, value=header)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center")
+
+    for r in readings:
+        row_idx += 1
+        t1 = apply_calibration(r[1], cal['t1_m'], cal['t1_c'])
+        h1 = apply_calibration(r[2], cal['h1_m'], cal['h1_c'])
+        
+        ws.cell(row=row_idx, column=1, value=r[0].strftime('%Y-%m-%d %H:%M:%S'))
+        
+        if "Dryer" in dev_type:
+            ws.cell(row=row_idx, column=2, value=round(t1, 2))
+            ws.cell(row=row_idx, column=3, value=round(h1, 2))
+            ws.cell(row=row_idx, column=4, value=round(r[3] or 0.0, 2))
+            ws.cell(row=row_idx, column=5, value=round(r[4] or 0, 2))
+        else:
+            t2 = apply_calibration(r[3], cal['t2_m'], cal['t2_c'])
+            h2 = apply_calibration(r[4], cal['h2_m'], cal['h2_c'])
+            t3 = apply_calibration(r[5], cal['tcoil_m'], cal['tcoil_c'])
+            amp = (r[6] or 0) + cal['icompressor_offset']
+            
+            ws.cell(row=row_idx, column=2, value=round(t1, 2))
+            ws.cell(row=row_idx, column=3, value=round(t2, 2))
+            ws.cell(row=row_idx, column=4, value=round(t3, 2))
+            ws.cell(row=row_idx, column=5, value=round(h1, 2))
+            ws.cell(row=row_idx, column=6, value=round(h2, 2))
+            ws.cell(row=row_idx, column=7, value=round(amp, 2))
+            ws.cell(row=row_idx, column=8, value=round(abs(t1 - t2), 2))
+
+    from openpyxl.utils import get_column_letter
+    for col_idx in range(1, len(headers) + 1):
+        max_length = 0
+        col_letter = get_column_letter(col_idx)
+        for row_idx in range(6, ws.max_row + 1):
+            cell_value = ws.cell(row=row_idx, column=col_idx).value
+            if cell_value:
+                max_length = max(max_length, len(str(cell_value)))
+        ws.column_dimensions[col_letter].width = max_length + 2
+        
+    conn = get_conn()
+    if conn:
+        cur = conn.cursor()
+        cur.execute("SELECT sn.mac_address FROM sensor_nodes sn WHERE sn.appliance_id = %s LIMIT 1", (appliance_id,))
+        mac_row = cur.fetchone()
+        maintenance_rows = []
+        if mac_row:
+            cur.execute("SELECT timestamp FROM sensor_events WHERE sensor_node_mac = %s AND event_type = 'maintenance' ORDER BY timestamp DESC", (mac_row[0],))
+            maintenance_rows = cur.fetchall()
+        cur.close()
+        release_conn(conn)
+        
+        ws2 = wb.create_sheet(title="Maintenance Log")
+        ws2['A1'] = f"Device: {app_name}"
+        ws2['A1'].font = Font(size=14, bold=True)
+        
+        ws2['A3'] = "Maintenance Date"
+        ws2['A3'].fill = header_fill
+        ws2['A3'].font = header_font
+        ws2['A3'].alignment = Alignment(horizontal="center")
+        
+        row_idx2 = 3
+        for r_maint in maintenance_rows:
+            row_idx2 += 1
+            ws2.cell(row=row_idx2, column=1, value=r_maint[0].strftime('%Y-%m-%d %H:%M:%S'))
+            
+        ws2.column_dimensions['A'].width = 24
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+
+    filename = f"{app_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return send_file(
+        output,
+        mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        as_attachment=True,
+        download_name=filename
+    )
+
+@app.route('/api/device/<int:appliance_id>/spc_limits')
+@login_required
+def api_spc_limits(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify({'error': 'db'}), 500
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT type, sub_type, 
+               baseline_deltat_mean, baseline_deltat_std, 
+               baseline_tcoil_mean, baseline_tcoil_std,
+               baseline_current_mean, baseline_current_std,
+               threshold_current_min, threshold_current_max,
+               operational_status,
+               baseline_pressure_mean, baseline_pressure_std,
+               baselining_since
+        FROM appliances WHERE id = %s
+    """, (appliance_id,))
+    db_row = cur.fetchone()
+    cur.close()
+    release_conn(conn)
+    
+    if not db_row: return jsonify({'error': 'not found'}), 404
+    
+    dev_type, subtype, status = db_row[0], db_row[1], db_row[10]
+    baselining_since = db_row[13]
+    
+    # Calculate exact remaining time on the server
+    remaining = 0
+    if status == 'baselining' and baselining_since:
+        elapsed = (datetime.now() - baselining_since).total_seconds()
+        remaining = max(0, int(600 - elapsed))
+    
+    is_inverter = (subtype == 'inverter')
+    def spc(mean, std, tmin=None, tmax=None):
+        m = float(mean) if mean else 0.0
+        s = float(std) if std else 0.0
+        if is_inverter or (tmin is None and tmax is None):
+            return {"mean": m, "ucl": m + 3*s, "lcl": m - 3*s}
+        else:
+            ucl_val = float(tmax) if tmax is not None else (m + 3*s)
+            lcl_val = float(tmin) if tmin is not None else (m - 3*s)
+            return {"mean": m, "ucl": ucl_val, "lcl": lcl_val}
+
+    return jsonify({
+        "type": dev_type,
+        "subtype": subtype,
+        "status": status,
+        "remaining_seconds": remaining,
+        "deltat": spc(db_row[2], db_row[3]),
+        "tcoil": spc(db_row[4], db_row[5]),
+        "current": spc(db_row[6], db_row[7], db_row[8], db_row[9]),
+        "pressure": spc(db_row[11] if len(db_row)>11 else 0, db_row[12] if len(db_row)>12 else 0)
+    })
+
+@app.route('/api/device/<int:appliance_id>/hvac_analytics')
+@login_required
+def hvac_analytics(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify({'error': 'db'}), 500
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT type, baseline_current_mean, threshold_current_min FROM appliances WHERE id = %s", (appliance_id,))
+        row = cur.fetchone()
+        if not row or "HVAC" not in row[0]:
+            return jsonify({'error': 'Not HVAC'}), 400
+            
+        base_current = row[1] if row[1] else (row[2] if row[2] else 1.0)
+        
+        cur.execute("""
+            SELECT DATE(r.time) as date, 
+                   AVG(r.treturn), AVG(r.tsupply), AVG(r.tcoil)
+            FROM hvac_readings r
+            JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+            WHERE sn.appliance_id = %s AND r.i_compressor >= %s
+            GROUP BY DATE(r.time)
+            ORDER BY DATE(r.time) DESC
+            LIMIT 30
+        """, (appliance_id, base_current * 0.5))
+        
+        readings = cur.fetchall()
+        result = []
+        for r in readings:
+            result.append({
+                "date": r[0].isoformat(),
+                "avg_intake": round(r[1], 2),
+                "avg_exit": round(r[2], 2),
+                "avg_coil": round(r[3], 2)
+            })
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            cur.close()
+            release_conn(conn)
+
+@app.route('/api/device/<int:appliance_id>/dryer_analytics')
+@login_required
+def dryer_analytics(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify({'error': 'db'}), 500
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT type FROM appliances WHERE id = %s", (appliance_id,))
+        row = cur.fetchone()
+        if not row or "Dryer" not in row[0]:
+            return jsonify({'error': 'Not a dryer'}), 400
+            
+        cur.execute("""
+            SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor
+            FROM dryer_readings r
+            JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+            WHERE sn.appliance_id = %s
+            ORDER BY r.time ASC
+        """, (appliance_id,))
+        readings = cur.fetchall()
+        
+        if not readings: return jsonify([])
+        
+        cycles = []
+        in_cycle = False
+        current_cycle = {}
+        
+        ignition_count = 0
+        last_i = 0
+        peaking = False
+        peak_consecutive_drops = 0
+        
+        for r in readings:
+            time_val, tex, rhex, press, imotor = r
+            imotor = float(imotor) if imotor else 0.0
+            
+            if imotor - last_i > 0.2: 
+                peaking = True
+                peak_consecutive_drops = 0
+            elif peaking and imotor < last_i:
+                peak_consecutive_drops += 1
+                if peak_consecutive_drops >= 2:
+                    ignition_count += 1
+                    peaking = False
+                    peak_consecutive_drops = 0
+            else:
+                peak_consecutive_drops = 0
+                
+            last_i = imotor
+
+            if imotor > 0.5 and not in_cycle:
+                in_cycle = True
+                current_cycle = {
+                    "start_time": time_val,
+                    "min_temp": tex,
+                    "max_temp": tex,
+                    "start_rh": rhex,
+                    "_rh_history": [],
+                    "ignition_count": 0,
+                    "_readings_count": 0,
+                    "_sum_current": 0
+                }
+                ignition_count = 0
+                last_i = imotor
+                peaking = False
+                peak_consecutive_drops = 0
+                
+            if in_cycle:
+                current_cycle["max_temp"] = max(current_cycle["max_temp"], tex)
+                current_cycle["min_temp"] = min(current_cycle["min_temp"], tex)
+                current_cycle["_rh_history"].append(rhex)
+                current_cycle["_readings_count"] += 1
+                current_cycle["_sum_current"] += imotor
+
+            if imotor < 0.2 and in_cycle:
+                in_cycle = False
+                current_cycle["end_time"] = time_val
+                duration = current_cycle["end_time"] - current_cycle["start_time"]
+                current_cycle["duration_minutes"] = round(duration.total_seconds() / 60, 1)
+                
+                current_cycle["ignition_count"] = ignition_count
+                current_cycle["avg_current"] = round(current_cycle["_sum_current"] / current_cycle["_readings_count"], 2)
+                
+                last_10 = current_cycle["_rh_history"][-10:] if len(current_cycle["_rh_history"]) > 10 else current_cycle["_rh_history"]
+                current_cycle["end_rh_avg"] = round(sum(last_10) / len(last_10), 2) if last_10 else current_cycle["start_rh"]
+                
+                del current_cycle["_rh_history"]
+                del current_cycle["_readings_count"]
+                del current_cycle["_sum_current"]
+                
+                current_cycle["start_time"] = current_cycle["start_time"].isoformat()
+                current_cycle["end_time"] = current_cycle["end_time"].isoformat()
+                
+                cycles.append(current_cycle)
+                current_cycle = {}
+
+        return jsonify(cycles)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            cur.close()
+            release_conn(conn)
+
+@app.route('/api/device/<int:appliance_id>/cancel_baseline', methods=['POST'])
+@login_required
+def cancel_baseline(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify({'error': 'db_error'}), 500
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT sn.mac_address, a.operational_status, a.type
+            FROM appliances a
+            JOIN sensor_nodes sn ON sn.appliance_id = a.id
+            WHERE a.id = %s
+        """, (appliance_id,))
+        row = cur.fetchone()
+        if not row: return jsonify({'error': 'Device not found'}), 404
+        
+        mac, status, app_type = row
+        
+        cur.execute("UPDATE appliances SET operational_status = 'pending_baseline' WHERE id = %s", (appliance_id,))
+        conn.commit()
+        
+        send_node_command(mac, "baselinefailack")
+        
+        return jsonify({"success": True, "message": "Baseline cancelled"})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            cur.close()
+            release_conn(conn)
+
+@app.route('/api/device/<int:appliance_id>/remote_baseline', methods=['POST'])
+@login_required
+def remote_baseline(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify({'error': 'db_error'}), 500
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT sn.mac_address, a.operational_status, a.type
+            FROM appliances a
+            JOIN sensor_nodes sn ON sn.appliance_id = a.id
+            WHERE a.id = %s
+        """, (appliance_id,))
+        row = cur.fetchone()
+        if not row: return jsonify({'error': 'Device not found'}), 404
+        
+        mac, status, app_type = row
+        
+        if status in ['calibration_needed', 'calibrating']:
+            return jsonify({'error': 'Must calibrate first'}), 400
+            
+        cur.execute("UPDATE appliances SET operational_status = 'baselining', baselining_since = NOW() WHERE id = %s", (appliance_id,))
+        conn.commit()
+        
+        send_node_command(mac, "baselinestartack")
+        
+        return jsonify({"success": True, "message": "Baseline started remotely"})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            cur.close()
+            release_conn(conn)
+
+@app.route('/devices/pair', methods=['POST'])
+@login_required
+def pair_device():
+    name = request.form.get('name')
+    dev_type = request.form.get('type')
+    node_id = request.form.get('node_id')
+    sub_type = request.form.get('sub_type', 'noninverter')
+
+    if not name or not dev_type or not node_id:
+        flash('All fields are required', 'error')
+        return redirect(url_for('dashboard'))
+
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        initial_status = 'pending_baseline' if "Dryer" in dev_type else 'calibration_needed'
+        default_offset = -0.111 if "Dryer" in dev_type else -0.033
+        
+        cur.execute("""
+            INSERT INTO appliances (user_id, name, type, location, brand, operational_status, sub_type, icompressor_offset) 
+            VALUES (%s, %s, %s, 'Home', 'Generic', %s, %s, %s) RETURNING id
+        """, (current_user.id, name, dev_type, initial_status, sub_type, default_offset))
+        appliance_id = cur.fetchone()[0]
+
+        cur.execute("UPDATE sensor_nodes SET appliance_id = %s, status = 'paired' WHERE id = %s RETURNING mac_address", (appliance_id, node_id))
+        mac = cur.fetchone()[0]
+
+        if int(node_id) in UNPAIRED_CACHE:
+            del UNPAIRED_CACHE[int(node_id)]
+            
+        conn.commit()
+        
+        cmd = "settype:dryer" if "Dryer" in dev_type else "settype:hvac"
+        send_node_command(mac, cmd)
+
+        if "Dryer" in dev_type:
+            flash(f'{name} added! Device is ready for 10-Minute Baseline Training.', 'success')
+        else:
+            flash(f'{name} added! Please hold BOTH physical buttons on the device to Calibrate.', 'success')
+            
+    except Exception as e:
+        conn.rollback()
+        flash(f'Error pairing device: {e}', 'error')
+    finally:
+        cur.close()
+        release_conn(conn)
+
+    return redirect(url_for('dashboard'))
+
+@app.route('/devices/<int:appliance_id>/forget', methods=['POST'])
+@login_required
+def forget_device(appliance_id):
+    conn = get_conn()
+    if conn:
+        cur = conn.cursor()
+        cur.execute("SELECT operational_status, type FROM appliances WHERE id = %s", (appliance_id,))
+        stat_row = cur.fetchone()
+        
+        cur.execute("SELECT sn.mac_address FROM sensor_nodes sn WHERE sn.appliance_id = %s", (appliance_id,))
+        mac_row = cur.fetchone()
+        
+        cur.execute("UPDATE sensor_nodes SET appliance_id = NULL, status = 'unpaired' WHERE appliance_id = %s", (appliance_id,))
+        cur.execute("DELETE FROM appliances WHERE id = %s", (appliance_id,))
+        conn.commit()
+        cur.close()
+        release_conn(conn)
+        
+        if mac_row:
+            send_node_command(mac_row[0], "settype:unpaired")
+            print(f"Device forgotten: sent settype:unpaired to {mac_row[0]}")
+            
+        flash('Device forgotten.', 'success')
+    return redirect(url_for('dashboard'))
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    if request.method == 'GET':
+        return render_template('signup.html')
+    
+    name = request.form.get('name')
+    email = request.form.get('email')
+    password = request.form.get('password')
+    
+    if not name or not email or not password:
+        flash('All fields are required', 'error')
+        return redirect(url_for('signup'))
+        
+    hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+    
+    conn = get_conn()
+    if conn:
+        cur = conn.cursor()
+        try:
+            cur.execute("INSERT INTO users (email, password_hash, name) VALUES (%s, %s, %s) RETURNING id", (email, hashed, name))
+            user_id = cur.fetchone()[0]
+            conn.commit()
+            user = User(user_id, email, name)
+            login_user(user)
+            return redirect(url_for('dashboard'))
+        except psycopg2.errors.UniqueViolation:
+            conn.rollback()
+            flash('Email already exists', 'error')
+        except Exception as e:
+            conn.rollback()
+            flash(f'Error: {e}', 'error')
+        finally:
+            cur.close()
+            release_conn(conn)
+            
+    return redirect(url_for('signup'))
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'GET':
+        return render_template('login.html')
+        
+    email = request.form.get('email')
+    password = request.form.get('password')
+    
+    conn = get_conn()
+    if conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id, email, name, password_hash FROM users WHERE email = %s", (email,))
+        row = cur.fetchone()
+        cur.close()
+        release_conn(conn)
+        
+        if row and bcrypt.checkpw(password.encode('utf-8'), row[3].encode('utf-8')):
+            user = User(row[0], row[1], row[2])
+            login_user(user)
+            return redirect(url_for('dashboard'))
+            
+        flash('Invalid credentials', 'error')
+    return redirect(url_for('login'))
+
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    return redirect(url_for('landing'))
+
+# --- THREAD FOR CALCULATING BASELINE ---
+def baseline_calc_thread():
+    while True:
+        time.sleep(30)
+        conn = get_conn()
+        if not conn: continue
+        cur = conn.cursor()
+        
+        cur.execute("SELECT id, baselining_since FROM appliances WHERE operational_status = 'baselining'")
+        baselining_devices = cur.fetchall()
+        
+        cur.execute("""
+            UPDATE appliances 
+            SET operational_status = 'calibration_needed'
+            WHERE operational_status = 'calibrating' 
+            AND id IN (
+                SELECT appliance_id FROM sensor_nodes WHERE last_seen < NOW() - INTERVAL '30 seconds'
+            )
+        """)
+        
+        for dev_id, since in baselining_devices:
+            if not since: continue
+            diff = datetime.now() - since
+            
+            if diff.total_seconds() > 600:
+                print(f"10 minutes elapsed for device {dev_id}. Processing baseline.")
+                success, msg = do_set_baseline_calculated(dev_id, since)
+                if success:
+                    print(f"Baseline SUCCESS for device {dev_id}")
+                    cur.execute("SELECT sn.mac_address FROM sensor_nodes sn WHERE sn.appliance_id = %s", (dev_id,))
+                    mac_row = cur.fetchone()
+                    if mac_row:
+                        send_node_command(mac_row[0], "baselinesuccessack")
+                else:
+                    print(f"Baseline FAIL for device {dev_id}: {msg}")
+                    cur.execute("UPDATE appliances SET operational_status = 'pending_baseline' WHERE id = %s", (dev_id,))
+                    conn.commit()
+                    cur.execute("SELECT sn.mac_address FROM sensor_nodes sn WHERE sn.appliance_id = %s", (dev_id,))
+                    mac_row = cur.fetchone()
+                    if mac_row:
+                        send_node_command(mac_row[0], "baselinefailack")
+                        
+        conn.commit()
+        cur.close()
+        release_conn(conn)
+
+if __name__ == '__main__':
+    mqtt_client.connect(MQTT_HOST, MQTT_PORT, 60)
+    mqtt_client.loop_start()
+    
+    calc_thread = threading.Thread(target=baseline_calc_thread, daemon=True)
+    calc_thread.start()
+    
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
