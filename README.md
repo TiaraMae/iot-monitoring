@@ -70,8 +70,8 @@ Each appliance is paired with a custom ESP32-C3 sensor node that transmits data 
 
 ### Sensor Node Hardware
 - **MCU:** ESP32-C3 Super Mini
-- **HVAC Sensors:** 2× DHT22 (return & supply), DS18B20 (coil), SCT-013 (compressor current)
-- **Dryer Sensors:** BME280 (exhaust temp/humidity/pressure), SCT-013 (motor current)
+- **HVAC Sensors:** 2× DHT22 (return & supply), DS18B20 (coil), ZHT103C (compressor current) — *cf=11.0, deductor=0.033*
+- **Dryer Sensors:** BME280 (exhaust temp/humidity/pressure), SCT-013 (motor current) — *cf=37.0, deductor=0.111*
 - **Connectivity:** Wi-Fi + MQTT over TLS
 - **Power:** USB-C / 5V adapter
 
