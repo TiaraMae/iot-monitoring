@@ -4,7 +4,10 @@
 > **Author:** Tiara Mae Muljana  
 > **Institution:** Swiss German University
 
-This repository contains the embedded firmware, backend services, and web dashboard for an IoT-based predictive maintenance system targeting residential split-type HVAC units and commercial gas dryers. The system collects real-time sensor telemetry, establishes Statistical Process Control (SPC) baselines, and triggers maintenance alerts when operational parameters deviate from normal behavior.
+This repository contains two distinct systems developed for an IoT-based predictive maintenance thesis:
+
+1. **`iot_thesis/`** — The **full production system** for residential split-type HVAC units and commercial gas dryers. It collects real-time sensor telemetry, establishes Statistical Process Control (SPC) baselines, runs calibration workflows, and triggers maintenance alerts.
+2. **`gas_dryer_test/`** — A **standalone PCB validation testbed** used to verify that the custom sensor node PCB can successfully read BME280 and SCT-013 data, transmit via MQTT, and display it on a local Flask dashboard. This is a simplified prototype and is **not** part of the main production architecture.
 
 ---
 
@@ -39,6 +42,8 @@ Each appliance is paired with a custom ESP32-C3 sensor node that transmits data 
 
 ## Architecture
 
+### Production System (`iot_thesis/`)
+
 ```
 ┌─────────────────┐     WiFi + TLS      ┌─────────────────┐
 │  ESP32 Sensor   │ ───────────────────▶│   HiveMQ Cloud  │
@@ -60,6 +65,8 @@ Each appliance is paired with a custom ESP32-C3 sensor node that transmits data 
               │  (Browser)      │
               └─────────────────┘
 ```
+
+> **Note:** `gas_dryer_test/` is a separate, standalone test system for early PCB validation and is not shown in this architecture diagram.
 
 ### Sensor Node Hardware
 - **MCU:** ESP32-C3 Super Mini
@@ -93,12 +100,12 @@ iot-monitoring/
 ├── README.md                 # This file
 ├── requirements.txt          # Python dependencies
 │
-├── gas_dryer_test/           # Dryer-specific testbed & prototype
-│   ├── esp32dryertest.py     # Flask backend for BME dryer testing
+├── gas_dryer_test/           # Standalone PCB validation testbed
+│   ├── esp32dryertest.py     # Simple Flask backend for BME + SCT testing
 │   └── esp32dryertest/       # Arduino firmware (BME280 + SCT)
 │       └── esp32dryertest.ino
 │
-└── iot_thesis/               # Main production application
+└── iot_thesis/               # Full production application
     ├── app.py                # Flask backend (MQTT, DB, API, auth, SPC)
     ├── fix_db_columns.py     # DB migration utility
     ├── templates/            # Jinja2 HTML templates
@@ -203,9 +210,9 @@ Supports both HVAC and Dryer modes with automatic appliance type detection via b
 - Automatic Wi-Fi and MQTT reconnection with LED status indication
 - Buzzer feedback for user actions
 
-### Dryer Test Node (`gas_dryer_test/esp32dryertest/`)
+### PCB Validation Test Node (`gas_dryer_test/esp32dryertest/`)
 
-Prototype firmware focused on BME280 + SCT-013 validation.
+Standalone test firmware used to validate that the custom PCB can read BME280 and SCT-013 sensors and transmit data over MQTT. This is **not** the production dryer node used by `iot_thesis`.
 
 **Key Features:**
 - Current-based run detection (appliance ON/OFF state)
