@@ -183,14 +183,113 @@ python esp32dryertest.py
 
 ### Database Setup
 
-The application expects a PostgreSQL database with the following core tables (schema initialization scripts will be added in a future update):
+The application expects a PostgreSQL database named `iot_db` with the following tables. Schema initialization scripts will be added in a future update.
 
-- `users` — Authentication and profile data
-- `appliances` — Registered HVAC / Dryer devices
-- `sensor_nodes` — ESP32 node registry and pairing status
-- `hvac_readings` — Time-series data for HVAC units
-- `dryer_readings` — Time-series data for dryers
-- `sensor_events` — Maintenance and calibration event log
+#### `users`
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | SERIAL PK | |
+| `email` | TEXT UNIQUE | Login identifier |
+| `password_hash` | TEXT | bcrypt hash |
+| `name` | TEXT | Display name |
+| `created_at` | TIMESTAMPTZ | Auto |
+
+#### `appliances` (52 columns)
+| Column | Type | Used By | Notes |
+|--------|------|---------|-------|
+| `id` | SERIAL PK | Both | |
+| `user_id` | INT FK | Both | → users |
+| `name` | TEXT | Both | Device display name |
+| `type` | TEXT | Both | `Split HVAC` or `Gas Dryer` |
+| `brand` | TEXT | Both | e.g. `Generic` |
+| `location` | TEXT | Both | e.g. `Home` |
+| `created_at` | TIMESTAMPTZ | Both | |
+| `operational_status` | TEXT | Both | `calibration_needed` → `calibrating` → `pending_baseline` → `baselining` → `normal` |
+| `sub_type` | TEXT | HVAC | `inverter` or `noninverter` |
+| `baselining_since` | TIMESTAMPTZ | Both | Timestamp when baseline recording started |
+| `calibration_started_at` | TIMESTAMPTZ | HVAC | Reserved |
+| **Calibration** | | | Slope/intercept from ice-bath calibration (HVAC only) |
+| `treturn_slope` | REAL | HVAC | DHT1 temp correction |
+| `treturn_intercept` | REAL | HVAC | |
+| `rhreturn_slope` | REAL | HVAC | DHT1 humidity correction |
+| `rhreturn_intercept` | REAL | HVAC | |
+| `tsupply_slope` | REAL | HVAC | DHT2 temp correction |
+| `tsupply_intercept` | REAL | HVAC | |
+| `rhsupply_slope` | REAL | HVAC | DHT2 humidity correction |
+| `rhsupply_intercept` | REAL | HVAC | |
+| `tcoil_slope` | REAL | HVAC | DS18B20 correction (currently 1.0) |
+| `tcoil_offset` | REAL | HVAC | DS18B20 offset (currently 0.0) |
+| `icompressor_offset` | REAL | Both | Current sensor deductor (HVAC: -0.033, Dryer: -0.111) |
+| **Reserved offsets** | | | *Future use — not populated by current code* |
+| `treturn_offset` … `imotor_offset` | REAL | — | 10 placeholder offset columns |
+| **HVAC baselines** | | | Statistical values from 10-min baseline |
+| `baseline_deltat_mean` | REAL | HVAC | Mean ΔT (return − supply) |
+| `baseline_deltat_std` | REAL | HVAC | |
+| `baseline_tcoil_mean` | REAL | HVAC | Mean coil temperature |
+| `baseline_tcoil_std` | REAL | HVAC | |
+| `baseline_rhreturn_mean` | REAL | HVAC | Mean return RH |
+| `baseline_rhreturn_std` | REAL | HVAC | |
+| `baseline_rhsupply_mean` | REAL | HVAC | Mean supply RH |
+| `baseline_rhsupply_std` | REAL | HVAC | |
+| `baseline_current_mean` | REAL | HVAC | Mean compressor current |
+| `baseline_current_std` | REAL | HVAC | |
+| **Dryer baselines** | | | Statistical values from 10-min baseline |
+| `baseline_heat_rise_mean` | REAL | Dryer | Mean exhaust temp rise |
+| `baseline_heat_rise_std` | REAL | Dryer | |
+| `baseline_rhexhaust_mean` | REAL | Dryer | Reserved for future use |
+| `baseline_rhexhaust_std` | REAL | Dryer | |
+| `baseline_rhambient_mean` | REAL | Dryer | Reserved for future use |
+| `baseline_rhambient_std` | REAL | Dryer | |
+| `baseline_pressure_mean` | REAL | Dryer | Mean exhaust pressure |
+| `baseline_pressure_std` | REAL | Dryer | |
+| **Thresholds** | | | SPC control limits |
+| `threshold_current_min` | REAL | Both | Current lower bound (non-inverter / dryer) |
+| `threshold_current_max` | REAL | Both | Current upper bound |
+| `threshold_texhaust_max` | REAL | Dryer | Reserved |
+
+#### `sensor_nodes`
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | SERIAL PK | |
+| `mac_address` | TEXT | ESP32 Wi-Fi MAC |
+| `status` | TEXT | `unpaired` or `paired` |
+| `appliance_id` | INT FK | NULL until paired |
+| `created_at` | TIMESTAMPTZ | |
+| `last_seen` | TIMESTAMPTZ | Updated on every telemetry receipt |
+
+#### `hvac_readings`
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | SERIAL PK | |
+| `sensor_node_id` | INT FK | → sensor_nodes |
+| `time` | TIMESTAMPTZ | Actual sample time (adjusted for `ago_ms`) |
+| `treturn` | REAL | Return air temperature (°C) |
+| `rhreturn` | REAL | Return air RH (%) |
+| `tsupply` | REAL | Supply air temperature (°C) |
+| `rhsupply` | REAL | Supply air RH (%) |
+| `tcoil` | REAL | Evaporator coil temperature (°C) |
+| `icompressor` | REAL | Compressor current (A) |
+
+#### `dryer_readings`
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | SERIAL PK | |
+| `sensor_node_id` | INT FK | → sensor_nodes |
+| `time` | TIMESTAMPTZ | Actual sample time |
+| `texhaust` | REAL | Exhaust temperature (°C) |
+| `rh_exhaust` | REAL | Exhaust RH (%) |
+| `tambient` | REAL | *Reserved — not populated* |
+| `rh_ambient` | REAL | *Reserved — not populated* |
+| `imotor` | REAL | Motor current (A) |
+| `pressure` | REAL | Exhaust pressure (hPa) |
+
+#### `sensor_events`
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | SERIAL PK | |
+| `sensor_node_mac` | TEXT | MAC address of originating node |
+| `event_type` | TEXT | e.g. `maintenance` |
+| `timestamp` | TIMESTAMPTZ | Event time |
 
 ---
 

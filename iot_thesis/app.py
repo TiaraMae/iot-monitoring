@@ -328,7 +328,7 @@ def do_set_baseline_calculated(appliance_id, since_time):
             cur.execute("""
                 UPDATE appliances
                 SET baseline_heat_rise_mean=%s, baseline_heat_rise_std=%s,
-                    baseline_rh_exhaust_mean=%s, baseline_rh_exhaust_std=%s,
+                    baseline_rhexhaust_mean=%s, baseline_rhexhaust_std=%s,
                     baseline_pressure_mean=%s, baseline_pressure_std=%s,
                     threshold_current_min=%s, threshold_current_max=%s,
                     operational_status='normal'
@@ -371,8 +371,8 @@ def do_set_baseline_calculated(appliance_id, since_time):
                     UPDATE appliances
                     SET baseline_deltat_mean=%s, baseline_deltat_std=%s,
                         baseline_tcoil_mean=%s, baseline_tcoil_std=%s,
-                        baseline_rh_return_mean=%s, baseline_rh_return_std=%s,
-                        baseline_rh_supply_mean=%s, baseline_rh_supply_std=%s,
+                        baseline_rhreturn_mean=%s, baseline_rhreturn_std=%s,
+                        baseline_rhsupply_mean=%s, baseline_rhsupply_std=%s,
                         baseline_current_mean=%s, baseline_current_std=%s,
                         operational_status='normal'
                     WHERE id=%s
@@ -382,8 +382,8 @@ def do_set_baseline_calculated(appliance_id, since_time):
                     UPDATE appliances
                     SET baseline_deltat_mean=%s, baseline_deltat_std=%s,
                         baseline_tcoil_mean=%s, baseline_tcoil_std=%s,
-                        baseline_rh_return_mean=%s, baseline_rh_return_std=%s,
-                        baseline_rh_supply_mean=%s, baseline_rh_supply_std=%s,
+                        baseline_rhreturn_mean=%s, baseline_rhreturn_std=%s,
+                        baseline_rhsupply_mean=%s, baseline_rhsupply_std=%s,
                         threshold_current_min=%s, threshold_current_max=%s,
                         operational_status='normal'
                     WHERE id=%s
@@ -536,7 +536,7 @@ def handle_node_events(mac, payload):
                         cur.execute("""
                             UPDATE appliances SET 
                                 treturn_slope=%s, treturn_intercept=%s, 
-                                rh_return_slope=1.0, rhreturn_intercept=0.0,
+                                rhreturn_slope=1.0, rhreturn_intercept=0.0,
                                 tsupply_slope=%s, tsupply_intercept=%s,
                                 rhsupply_slope=%s, rhsupply_intercept=%s,
                                 tcoil_slope=1.0, tcoil_offset=0.0,
@@ -643,7 +643,7 @@ def on_mqtt_message(client, userdata, msg):
                         """, (sensor_node_id, data.get("BME280Temp"), data.get("BME280Hum"), data.get("BME280Pres"), final_amps, actual_time))
                     else:
                         cur.execute("""
-                            INSERT INTO hvac_readings (sensor_node_id, treturn, rhreturn, tsupply, rh_upply, tcoil, icompressor, time)
+                            INSERT INTO hvac_readings (sensor_node_id, treturn, rhreturn, tsupply, rhsupply, tcoil, icompressor, time)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         """, (sensor_node_id, data.get("DHT1Temp"), data.get("DHT1Hum"), data.get("DHT2Temp"), data.get("DHT2Hum"), data.get("DS18B20Temp"), final_amps, actual_time))
                     conn.commit()

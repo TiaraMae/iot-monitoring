@@ -215,51 +215,69 @@ default_offset = -0.111 if "Dryer" in dev_type else -0.033
 
 #### `users`
 ```sql
-id | email | password_hash | name
+id | email | password_hash | name | created_at
 ```
 
-#### `appliances`
-Core fields:
+#### `appliances` (52 columns)
 ```sql
-id | user_id | name | type | brand | location
-| operational_status | sub_type | created_at | baselining_since
-| treturn_slope | treturn_intercept | rh_return_slope | rhreturn_intercept
-| tsupply_slope | tsupply_intercept | rhsupply_slope | rhsupply_intercept
+-- Identity & Status
+id | user_id | name | type | brand | location | created_at
+| operational_status | sub_type | baselining_since | calibration_started_at
+
+-- Calibration slopes & intercepts (HVAC ice-bath calibration)
+| treturn_slope | treturn_intercept
+| rhreturn_slope | rhreturn_intercept
+| tsupply_slope | tsupply_intercept
+| rhsupply_slope | rhsupply_intercept
 | tcoil_slope | tcoil_offset | icompressor_offset
+
+-- Reserved offset columns (future use, currently unused)
+| treturn_offset | rhreturn_offset | tsupply_offset | rhsupply_offset | tcoil_offset
+| texhaust_offset | rhexhaust_offset | tambient_offset | rhambient_offset | imotor_offset
+
+-- HVAC baselines (set after 10-min baseline recording)
 | baseline_deltat_mean | baseline_deltat_std
 | baseline_tcoil_mean | baseline_tcoil_std
-| baseline_rh_return_mean | baseline_rh_return_std
-| baseline_rh_supply_mean | baseline_rh_supply_std
+| baseline_rhreturn_mean | baseline_rhreturn_std
+| baseline_rhsupply_mean | baseline_rhsupply_std
 | baseline_current_mean | baseline_current_std
-| threshold_current_min | threshold_current_max
+
+-- Dryer baselines (set after 10-min baseline recording)
 | baseline_heat_rise_mean | baseline_heat_rise_std
-| baseline_rh_exhaust_mean | baseline_rh_exhaust_std
+| baseline_rhexhaust_mean | baseline_rhexhaust_std
+| baseline_rhambient_mean | baseline_rhambient_std
 | baseline_pressure_mean | baseline_pressure_std
+
+-- Thresholds
+| threshold_current_min | threshold_current_max | threshold_texhaust_max
 ```
 
 **Operational statuses:** `calibration_needed`, `calibrating`, `pending_baseline`, `baselining`, `normal`
 
 #### `sensor_nodes`
 ```sql
-id | mac_address | status | appliance_id | last_seen
+id | mac_address | status | appliance_id | created_at | last_seen
 ```
 Status values: `unpaired`, `paired`
 
 #### `hvac_readings`
 ```sql
-id | sensor_node_id | time | treturn | rhreturn | tsupply | rh_upply | tcoil | icompressor
+id | sensor_node_id | time | treturn | rhreturn | tsupply | rhsupply | tcoil | icompressor
 ```
-⚠️ **Note:** `rh_upply` is the actual DB column name (typo from early development). Do not "fix" it in schema unless you migrate the DB.
 
 #### `dryer_readings`
 ```sql
-id | sensor_node_id | time | texhaust | rh_exhaust | pressure | imotor
+id | sensor_node_id | time | texhaust | rh_exhaust | tambient | rh_ambient | imotor | pressure
 ```
+**Note:** `tambient` and `rh_ambient` exist in schema but are **not populated** by the current firmware. Only exhaust (`texhaust`, `rh_exhaust`) and pressure data are recorded.
 
 #### `sensor_events`
 ```sql
 id | sensor_node_mac | event_type | timestamp
 ```
+
+#### `dryer_bme_readings`
+Legacy table from early testbed iterations. Not used by the production `iot_thesis` system.
 
 ### 5.4 API Routes (Key Endpoints)
 
@@ -310,7 +328,7 @@ For each appliance type, baseline statistics establish control limits:
 
 ### 5.7 Known Code Artifacts
 
-- **`rh_upply` typo** in `hvac_readings` INSERT (line ~646). This matches the actual database column name.
+- **`rhsupply`** in `hvac_readings` — the DB column name is `rhsupply` (not `rh_upply`).
 - **Hardcoded fallback credentials** remain in `os.getenv(..., default)` calls. These defaults are for backward compatibility only.
 - **`ago_ms` vs `ago`** — telemetry payload uses `ago` (seconds) in some contexts and `ago_ms` in others. Backend handles both.
 
@@ -359,7 +377,7 @@ The following can be set in a `.env` file (see `.env.example`):
 
 2. **Do not commit `__pycache__/` or `.env`.** Both are in `.gitignore`.
 
-3. **Do not "fix" the `rh_upply` typo** in SQL INSERTs unless you also migrate the production database schema.
+3. **Column naming convention:** The DB uses `rhreturn_*`, `rhsupply_*`, `rhexhaust_*`, `rhambient_*` (no underscore between `rh` and the location). Code must match this exactly.
 
 4. **Calibration factors are appliance-type dependent:**
    - HVAC (ZHT103C): factor = 11.0
