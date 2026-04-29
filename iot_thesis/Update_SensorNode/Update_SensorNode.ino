@@ -84,9 +84,7 @@ bool isPaired = false;
 bool calibrationAcked = false;
 bool calibrationSavePending = false;
 
-bool baselineRequestPending = false;
 bool baselineInProgress = false;
-bool baselineAcked = false;
 
 bool maintenanceRequestPending = false;
 
@@ -109,8 +107,16 @@ float sumCurrentA = 0;
 // =========================
 unsigned long lastLedBlink = 0;
 bool ledState = LOW;
+bool ledBlinkPhase = false;
 unsigned long lastWiFiRetry = 0;
 unsigned long lastMqttRetry = 0;
+unsigned long lastCheckinTime = 0;
+
+// =========================
+// LED STATE MACHINE
+// =========================
+unsigned long lastIdleBlink = 0;
+float lastAvgCurrent = 0.0;
 
 // =========================
 // CALIBRATION STATE
@@ -167,6 +173,14 @@ void beepShort(int count, int onMs = 120, int offMs = 120) {
     buzzerOff();
     if (i < count - 1) delay(offMs);
   }
+
+  // Periodic checkin when idle so backend doesn't mark us offline
+  const unsigned long CHECKIN_INTERVAL_MS = 600000UL;  // 10 minutes
+  if (client.connected() && lastAvgCurrent < 0.4 && (millis() - lastCheckinTime >= CHECKIN_INTERVAL_MS)) {
+    lastCheckinTime = millis();
+    String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"checkin\"}";
+    publishEventJson(ev);
+  }
 }
 
 void beepLongFail(unsigned long ms = 1200) {
@@ -199,9 +213,6 @@ String workflowLabel() {
   if (calibState == CALIBBASELINEWAIT || calibState == CALIBRUNNING) return "calibrating";
   if (calibrationSavePending) return "calib-saving";
   if (!calibrationAcked) return "need-calibration";
-  if (baselineRequestPending) return "baseline-requested";
-  if (baselineInProgress) return "baselining";
-  if (!baselineAcked) return "need-baseline";
   if (maintenanceRequestPending) return "maintenance-requested";
   return "ready";
 }
@@ -258,18 +269,19 @@ void publishTelemetry(const String& payload) {
   digitalWrite(PINLED, HIGH);
 }
 
+unsigned long lastConfigRequestTime = 0;
+
 void requestBackendConfig() {
   String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"event_request_config\"}";
   publishEventJson(ev);
+  lastConfigRequestTime = millis();
   Serial.println("Requested backend config.");
 }
 
 void resetRuntimeFlowForPair() {
   calibrationAcked = false;
   calibrationSavePending = false;
-  baselineRequestPending = false;
   baselineInProgress = false;
-  baselineAcked = false;
   maintenanceRequestPending = false;
   calibState = CALIBIDLE;
 }
@@ -299,6 +311,10 @@ void applyApplianceType(const String& newType) {
 
   if (wasUnpaired || changed) {
     resetRuntimeFlowForPair();
+    // Dryers do not require calibration — allow maintenance immediately
+    if (applianceType == "Dryer") {
+      calibrationAcked = true;
+    }
     beepShort(1, 100, 0); // 1 Beep for pairing success
     Serial.print("PAIR OK -> ");
     Serial.println(applianceType);
@@ -372,31 +388,21 @@ void callback(char* topic, byte* payload, unsigned int length) {
     }
 
     // --- STATE RESTORE HANDLERS ---
+    if (message == "maintenancedenied") {
+        Serial.println("MAINTENANCE DENIED -> status not ready");
+        maintenanceRequestPending = false;
+        printWorkflow();
+        return;
+    }
     if (message == "restore:calibrationneeded") {
         calibrationAcked = false;
-        baselineAcked = false;
-        baselineRequestPending = false;
-        baselineInProgress = false;
         calibState = CALIBIDLE;
         Serial.println("RESTORE -> need calibration");
         printWorkflow();
         return;
     }
-    if (message == "restore:baselinepending") {
-        calibrationAcked = true;
-        baselineAcked = false;
-        baselineRequestPending = false;
-        baselineInProgress = false;
-        calibState = CALIBIDLE;
-        Serial.println("RESTORE -> need baseline");
-        printWorkflow();
-        return;
-    }
     if (message == "restore:normal") {
         calibrationAcked = true;
-        baselineAcked = true;
-        baselineRequestPending = false;
-        baselineInProgress = false;
         calibState = CALIBIDLE;
         Serial.println("RESTORE -> normal (maintenance allowed)");
         printWorkflow();
@@ -433,38 +439,30 @@ void callback(char* topic, byte* payload, unsigned int length) {
         beepSuccess();
         calibrationAcked = true;
         calibrationSavePending = false;
-        baselineRequestPending = false;
-        baselineInProgress = false;
-        baselineAcked = false;
         calibState = CALIBIDLE;
         printWorkflow();
         return;
     }
 
-    // Baseline
+    // Baseline (web-triggered only)
     if (message == "baselinestartack") {
-        Serial.println("BACKEND CONFIRMED -> baseline started");
+        Serial.println("BACKEND CONFIRMED -> baseline recording started");
         beepConfirmed();
-        calibrationAcked = true;
         calibState = CALIBIDLE;
-        baselineRequestPending = false;
         baselineInProgress = true;
         printWorkflow();
         return;
     }
     if (message == "baselinesuccessack") {
-        Serial.println("BACKEND SUCCESS -> baseline saved");
+        Serial.println("BACKEND SUCCESS -> baseline recording complete");
         beepSuccess();
-        baselineRequestPending = false;
         baselineInProgress = false;
-        baselineAcked = true;
         printWorkflow();
         return;
     }
     if (message == "baselinefailack") {
-        Serial.println("BACKEND CANCEL/FAIL -> baseline rejected or cancelled");
+        Serial.println("BACKEND CANCEL/FAIL -> baseline recording rejected or cancelled");
         beepLongFailTwice();
-        baselineRequestPending = false;
         baselineInProgress = false;
         printWorkflow();
         return;
@@ -487,7 +485,6 @@ void callback(char* topic, byte* payload, unsigned int length) {
         }
         Serial.println("BACKEND DENY -> device busy");
         beepLongFail(900);
-        baselineRequestPending = false;
         maintenanceRequestPending = false;
         printWorkflow();
         return;
@@ -499,33 +496,51 @@ static unsigned long lastConnBuzzer = 0;
 void checkConnection() {
   unsigned long now = millis();
 
-  // --- LED STATE MACHINE (overrides connection LED when active) ---
+  // --- LED STATE MACHINE ---
+  // Priority: calibration > baselining > connection down > running > idle
   if (calibState == CALIBBASELINEWAIT || calibState == CALIBRUNNING) {
+    // Calibration: slow blink (2s)
     if (now - lastLedBlink >= 2000) {
       lastLedBlink = now;
       ledState = !ledState;
       digitalWrite(PINLED, ledState);
     }
   } else if (baselineInProgress) {
-    if (now - lastLedBlink >= 1000) {
+    // Baselining: alternating fast (200ms) / slow (1000ms) blink
+    unsigned long blinkInterval = ledBlinkPhase ? 1000 : 200;
+    if (now - lastLedBlink >= blinkInterval) {
       lastLedBlink = now;
       ledState = !ledState;
       digitalWrite(PINLED, ledState);
+      if (ledState == LOW) {
+        ledBlinkPhase = !ledBlinkPhase;
+      }
     }
   } else if (WiFi.status() != WL_CONNECTED) {
+    // WiFi down: fast blink (200ms)
     if (now - lastLedBlink >= 200) {
       lastLedBlink = now;
       ledState = !ledState;
       digitalWrite(PINLED, ledState);
     }
   } else if (!client.connected()) {
+    // MQTT down: medium blink (500ms)
     if (now - lastLedBlink >= 500) {
       lastLedBlink = now;
       ledState = !ledState;
       digitalWrite(PINLED, ledState);
     }
-  } else {
+  } else if (lastAvgCurrent >= 0.4) {
+    // Running: solid LED
     digitalWrite(PINLED, HIGH);
+  } else {
+    // Idle: brief blink every 10s
+    if (now - lastIdleBlink >= 10000) {
+      lastIdleBlink = now;
+      digitalWrite(PINLED, HIGH);
+      delay(50);
+      digitalWrite(PINLED, LOW);
+    }
   }
 
   // --- CONNECTION DOWN BUZZER (every 10s) ---
@@ -572,6 +587,11 @@ void checkConnection() {
     }
     return;
   }
+
+  // Retry config request if still unpaired
+  if (applianceType == "unpaired" && now - lastConfigRequestTime >= 10000) {
+    requestBackendConfig();
+  }
 }
 
 // =========================
@@ -601,7 +621,9 @@ double readCurrentIrms() {
   float rmsADC = sqrt(variance);
   uint32_t trueVoltageMv = esp_adc_cal_raw_to_voltage((uint32_t)rmsADC, &adc1_chars);
   float cf = (applianceType == "Dryer") ? 37.0 : 11.0;
-  return (trueVoltageMv / 1000.0) * cf;
+  float deductor = (applianceType == "Dryer") ? 0.111 : 0.033;
+  float currentVal = (trueVoltageMv / 1000.0) * cf - deductor;
+  return (currentVal > 0.0) ? currentVal : 0.0;
 }
 
 SensorPair readHvacSensors() {
@@ -740,8 +762,7 @@ void handleCalibrationState() {
 // BUTTONS
 // =========================
 void handleButtons() {
-  if (calibState == CALIBBASELINEWAIT || calibState == CALIBRUNNING || 
-      baselineInProgress || calibrationSavePending) {
+  if (calibState == CALIBBASELINEWAIT || calibState == CALIBRUNNING || calibrationSavePending) {
     btn1State = 0;
     btn2State = 0;
     return;
@@ -762,10 +783,10 @@ void handleButtons() {
       if (!isPaired) {
         Serial.println("BUTTON 1 denied: node not paired yet.");
         beepLongFail(700);
-      } else if (!calibrationAcked || !baselineAcked) {
-        Serial.println("BUTTON 1 denied: finish calibration and baseline first.");
+      } else if (!calibrationAcked) {
+        Serial.println("BUTTON 1 denied: finish calibration first.");
         beepLongFail(700);
-      } else if (baselineRequestPending || maintenanceRequestPending || calibState != CALIBIDLE) {
+      } else if (maintenanceRequestPending || calibState != CALIBIDLE) {
         // SILENTLY ignore
       } else {
         maintenanceRequestPending = true;
@@ -780,26 +801,24 @@ void handleButtons() {
     btn1State = 0;
   }
 
-  // ---------- BUTTON 2: CALIBRATION (5s) / BASELINE (2s) ----------
+  // ---------- BUTTON 2: CALIBRATION (5s) — HVAC ONLY ----------
   if (b2) {
     if (btn2State == 0) {
       btn2PressedAt = now;
       btn2State = 1;
-    } else if (btn2State == 1 && now - btn2PressedAt >= 2000) {
-      // 2-second threshold reached — give feedback but do NOT send yet
+    } else if (btn2State == 1 && now - btn2PressedAt >= 5000) {
+      // 5-second threshold reached — send calibration request (HVAC only)
       btn2State = 2;
-      beepRequest();
-      Serial.println("BUTTON 2 -> 2s threshold reached (baseline if released)");
-    } else if (btn2State == 2 && now - btn2PressedAt >= 5000) {
-      // 5-second threshold reached — send calibration request
-      btn2State = 3;
       beepRequest();
       Serial.println("BUTTON 2 -> 5s threshold reached (calibration)");
       
       if (!isPaired) {
         Serial.println("BUTTON 2 denied: node not paired yet.");
         beepLongFail(700);
-      } else if (calibrationSavePending || baselineRequestPending || maintenanceRequestPending || calibState == CALIBWAITAPPROVAL) {
+      } else if (applianceType == "Dryer") {
+        Serial.println("BUTTON 2 denied: Dryer does not require calibration.");
+        beepLongFail(700);
+      } else if (calibrationSavePending || maintenanceRequestPending || calibState == CALIBWAITAPPROVAL) {
         // SILENTLY ignore
       } else {
         String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"event_button2_calibration_request\"}";
@@ -809,21 +828,7 @@ void handleButtons() {
       }
     }
   } else {
-    // Button released
-    if (btn2State == 2) {
-      // Released between 2s and 5s -> baseline request
-      if (!isPaired) {
-        Serial.println("BUTTON 2 denied: node not paired yet.");
-        beepLongFail(700);
-      } else if (calibrationSavePending || baselineRequestPending || maintenanceRequestPending || calibState == CALIBWAITAPPROVAL) {
-        // SILENTLY ignore
-      } else {
-        String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"event_button2_action_request\"}";
-        Serial.println("BUTTON 2 -> baseline request sent");
-        publishEventJson(ev);
-        printWorkflow();
-      }
-    }
+    // Button released before 5s — do nothing
     btn2State = 0;
   }
 }
@@ -850,6 +855,9 @@ String buildTelemetryPayload() {
   }
 
   payload += "\"CurrentA\":" + jnum(sumCurrentA / MAX_SAMPLES, 3);
+  // Always include running/idle status
+  float avgCurrent = sumCurrentA / MAX_SAMPLES;
+  payload += ",\"status\":\"" + String(avgCurrent >= 0.4 ? "running" : "idle") + "\"";
   payload += "}";
 
   return payload;
@@ -961,31 +969,42 @@ void loop() {
     }
 
     double currentVal = readCurrentIrms();
-    sumCurrentA += (isnan(currentVal) || currentVal <= 0.0) ? 0 : currentVal;
+    if (!isnan(currentVal)) {
+      sumCurrentA += (currentVal > 0.0) ? currentVal : 0.0;
+      lastAvgCurrent = (currentVal > 0.0) ? currentVal : 0.0;  // Track latest reading for LED state machine
+    }
 
     sampleCount++;
   }
 
   if (sampleCount >= MAX_SAMPLES) {
-    String basePayload = buildTelemetryPayload();
+    // Only send telemetry when appliance is running
+    if (lastAvgCurrent >= 0.4) {
+      String basePayload = buildTelemetryPayload();
+      resetAverages();
 
-    resetAverages();
+      if (client.connected()) {
+        publishTelemetry(addAgeToPayload(basePayload, 0));
 
-    if (client.connected()) {
-      publishTelemetry(addAgeToPayload(basePayload, 0));
-
-      while (!offlineQueue.empty()) {
-        BufferedData item = offlineQueue.front();
-        unsigned long ageMs = millis() - item.timestamp;
-        publishTelemetry(addAgeToPayload(item.payload, ageMs));
-        offlineQueue.erase(offlineQueue.begin());
-        delay(120);
+        if (!offlineQueue.empty()) {
+          Serial.println("[BUFFER] Flushing " + String(offlineQueue.size()) + " buffered readings");
+        }
+        while (!offlineQueue.empty()) {
+          BufferedData item = offlineQueue.front();
+          unsigned long ageMs = millis() - item.timestamp;
+          publishTelemetry(addAgeToPayload(item.payload, ageMs));
+          offlineQueue.erase(offlineQueue.begin());
+          delay(120);
+        }
+      } else {
+        if ((int)offlineQueue.size() >= MAX_QUEUE_SIZE) {
+          offlineQueue.erase(offlineQueue.begin());
+        }
+        offlineQueue.push_back({basePayload, millis()});
       }
     } else {
-      if ((int)offlineQueue.size() >= MAX_QUEUE_SIZE) {
-        offlineQueue.erase(offlineQueue.begin());
-      }
-      offlineQueue.push_back({basePayload, millis()});
+      // Idle: discard samples, do not send or buffer
+      resetAverages();
     }
   }
 }

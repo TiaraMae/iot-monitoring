@@ -35,6 +35,9 @@ DEFAULT = 15.0
 UNPAIRED_CACHE = {} 
 DEDUPE_CACHE = {}
 EVENT_DEDUPE_CACHE = {}
+CALIBRATION_TRACKER = {}  # appliance_id -> {start_tcoil, start_time}
+CYCLE_TRACKER = {}        # appliance_id -> {start_time, last_time}
+BASELINE_TIMER_TRACKER = {}  # appliance_id -> threading.Timer
 
 CLIENT_ID = f"FlaskBackend_{random.randint(10000, 99999)}"
 
@@ -175,42 +178,88 @@ def latest_row_for_appliance(appliance_id):
     release_conn(conn)
     return row, dev_type
 
-def latest_n_rows_for_appliance(appliance_id, limit):
+def latest_n_rows_for_appliance(appliance_id, limit, start=None, end=None):
     conn = get_conn()
     if not conn: return [], "Unknown"
     cur = conn.cursor()
     
-    # FIX: We now fetch created_at to use as the absolute earliest cutoff date
     cur.execute("SELECT type, baselining_since, created_at FROM appliances WHERE id = %s", (appliance_id,))
     type_row = cur.fetchone()
     if not type_row: return [], "Unknown"
     
     dev_type, base_since, created_at = type_row[0], type_row[1], type_row[2]
-    
-    # Use baselining_since if it exists, OTHERWISE strictly use the time it was paired
     cutoff_time = base_since if base_since else created_at
 
-    if "Dryer" in dev_type:
-        cur.execute("""
-            SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor
-            FROM dryer_readings dr
-            JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
-            WHERE sn.appliance_id = %s AND dr.time >= %s
-            ORDER BY dr.time DESC LIMIT %s
-        """, (appliance_id, cutoff_time, limit))
+    if start and end:
+        # History mode: time range query, capped at 5000 rows
+        if "Dryer" in dev_type:
+            cur.execute("""
+                SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor
+                FROM dryer_readings dr
+                JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
+                WHERE sn.appliance_id = %s AND dr.time >= %s AND dr.time <= %s AND dr.time >= %s
+                ORDER BY dr.time ASC LIMIT 5000
+            """, (appliance_id, start, end, cutoff_time))
+        else:
+            cur.execute("""
+                SELECT sr.time, sr.treturn, sr.rhreturn, sr.tsupply, sr.rhsupply, sr.tcoil, sr.icompressor
+                FROM hvac_readings sr
+                JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
+                WHERE sn.appliance_id = %s AND sr.time >= %s AND sr.time <= %s AND sr.time >= %s
+                ORDER BY sr.time ASC LIMIT 5000
+            """, (appliance_id, start, end, cutoff_time))
     else:
-        cur.execute("""
-            SELECT sr.time, sr.treturn, sr.rhreturn, sr.tsupply, sr.rhsupply, sr.tcoil, sr.icompressor
-            FROM hvac_readings sr
-            JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
-            WHERE sn.appliance_id = %s AND sr.time >= %s
-            ORDER BY sr.time DESC LIMIT %s
-        """, (appliance_id, cutoff_time, limit))
-        
+        # Live mode: latest N points
+        if "Dryer" in dev_type:
+            cur.execute("""
+                SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor
+                FROM dryer_readings dr
+                JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
+                WHERE sn.appliance_id = %s AND dr.time >= %s
+                ORDER BY dr.time DESC LIMIT %s
+            """, (appliance_id, cutoff_time, limit))
+        else:
+            cur.execute("""
+                SELECT sr.time, sr.treturn, sr.rhreturn, sr.tsupply, sr.rhsupply, sr.tcoil, sr.icompressor
+                FROM hvac_readings sr
+                JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
+                WHERE sn.appliance_id = %s AND sr.time >= %s
+                ORDER BY sr.time DESC LIMIT %s
+            """, (appliance_id, cutoff_time, limit))
+
     rows = cur.fetchall()
     cur.close()
     release_conn(conn)
-    return rows[::-1], dev_type
+    return (rows[::-1], dev_type) if not (start and end) else (rows, dev_type)
+
+def get_latest_current_for_appliance(appliance_id):
+    conn = get_conn()
+    if not conn: return 0.0
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT type FROM appliances WHERE id = %s", (appliance_id,))
+        type_row = cur.fetchone()
+        if not type_row: return 0.0
+        dev_type = type_row[0]
+        if "Dryer" in dev_type:
+            cur.execute("""
+                SELECT dr.imotor FROM dryer_readings dr
+                JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
+                WHERE sn.appliance_id = %s ORDER BY dr.time DESC LIMIT 1
+            """, (appliance_id,))
+        else:
+            cur.execute("""
+                SELECT sr.icompressor FROM hvac_readings sr
+                JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
+                WHERE sn.appliance_id = %s ORDER BY sr.time DESC LIMIT 1
+            """, (appliance_id,))
+        row = cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else 0.0
+    except Exception:
+        return 0.0
+    finally:
+        cur.close()
+        release_conn(conn)
 
 def get_appliances_for_user(user_id):
     conn = get_conn()
@@ -325,15 +374,17 @@ def do_set_baseline_calculated(appliance_id, since_time):
             
             curr_mean = statistics.mean(currents)
             
+            curr_std = statistics.stdev(currents) if len(currents)>1 else 0
             cur.execute("""
                 UPDATE appliances
                 SET baseline_heat_rise_mean=%s, baseline_heat_rise_std=%s,
                     baseline_rhexhaust_mean=%s, baseline_rhexhaust_std=%s,
                     baseline_pressure_mean=%s, baseline_pressure_std=%s,
+                    baseline_current_mean=%s, baseline_current_std=%s,
                     threshold_current_min=%s, threshold_current_max=%s,
                     operational_status='normal'
                 WHERE id=%s
-            """, (hr_mean, hr_std, rhex_mean, rhex_std, pres_mean, pres_std, curr_mean*0.8, curr_mean*1.5, appliance_id))
+            """, (hr_mean, hr_std, rhex_mean, rhex_std, pres_mean, pres_std, curr_mean, curr_std, curr_mean*0.8, curr_mean*1.5, appliance_id))
             
         else:
             deltas, coil_temps, currents = [], [], []
@@ -349,7 +400,7 @@ def do_set_baseline_calculated(appliance_id, since_time):
                 rhret_list.append(rh_ret)
                 rhsup_list.append(rh_sup)
                 coil_temps.append(apply_calibration(r[4], cal['tcoil_m'], cal['tcoil_c']))
-                currents.append((r[5] or 0) + cal['icompressor_offset'])
+                currents.append(r[5] or 0)
                 
             dt_mean = statistics.mean(deltas)
             dt_std = statistics.stdev(deltas) if len(deltas)>1 else 0
@@ -421,7 +472,23 @@ def handle_node_events(mac, payload):
         node_row = cur.fetchone()
         
         if event_type == "event_request_config":
-            if not node_row or not node_row[0] or node_row[1] != 'paired':
+            if not node_row:
+                # Auto-register unknown MAC so it shows up in scan
+                cur.execute(
+                    "INSERT INTO sensor_nodes (mac_address, status, created_at, last_seen) VALUES (%s, 'unpaired', NOW(), NOW())",
+                    (mac,)
+                )
+                conn.commit()
+                print(f"Auto-registered unknown node {mac}")
+            else:
+                # Update last_seen for existing unpaired nodes
+                cur.execute(
+                    "UPDATE sensor_nodes SET last_seen = NOW() WHERE mac_address = %s AND status = 'unpaired'",
+                    (mac,)
+                )
+                conn.commit()
+            
+            if not node_row or not node_row[0] or (node_row and node_row[1] != 'paired'):
                 send_node_command(mac, "settype:unpaired")
             else:
                 appliance_id = node_row[0]
@@ -435,21 +502,30 @@ def handle_node_events(mac, payload):
                         conn.commit()
                         app_status = 'calibration_needed'
                     elif app_status == 'baselining':
-                        cur.execute("UPDATE appliances SET operational_status='pending_baseline' WHERE id=%s", (appliance_id,))
+                        cur.execute("UPDATE appliances SET operational_status='normal' WHERE id=%s", (appliance_id,))
                         conn.commit()
-                        app_status = 'pending_baseline'
+                        app_status = 'normal'
                         
                     if "Dryer" in app_type:
                         send_node_command(mac, "settype:dryer")
-                    else:
-                        send_node_command(mac, "settype:hvac")
-                        
-                    if app_status == 'pending_baseline':
-                        send_node_command(mac, "restore:baselinepending")
-                    elif app_status == 'normal':
                         send_node_command(mac, "restore:normal")
                     else:
-                        send_node_command(mac, "restore:calibrationneeded")
+                        send_node_command(mac, "settype:hvac")
+                        if app_status == 'normal':
+                            send_node_command(mac, "restore:normal")
+                        else:
+                            send_node_command(mac, "restore:calibrationneeded")
+            cur.close()
+            release_conn(conn)
+            return
+        
+        if event_type == "checkin":
+            # Node is alive and idle; just update last_seen
+            cur.execute(
+                "UPDATE sensor_nodes SET last_seen = NOW() WHERE mac_address = %s",
+                (mac,)
+            )
+            conn.commit()
             cur.close()
             release_conn(conn)
             return
@@ -473,32 +549,9 @@ def handle_node_events(mac, payload):
             
         status, app_type = stat_row[0], stat_row[1]
         
-        if event_type == "event_button2_action_request":
-            # 2-second hold -> baseline request only
-            if "Dryer" in app_type:
-                if status in ['pending_baseline', 'normal']:
-                    cur.execute("UPDATE appliances SET operational_status = 'baselining', baselining_since = NOW() WHERE id = %s", (appliance_id,))
-                    conn.commit()
-                    send_node_command(mac, "baselinestartack")
-                    print(f"Node {mac} (Dryer) 10-Minute Baseline Recording Started.")
-                elif status == 'baselining':
-                    send_node_command(mac, "baselinefailack")
-                else:
-                    send_node_command(mac, "actiondenied:busy")
-            else:
-                if status in ['pending_baseline', 'normal']:
-                    cur.execute("UPDATE appliances SET operational_status = 'baselining', baselining_since = NOW() WHERE id = %s", (appliance_id,))
-                    conn.commit()
-                    send_node_command(mac, "baselinestartack")
-                    print(f"Node {mac} (HVAC) 10-Minute Baseline Recording Started.")
-                elif status == 'calibration_needed':
-                    send_node_command(mac, "calibrationfailack")
-                    print(f"Node {mac} Use 5-second hold for calibration.")
-                elif status in ['calibrating', 'baselining']:
-                    send_node_command(mac, "actiondenied:busy")
-                    print(f"Node {mac} Action denied. Device is currently busy.")
+        # event_button2_action_request removed — baseline is web-triggered only
 
-        elif event_type == "event_button2_calibration_request":
+        if event_type == "event_button2_calibration_request":
             # 5-second hold -> calibration request (HVAC only, one-time)
             if "Dryer" in app_type:
                 send_node_command(mac, "calibrationfailack")
@@ -507,8 +560,17 @@ def handle_node_events(mac, payload):
                 if status == 'calibration_needed':
                     cur.execute("UPDATE appliances SET operational_status = 'calibrating', calibration_started_at = NOW() WHERE id = %s", (appliance_id,))
                     conn.commit()
+                    # Record current DS18B20 as calibration start reference
+                    cur.execute("""
+                        SELECT sr.tcoil FROM hvac_readings sr
+                        JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
+                        WHERE sn.appliance_id = %s ORDER BY sr.time DESC LIMIT 1
+                    """, (appliance_id,))
+                    tcoil_row = cur.fetchone()
+                    start_tcoil = float(tcoil_row[0]) if tcoil_row and tcoil_row[0] is not None else 25.0
+                    CALIBRATION_TRACKER[appliance_id] = {'start_tcoil': start_tcoil, 'start_time': datetime.now()}
                     send_node_command(mac, "startcalibration")
-                    print(f"Node {mac} (HVAC) Calibration STARTED.")
+                    print(f"Node {mac} (HVAC) Calibration STARTED. Tcoil start: {start_tcoil}")
                 elif status in ['calibrating', 'baselining']:
                     send_node_command(mac, "actiondenied:busy")
                     print(f"Node {mac} Action denied. Device is currently busy.")
@@ -518,6 +580,8 @@ def handle_node_events(mac, payload):
 
         elif event_type == "calibration_success_request":
             if status == 'calibrating':
+                if appliance_id in CALIBRATION_TRACKER:
+                    del CALIBRATION_TRACKER[appliance_id]
                 base_data = data.get("base")
                 final_data = data.get("final")
                 
@@ -559,7 +623,7 @@ def handle_node_events(mac, payload):
                                 tsupply_slope=%s, tsupply_intercept=%s,
                                 rhsupply_slope=%s, rhsupply_intercept=%s,
                                 tcoil_slope=1.0, tcoil_offset=0.0,
-                                operational_status='pending_baseline'
+                                operational_status='normal'
                             WHERE id=%s AND operational_status='calibrating'
                         """, (t1_m, t1_c, t2_m, t2_c, h2_m, h2_c, appliance_id))
                         conn.commit()
@@ -570,16 +634,27 @@ def handle_node_events(mac, payload):
 
         elif event_type == "calibration_fail_request":
             if status == 'calibrating':
+                if appliance_id in CALIBRATION_TRACKER:
+                    del CALIBRATION_TRACKER[appliance_id]
                 cur.execute("UPDATE appliances SET operational_status = 'calibration_needed' WHERE id = %s", (appliance_id,))
                 conn.commit()
                 send_node_command(mac, "calibrationfailack")
 
+        elif event_type == "checkin":
+            # Lightweight keepalive — just refresh last_seen
+            cur.execute("UPDATE sensor_nodes SET last_seen = NOW() WHERE mac_address = %s", (mac,))
+            conn.commit()
+
         elif event_type == "maintenance_request":
-            if status == 'normal':
+            if "Dryer" in app_type or status == 'normal':
                 cur.execute("INSERT INTO sensor_events (sensor_node_mac, event_type, timestamp) VALUES (%s,%s,%s)",
                             (mac, 'maintenance', datetime.now()))
                 conn.commit()
                 send_node_command(mac, "maintenanceack")
+                print(f"Node {mac} maintenance logged.")
+            else:
+                send_node_command(mac, "maintenancedenied")
+                print(f"Node {mac} maintenance denied: status={status}")
 
         cur.close()
         release_conn(conn)
@@ -612,7 +687,9 @@ def on_mqtt_message(client, userdata, msg):
             safe_str = payload.replace('nan', 'null')
             data = json.loads(safe_str)
             
-            if "ago_ms" in data:
+            if "agoms" in data:
+                actual_time = datetime.now() - timedelta(milliseconds=int(data["agoms"]))
+            elif "ago_ms" in data:
                 actual_time = datetime.now() - timedelta(milliseconds=int(data["ago_ms"]))
             else:
                 actual_time = datetime.now() - timedelta(seconds=int(data.get("ago", 0)))
@@ -654,18 +731,71 @@ def on_mqtt_message(client, userdata, msg):
                     except:
                         final_amps = 0.0
 
+                operational_status = row[3] if row else None
+                status_field = data.get("status", "running")
+                is_running = (status_field == "running")
+                
                 if appliance_type:
-                    if "Dryer" in appliance_type:
-                        cur.execute("""
-                            INSERT INTO dryer_readings (sensor_node_id, texhaust, rh_exhaust, pressure, imotor, time)
-                            VALUES (%s, %s, %s, %s, %s, %s)
-                        """, (sensor_node_id, data.get("BME280Temp"), data.get("BME280Hum"), data.get("BME280Pres"), final_amps, actual_time))
+                    # Data gating: only insert running data. Idle updates last_seen only.
+                    if is_running:
+                        if "Dryer" in appliance_type:
+                            cur.execute("""
+                                INSERT INTO dryer_readings (sensor_node_id, texhaust, rh_exhaust, pressure, imotor, time)
+                                VALUES (%s, %s, %s, %s, %s, %s)
+                            """, (sensor_node_id, data.get("BME280Temp"), data.get("BME280Hum"), data.get("BME280Pres"), final_amps, actual_time))
+                        else:
+                            cur.execute("""
+                                INSERT INTO hvac_readings (sensor_node_id, treturn, rhreturn, tsupply, rhsupply, tcoil, icompressor, time)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            """, (sensor_node_id, data.get("DHT1Temp"), data.get("DHT1Hum"), data.get("DHT2Temp"), data.get("DHT2Hum"), data.get("DS18B20Temp"), final_amps, actual_time))
+                        conn.commit()
                     else:
+                        cur.execute("UPDATE sensor_nodes SET last_seen = NOW() WHERE id = %s", (sensor_node_id,))
+                        conn.commit()
+                    
+                    # --- Dryer cycle tracker + end-of-cycle humidity alert ---
+                    def _process_cycle_end(app_id, cyc_start, cyc_end):
+                        # Query last 2 minutes of cycle for humidity
                         cur.execute("""
-                            INSERT INTO hvac_readings (sensor_node_id, treturn, rhreturn, tsupply, rhsupply, tcoil, icompressor, time)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (sensor_node_id, data.get("DHT1Temp"), data.get("DHT1Hum"), data.get("DHT2Temp"), data.get("DHT2Hum"), data.get("DS18B20Temp"), final_amps, actual_time))
-                    conn.commit()
+                            SELECT AVG(rh_exhaust) FROM dryer_readings dr
+                            JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
+                            WHERE sn.appliance_id = %s AND dr.time >= %s AND dr.time <= %s
+                        """, (app_id, cyc_end - timedelta(minutes=2), cyc_end))
+                        avg_rh_row = cur.fetchone()
+                        avg_rh = float(avg_rh_row[0]) if avg_rh_row and avg_rh_row[0] is not None else None
+                        
+                        # Get threshold from appliances
+                        cur.execute("SELECT alert_rhexhaust_threshold, alert_enabled FROM appliances WHERE id = %s", (app_id,))
+                        thr_row = cur.fetchone()
+                        threshold = float(thr_row[0]) if thr_row and thr_row[0] is not None else 40.0
+                        enabled = thr_row[1] if thr_row else True
+                        
+                        if enabled and avg_rh is not None and avg_rh > threshold:
+                            cur.execute("""
+                                INSERT INTO alerts (appliance_id, alert_type, message, value, threshold, cycle_start_time, cycle_end_time)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            """, (app_id, 'dryer_humidity_high',
+                                  f"Dry cycle incomplete — exhaust humidity {avg_rh:.1f}% exceeds threshold {threshold:.1f}%",
+                                  avg_rh, threshold, cyc_start, cyc_end))
+                            conn.commit()
+                    
+                    if "Dryer" in appliance_type:
+                        if is_running:
+                            # Check if a previous cycle went stale (appliance stopped between readings)
+                            if appliance_id in CYCLE_TRACKER:
+                                tracker = CYCLE_TRACKER[appliance_id]
+                                if (actual_time - tracker["last_time"]).total_seconds() > 60:
+                                    _process_cycle_end(appliance_id, tracker.get("start_time", tracker["last_time"]), tracker["last_time"])
+                                    del CYCLE_TRACKER[appliance_id]
+                            
+                            tracker = CYCLE_TRACKER.setdefault(appliance_id, {"start_time": actual_time, "last_time": actual_time})
+                            tracker["last_time"] = actual_time
+                        else:
+                            # Cycle ended (transition from running to idle)
+                            if appliance_id in CYCLE_TRACKER:
+                                tracker = CYCLE_TRACKER[appliance_id]
+                                _process_cycle_end(appliance_id, tracker.get("start_time", tracker["last_time"]), tracker["last_time"])
+                                del CYCLE_TRACKER[appliance_id]
                 else:
                     UNPAIRED_CACHE[sensor_node_id] = {
                         "data": data,
@@ -738,34 +868,82 @@ def api_device_latest(appliance_id):
     conn = get_conn()
     if not conn: return jsonify({'error': 'db'}), 500
     cur = conn.cursor()
-    cur.execute("SELECT operational_status, type FROM appliances WHERE id = %s", (appliance_id,))
+    
+    # Fetch appliance info + node's last_seen
+    cur.execute("""
+        SELECT a.operational_status, a.type, sn.last_seen
+        FROM appliances a
+        LEFT JOIN sensor_nodes sn ON sn.appliance_id = a.id
+        WHERE a.id = %s
+    """, (appliance_id,))
     status_row = cur.fetchone()
     cur.close()
     release_conn(conn)
     
     if not status_row: return jsonify({'error': 'not found'}), 404
     
-    if "Dryer" not in status_row[1] and status_row[0] in ['calibration_needed', 'calibrating', 'pending_baseline']:
-        return jsonify({'error': 'No data until baseline start'}), 200
+    operational_status = status_row[0]
+    dev_type = status_row[1]
+    last_seen = status_row[2]
+    is_calibrated = operational_status not in ['calibration_needed', 'calibrating']
+    
+    # Offline = no message (telemetry, event, or checkin) for >10 minutes
+    offline_threshold_seconds = 600
+    is_offline = False
+    if last_seen:
+        is_offline = (datetime.now() - last_seen.replace(tzinfo=None)).total_seconds() > offline_threshold_seconds
+    else:
+        is_offline = True
+    
+    if "Dryer" not in dev_type and operational_status in ['calibration_needed', 'calibrating']:
+        return jsonify({
+            'error': 'Sensor not calibrated',
+            'calibrated': False,
+            'status': operational_status,
+            'type': dev_type,
+            'running_status': 'idle',
+            'is_offline': is_offline,
+            'has_data': False
+        }), 200
 
     row_data, dev_type = latest_row_for_appliance(appliance_id)
-    if not row_data: return jsonify({'error':'no data'}), 404
-    
     cal = get_appliance_calibration(appliance_id)
-    if 't1_m' not in cal: return jsonify({'error': 'Device deleted or math missing'}), 404
+    
+    if not row_data or 't1_m' not in cal:
+        # Appliance exists but no readings yet (or calibration missing)
+        return jsonify({
+            'type': dev_type,
+            'calibrated': is_calibrated and ('t1_m' in cal),
+            'status': operational_status,
+            'running_status': 'idle',
+            'is_offline': is_offline,
+            'has_data': False
+        }), 200
     
     time_val = row_data[0]
+    stale_threshold_seconds = 60
+    is_stale = (datetime.now() - time_val.replace(tzinfo=None)).total_seconds() > stale_threshold_seconds
     
     if "Dryer" in dev_type:
+        imotor = max(0.0, row_data[4] or 0)
+        running_status = 'idle' if is_stale else ('running' if imotor >= 0.4 else 'idle')
         return jsonify({
             'time': time_val.isoformat(),
             'Texhaust': apply_calibration(row_data[1], cal['t1_m'], cal['t1_c']),
             'RHexhaust': apply_calibration(row_data[2], cal['h1_m'], cal['h1_c']),
             'Pressure': row_data[3] or 0.0,
-            'Imotor': max(0.0, (row_data[4] or 0) + cal['icompressor_offset']),
-            'type': dev_type
+            'Imotor': imotor,
+            'type': dev_type,
+            'calibrated': True,
+            'status': operational_status,
+            'running_status': running_status,
+            'data_stale': is_stale,
+            'is_offline': is_offline,
+            'has_data': True
         })
     else:
+        icomp = row_data[6] or 0
+        running_status = 'idle' if is_stale else ('running' if icomp >= 0.4 else 'idle')
         return jsonify({
             'time': time_val.isoformat(),
             'Treturn': apply_calibration(row_data[1], cal['t1_m'], cal['t1_c']),
@@ -773,8 +951,14 @@ def api_device_latest(appliance_id):
             'Tsupply': apply_calibration(row_data[3], cal['t2_m'], cal['t2_c']),
             'RHsupply': apply_calibration(row_data[4], cal['h2_m'], cal['h2_c']),
             'Tcoil': apply_calibration(row_data[5], cal['tcoil_m'], cal['tcoil_c']),
-            'Icompressor': (row_data[6] or 0) + cal['icompressor_offset'],
-            'type': dev_type
+            'Icompressor': icomp,
+            'type': dev_type,
+            'calibrated': is_calibrated,
+            'status': operational_status,
+            'running_status': running_status,
+            'data_stale': is_stale,
+            'is_offline': is_offline,
+            'has_data': True
         })
 
 @app.route('/api/device/<int:appliance_id>/latest_n')
@@ -788,11 +972,13 @@ def api_device_latest_n(appliance_id):
     cur.close()
     release_conn(conn)
     
-    if not status_row or ("Dryer" not in status_row[1] and status_row[0] in ['calibration_needed', 'calibrating', 'pending_baseline']):
+    if not status_row or ("Dryer" not in status_row[1] and status_row[0] in ['calibration_needed', 'calibrating']):
         return jsonify([]), 200
 
-    limit = int(request.args.get('limit', 120))
-    rows, dev_type = latest_n_rows_for_appliance(appliance_id, limit)
+    limit = int(request.args.get('limit', 1080))
+    start = request.args.get('start')
+    end = request.args.get('end')
+    rows, dev_type = latest_n_rows_for_appliance(appliance_id, limit, start, end)
     
     cal = get_appliance_calibration(appliance_id)
     if 't1_m' not in cal: return jsonify([])
@@ -806,7 +992,7 @@ def api_device_latest_n(appliance_id):
                 'Texhaust': apply_calibration(r[1], cal['t1_m'], cal['t1_c']),
                 'RHexhaust': apply_calibration(r[2], cal['h1_m'], cal['h1_c']),
                 'Pressure': r[3] or 0.0,
-                'Imotor': max(0.0, (r[4] or 0) + cal['icompressor_offset'])
+                'Imotor': max(0.0, r[4] or 0)
             })
         else:
             result.append({
@@ -816,7 +1002,7 @@ def api_device_latest_n(appliance_id):
                 'Tsupply': apply_calibration(r[3], cal['t2_m'], cal['t2_c']),
                 'RHsupply': apply_calibration(r[4], cal['h2_m'], cal['h2_c']),
                 'Tcoil': apply_calibration(r[5], cal['tcoil_m'], cal['tcoil_c']),
-                'Icompressor': (r[6] or 0) + cal['icompressor_offset']
+                'Icompressor': r[6] or 0
             })
             
     return jsonify(result)
@@ -832,7 +1018,7 @@ def get_table_data(appliance_id):
     cur.close()
     release_conn(conn)
     
-    if not status_row or ("Dryer" not in status_row[1] and status_row[0] in ['calibration_needed', 'calibrating', 'pending_baseline']):
+    if not status_row or ("Dryer" not in status_row[1] and status_row[0] in ['calibration_needed', 'calibrating']):
         return jsonify([]), 200
 
     rows, dev_type = latest_n_rows_for_appliance(appliance_id, 120)
@@ -851,13 +1037,13 @@ def get_table_data(appliance_id):
                 'Texhaust': round(t1, 2),
                 'RHexhaust': round(h1, 2),
                 'Pressure': round(r[3] or 0.0, 2),
-                'Imotor': round(max(0.0, (r[4] or 0) + cal['icompressor_offset']), 2)
+                'Imotor': round(max(0.0, r[4] or 0), 2)
             })
         else:
             t2 = apply_calibration(r[3], cal['t2_m'], cal['t2_c'])
             h2 = apply_calibration(r[4], cal['h2_m'], cal['h2_c'])
             t3 = apply_calibration(r[5], cal['tcoil_m'], cal['tcoil_c'])
-            amp = (r[6] or 0) + cal['icompressor_offset']
+            amp = r[6] or 0
             
             result.append({
                 'time': time_val.isoformat(),
@@ -887,9 +1073,14 @@ def get_maintenance_logs(appliance_id):
         return jsonify([]), 200
         
     cur.execute("""
-        SELECT timestamp FROM sensor_events 
-        WHERE sensor_node_mac = %s AND event_type = 'maintenance' 
-        ORDER BY timestamp DESC
+        SELECT DISTINCT se.timestamp 
+        FROM sensor_events se
+        JOIN sensor_nodes sn ON se.sensor_node_mac = sn.mac_address
+        JOIN appliances a ON sn.appliance_id = a.id
+        WHERE se.sensor_node_mac = %s 
+          AND se.event_type = 'maintenance'
+          AND se.timestamp >= a.created_at
+        ORDER BY se.timestamp DESC
     """, (row[0],))
     rows = cur.fetchall()
     cur.close(); release_conn(conn)
@@ -1002,7 +1193,7 @@ def export_excel(appliance_id):
             t2 = apply_calibration(r[3], cal['t2_m'], cal['t2_c'])
             h2 = apply_calibration(r[4], cal['h2_m'], cal['h2_c'])
             t3 = apply_calibration(r[5], cal['tcoil_m'], cal['tcoil_c'])
-            amp = (r[6] or 0) + cal['icompressor_offset']
+            amp = r[6] or 0
             
             ws.cell(row=row_idx, column=2, value=round(t1, 2))
             ws.cell(row=row_idx, column=3, value=round(t2, 2))
@@ -1062,6 +1253,50 @@ def export_excel(appliance_id):
         download_name=filename
     )
 
+@app.route('/api/device/<int:appliance_id>/calibration_progress')
+@login_required
+def api_calibration_progress(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify({'error': 'db'}), 500
+    cur = conn.cursor()
+    cur.execute("SELECT operational_status, type FROM appliances WHERE id = %s", (appliance_id,))
+    row = cur.fetchone()
+    cur.close()
+    release_conn(conn)
+    
+    if not row: return jsonify({'error': 'not found'}), 404
+    status, dev_type = row[0], row[1]
+    
+    if status != 'calibrating':
+        return jsonify({'error': 'Not calibrating'}), 400
+    
+    tracker = CALIBRATION_TRACKER.get(appliance_id, {})
+    start_tcoil = tracker.get('start_tcoil', 25.0)
+    
+    # Fetch latest DS18B20 temp
+    conn = get_conn()
+    if not conn: return jsonify({'start_tcoil': start_tcoil, 'current_tcoil': None}), 200
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT sr.tcoil FROM hvac_readings sr
+        JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
+        WHERE sn.appliance_id = %s ORDER BY sr.time DESC LIMIT 1
+    """, (appliance_id,))
+    tcoil_row = cur.fetchone()
+    cur.close()
+    release_conn(conn)
+    
+    current_tcoil = float(tcoil_row[0]) if tcoil_row and tcoil_row[0] is not None else start_tcoil
+    drop = start_tcoil - current_tcoil
+    
+    return jsonify({
+        'start_tcoil': round(start_tcoil, 2),
+        'current_tcoil': round(current_tcoil, 2),
+        'drop': round(drop, 2),
+        'target': 8.0,
+        'progress_pct': min(100, max(0, round((drop / 8.0) * 100, 1)))
+    })
+
 @app.route('/api/device/<int:appliance_id>/spc_limits')
 @login_required
 def api_spc_limits(appliance_id):
@@ -1076,7 +1311,9 @@ def api_spc_limits(appliance_id):
                threshold_current_min, threshold_current_max,
                operational_status,
                baseline_pressure_mean, baseline_pressure_std,
-               baselining_since
+               baselining_since,
+               baseline_heat_rise_mean, baseline_heat_rise_std,
+               baseline_rhexhaust_mean, baseline_rhexhaust_std
         FROM appliances WHERE id = %s
     """, (appliance_id,))
     db_row = cur.fetchone()
@@ -1092,7 +1329,7 @@ def api_spc_limits(appliance_id):
     remaining = 0
     if status == 'baselining' and baselining_since:
         elapsed = (datetime.now() - baselining_since).total_seconds()
-        remaining = max(0, int(600 - elapsed))
+        remaining = max(0, int(900 - elapsed))
     
     is_inverter = (subtype == 'inverter')
     def spc(mean, std, tmin=None, tmax=None):
@@ -1105,16 +1342,162 @@ def api_spc_limits(appliance_id):
             lcl_val = float(tmin) if tmin is not None else (m - 3*s)
             return {"mean": m, "ucl": ucl_val, "lcl": lcl_val}
 
-    return jsonify({
-        "type": dev_type,
-        "subtype": subtype,
-        "status": status,
-        "remaining_seconds": remaining,
-        "deltat": spc(db_row[2], db_row[3]),
-        "tcoil": spc(db_row[4], db_row[5]),
-        "current": spc(db_row[6], db_row[7], db_row[8], db_row[9]),
-        "pressure": spc(db_row[11] if len(db_row)>11 else 0, db_row[12] if len(db_row)>12 else 0)
-    })
+    if "Dryer" in dev_type:
+        # Dryer uses heat_rise, rhexhaust, pressure, and threshold-based current
+        hr_mean = db_row[14]
+        hr_std = db_row[15]
+        rhex_mean = db_row[16]
+        rhex_std = db_row[17]
+        pres_mean = db_row[11]
+        pres_std = db_row[12]
+        curr_min = db_row[8]
+        curr_max = db_row[9]
+        curr_mean = ((float(curr_min) if curr_min else 0.0) + (float(curr_max) if curr_max else 0.0)) / 2.0
+        return jsonify({
+            "type": dev_type,
+            "subtype": subtype,
+            "status": status,
+            "remaining_seconds": remaining,
+            "temp": spc(hr_mean, hr_std),
+            "humidity": spc(rhex_mean, rhex_std),
+            "pressure": spc(pres_mean, pres_std),
+            "current": {"mean": curr_mean, "ucl": float(curr_max) if curr_max else 0.0, "lcl": float(curr_min) if curr_min else 0.0}
+        })
+    else:
+        return jsonify({
+            "type": dev_type,
+            "subtype": subtype,
+            "status": status,
+            "remaining_seconds": remaining,
+            "deltat": spc(db_row[2], db_row[3]),
+            "tcoil": spc(db_row[4], db_row[5]),
+            "current": spc(db_row[6], db_row[7], db_row[8], db_row[9]),
+            "pressure": spc(db_row[11], db_row[12])
+        })
+
+@app.route('/api/device/<int:appliance_id>/baseline_analysis')
+@login_required
+def api_baseline_analysis(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify({'error': 'db'}), 500
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT type, sub_type, operational_status,
+               baseline_deltat_mean, baseline_deltat_std,
+               baseline_tcoil_mean, baseline_tcoil_std,
+               baseline_rhreturn_mean, baseline_rhreturn_std,
+               baseline_rhsupply_mean, baseline_rhsupply_std,
+               baseline_current_mean, baseline_current_std,
+               threshold_current_min, threshold_current_max,
+               baseline_heat_rise_mean, baseline_heat_rise_std,
+               baseline_rhexhaust_mean, baseline_rhexhaust_std,
+               baseline_pressure_mean, baseline_pressure_std,
+               alert_rhexhaust_threshold, alert_enabled
+        FROM appliances WHERE id = %s
+    """, (appliance_id,))
+    db_row = cur.fetchone()
+    cur.close()
+    release_conn(conn)
+    
+    if not db_row: return jsonify({'error': 'not found'}), 404
+    
+    dev_type = db_row[0]
+    if "Dryer" in dev_type:
+        return jsonify({
+            "type": dev_type,
+            "status": db_row[2],
+            "temp": {"mean": float(db_row[15]) if db_row[15] else None, "std": float(db_row[16]) if db_row[16] else None},
+            "humidity": {"mean": float(db_row[17]) if db_row[17] else None, "std": float(db_row[18]) if db_row[18] else None},
+            "pressure": {"mean": float(db_row[19]) if db_row[19] else None, "std": float(db_row[20]) if db_row[20] else None},
+            "current": {"min": float(db_row[13]) if db_row[13] else None, "max": float(db_row[14]) if db_row[14] else None},
+            "alert_rhexhaust_threshold": float(db_row[21]) if db_row[21] else 40.0,
+            "alert_enabled": db_row[22] if db_row[22] is not None else True
+        })
+    else:
+        return jsonify({
+            "type": dev_type,
+            "status": db_row[2],
+            "deltat": {"mean": float(db_row[3]) if db_row[3] else None, "std": float(db_row[4]) if db_row[4] else None},
+            "tcoil": {"mean": float(db_row[5]) if db_row[5] else None, "std": float(db_row[6]) if db_row[6] else None},
+            "rhreturn": {"mean": float(db_row[7]) if db_row[7] else None, "std": float(db_row[8]) if db_row[8] else None},
+            "rhsupply": {"mean": float(db_row[9]) if db_row[9] else None, "std": float(db_row[10]) if db_row[10] else None},
+            "current": {"mean": float(db_row[12]) if db_row[12] else None, "std": float(db_row[13]) if db_row[13] else None,
+                        "min": float(db_row[14]) if db_row[14] else None, "max": float(db_row[15]) if db_row[15] else None},
+            "alert_rhexhaust_threshold": float(db_row[21]) if db_row[21] else 40.0,
+            "alert_enabled": db_row[22] if db_row[22] is not None else True
+        })
+
+@app.route('/api/device/<int:appliance_id>/thresholds', methods=['GET', 'POST'])
+@login_required
+def api_thresholds(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify({'error': 'db'}), 500
+    
+    if request.method == 'GET':
+        cur = conn.cursor()
+        cur.execute("SELECT alert_rhexhaust_threshold, alert_enabled FROM appliances WHERE id = %s", (appliance_id,))
+        row = cur.fetchone()
+        cur.close()
+        release_conn(conn)
+        if not row: return jsonify({'error': 'not found'}), 404
+        return jsonify({
+            "alert_rhexhaust_threshold": float(row[0]) if row[0] else 40.0,
+            "alert_enabled": row[1] if row[1] is not None else True
+        })
+    
+    # POST
+    try:
+        cur = conn.cursor()
+        data = request.get_json() or {}
+        threshold = data.get('alert_rhexhaust_threshold')
+        enabled = data.get('alert_enabled')
+        
+        updates = []
+        params = []
+        if threshold is not None:
+            updates.append("alert_rhexhaust_threshold = %s")
+            params.append(float(threshold))
+        if enabled is not None:
+            updates.append("alert_enabled = %s")
+            params.append(bool(enabled))
+        
+        if updates:
+            params.append(appliance_id)
+            cur.execute(f"UPDATE appliances SET {', '.join(updates)} WHERE id = %s", params)
+            conn.commit()
+        
+        cur.close()
+        release_conn(conn)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/device/<int:appliance_id>/alerts')
+@login_required
+def api_alerts(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify([]), 500
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, alert_type, message, value, threshold, created_at, resolved_at, acknowledged
+        FROM alerts WHERE appliance_id = %s
+        ORDER BY created_at DESC LIMIT 50
+    """, (appliance_id,))
+    rows = cur.fetchall()
+    cur.close()
+    release_conn(conn)
+    
+    result = []
+    for r in rows:
+        result.append({
+            "id": r[0], "alert_type": r[1], "message": r[2],
+            "value": float(r[3]) if r[3] is not None else None,
+            "threshold": float(r[4]) if r[4] is not None else None,
+            "created_at": r[5].isoformat() if r[5] else None,
+            "resolved_at": r[6].isoformat() if r[6] else None,
+            "acknowledged": r[7]
+        })
+    return jsonify(result)
 
 @app.route('/api/device/<int:appliance_id>/hvac_analytics')
 @login_required
@@ -1130,16 +1513,31 @@ def hvac_analytics(appliance_id):
             
         base_current = row[1] if row[1] else (row[2] if row[2] else 1.0)
         
-        cur.execute("""
-            SELECT DATE(r.time) as date, 
-                   AVG(r.treturn), AVG(r.tsupply), AVG(r.tcoil)
-            FROM hvac_readings r
-            JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
-            WHERE sn.appliance_id = %s AND r.i_compressor >= %s
-            GROUP BY DATE(r.time)
-            ORDER BY DATE(r.time) DESC
-            LIMIT 30
-        """, (appliance_id, base_current * 0.5))
+        start = request.args.get('start')
+        end = request.args.get('end')
+        
+        if start and end:
+            cur.execute("""
+                SELECT DATE(r.time) as date, 
+                       AVG(r.treturn), AVG(r.tsupply), AVG(r.tcoil)
+                FROM hvac_readings r
+                JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                WHERE sn.appliance_id = %s AND r.icompressor >= %s AND r.time >= %s AND r.time <= %s
+                GROUP BY DATE(r.time)
+                ORDER BY DATE(r.time) DESC
+                LIMIT 30
+            """, (appliance_id, base_current * 0.5, start, end))
+        else:
+            cur.execute("""
+                SELECT DATE(r.time) as date, 
+                       AVG(r.treturn), AVG(r.tsupply), AVG(r.tcoil)
+                FROM hvac_readings r
+                JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                WHERE sn.appliance_id = %s AND r.icompressor >= %s
+                GROUP BY DATE(r.time)
+                ORDER BY DATE(r.time) DESC
+                LIMIT 30
+            """, (appliance_id, base_current * 0.5))
         
         readings = cur.fetchall()
         result = []
@@ -1165,21 +1563,45 @@ def dryer_analytics(appliance_id):
     if not conn: return jsonify({'error': 'db'}), 500
     try:
         cur = conn.cursor()
-        cur.execute("SELECT type FROM appliances WHERE id = %s", (appliance_id,))
+        cur.execute("SELECT type, threshold_current_min, threshold_current_max FROM appliances WHERE id = %s", (appliance_id,))
         row = cur.fetchone()
         if not row or "Dryer" not in row[0]:
             return jsonify({'error': 'Not a dryer'}), 400
+        
+        # Dynamic cycle thresholds based on baseline; fallback to hardcoded defaults
+        thresh_min = row[1]
+        thresh_max = row[2]
+        if thresh_min and thresh_max:
+            cycle_start = float(thresh_min) * 0.8
+            cycle_end = float(thresh_min) * 0.3
+        else:
+            cycle_start = 0.4   # match firmware send gate (>= 0.4 A)
+            cycle_end = 0.15
             
-        cur.execute("""
-            SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor
-            FROM dryer_readings r
-            JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
-            WHERE sn.appliance_id = %s
-            ORDER BY r.time ASC
-        """, (appliance_id,))
+        start = request.args.get('start')
+        end = request.args.get('end')
+        
+        if start and end:
+            cur.execute("""
+                SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor
+                FROM dryer_readings r
+                JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                WHERE sn.appliance_id = %s AND r.time >= %s AND r.time <= %s
+                ORDER BY r.time ASC
+            """, (appliance_id, start, end))
+        else:
+            cur.execute("""
+                SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor
+                FROM dryer_readings r
+                JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                WHERE sn.appliance_id = %s
+                ORDER BY r.time ASC
+            """, (appliance_id,))
         readings = cur.fetchall()
         
-        if not readings: return jsonify([])
+        if not readings:
+            print(f"dryer_analytics: no readings for appliance {appliance_id}")
+            return jsonify([])
         
         cycles = []
         in_cycle = False
@@ -1192,11 +1614,48 @@ def dryer_analytics(appliance_id):
         _peak_drops = 0
         _peak_values = []
         
-        for r in readings:
+        for i, r in enumerate(readings):
             time_val, tex, rhex, press, imotor = r
-            imotor = float(imotor) if imotor else 0.0
+            imotor = float(imotor) if imotor is not None else 0.0
+            tex = float(tex) if tex is not None else 0.0
+            rhex = float(rhex) if rhex is not None else None
 
-            if imotor > 0.5 and not in_cycle:
+            # --- Detect cycle end by time gap (> 600s for gas dryers; 
+            #     ignition events can create multi-minute gaps within one cycle) ---
+            if in_cycle and i > 0:
+                gap = (time_val - readings[i-1][0]).total_seconds()
+                if gap > 600:
+                    # Finalize cycle at previous reading
+                    in_cycle = False
+                    prev_time = readings[i-1][0]
+                    current_cycle["end_time"] = prev_time
+                    duration = current_cycle["end_time"] - current_cycle["start_time"]
+                    current_cycle["duration_minutes"] = round(duration.total_seconds() / 60, 1)
+                    
+                    valid_rh = [v for v in current_cycle["_rh_history"] if v is not None]
+                    last_10 = valid_rh[-10:] if len(valid_rh) > 10 else valid_rh
+                    current_cycle["end_rh_avg"] = round(sum(last_10) / len(last_10), 2) if last_10 else current_cycle.get("start_rh", 0)
+                    
+                    currents = current_cycle["_currents"]
+                    current_cycle["current_consumption"] = round(sum(currents), 2)
+                    current_cycle["current_spike_avg"] = round(sum(_peak_values) / len(_peak_values), 2) if _peak_values else 0.0
+                    current_cycle["ignition_count"] = len(_peak_values)
+                    
+                    del current_cycle["_rh_history"]
+                    del current_cycle["_currents"]
+                    current_cycle["start_time"] = current_cycle["start_time"].isoformat()
+                    current_cycle["end_time"] = current_cycle["end_time"].isoformat()
+                    cycles.append(current_cycle)
+                    current_cycle = {}
+                    
+                    # Reset peak state for next cycle
+                    _prev_current = 0.0
+                    _peak_rising = False
+                    _peak_max = 0.0
+                    _peak_drops = 0
+                    _peak_values = []
+
+            if imotor > cycle_start and not in_cycle:
                 in_cycle = True
                 current_cycle = {
                     "start_time": time_val,
@@ -1215,7 +1674,8 @@ def dryer_analytics(appliance_id):
             if in_cycle:
                 current_cycle["max_temp"] = max(current_cycle["max_temp"], tex)
                 current_cycle["min_temp"] = min(current_cycle["min_temp"], tex)
-                current_cycle["_rh_history"].append(rhex)
+                if rhex is not None:
+                    current_cycle["_rh_history"].append(rhex)
                 current_cycle["_currents"].append(imotor)
                 
                 # --- CURRENT PEAK DETECTION ---
@@ -1240,14 +1700,16 @@ def dryer_analytics(appliance_id):
                     
                 _prev_current = imotor
                 
-            if imotor < 0.2 and in_cycle:
+            # Threshold-based end (defensive, for very low readings if any)
+            if imotor < cycle_end and in_cycle:
                 in_cycle = False
                 current_cycle["end_time"] = time_val
                 duration = current_cycle["end_time"] - current_cycle["start_time"]
                 current_cycle["duration_minutes"] = round(duration.total_seconds() / 60, 1)
                 
-                last_10 = current_cycle["_rh_history"][-10:] if len(current_cycle["_rh_history"]) > 10 else current_cycle["_rh_history"]
-                current_cycle["end_rh_avg"] = round(sum(last_10) / len(last_10), 2) if last_10 else current_cycle["start_rh"]
+                valid_rh = [v for v in current_cycle["_rh_history"] if v is not None]
+                last_10 = valid_rh[-10:] if len(valid_rh) > 10 else valid_rh
+                current_cycle["end_rh_avg"] = round(sum(last_10) / len(last_10), 2) if last_10 else current_cycle.get("start_rh", 0)
                 
                 currents = current_cycle["_currents"]
                 current_cycle["current_consumption"] = round(sum(currents), 2)
@@ -1256,13 +1718,45 @@ def dryer_analytics(appliance_id):
                 
                 del current_cycle["_rh_history"]
                 del current_cycle["_currents"]
-                
                 current_cycle["start_time"] = current_cycle["start_time"].isoformat()
                 current_cycle["end_time"] = current_cycle["end_time"].isoformat()
-                
                 cycles.append(current_cycle)
                 current_cycle = {}
+                
+                _prev_current = 0.0
+                _peak_rising = False
+                _peak_max = 0.0
+                _peak_drops = 0
+                _peak_values = []
 
+        # Close any open cycle at end of dataset
+        if in_cycle:
+            in_cycle = False
+            last_r = readings[-1]
+            current_cycle["end_time"] = last_r[0]
+            duration = current_cycle["end_time"] - current_cycle["start_time"]
+            current_cycle["duration_minutes"] = round(duration.total_seconds() / 60, 1)
+            
+            valid_rh = [v for v in current_cycle["_rh_history"] if v is not None]
+            last_10 = valid_rh[-10:] if len(valid_rh) > 10 else valid_rh
+            current_cycle["end_rh_avg"] = round(sum(last_10) / len(last_10), 2) if last_10 else current_cycle.get("start_rh", 0)
+            
+            currents = current_cycle["_currents"]
+            current_cycle["current_consumption"] = round(sum(currents), 2)
+            current_cycle["current_spike_avg"] = round(sum(_peak_values) / len(_peak_values), 2) if _peak_values else 0.0
+            current_cycle["ignition_count"] = len(_peak_values)
+            
+            del current_cycle["_rh_history"]
+            del current_cycle["_currents"]
+            current_cycle["start_time"] = current_cycle["start_time"].isoformat()
+            current_cycle["end_time"] = current_cycle["end_time"].isoformat()
+            cycles.append(current_cycle)
+            current_cycle = {}
+
+        # Filter out noise / incomplete cycles shorter than 3 minutes
+        cycles = [c for c in cycles if c.get("duration_minutes", 0) >= 3.0]
+        
+        print(f"dryer_analytics: {len(readings)} readings, {len(cycles)} cycles detected for appliance {appliance_id}")
         return jsonify(cycles)
         
     except Exception as e:
@@ -1290,8 +1784,13 @@ def cancel_baseline(appliance_id):
         
         mac, status, app_type = row
         
-        cur.execute("UPDATE appliances SET operational_status = 'pending_baseline' WHERE id = %s", (appliance_id,))
+        cur.execute("UPDATE appliances SET operational_status = 'normal' WHERE id = %s", (appliance_id,))
         conn.commit()
+        
+        # Cancel any active baseline timer
+        if appliance_id in BASELINE_TIMER_TRACKER:
+            BASELINE_TIMER_TRACKER[appliance_id].cancel()
+            del BASELINE_TIMER_TRACKER[appliance_id]
         
         send_node_command(mac, "baselinefailack")
         
@@ -1302,6 +1801,42 @@ def cancel_baseline(appliance_id):
         if conn:
             cur.close()
             release_conn(conn)
+
+def _complete_baseline(appliance_id):
+    """Background callback to complete baseline after recording window."""
+    conn = get_conn()
+    if not conn: return
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT operational_status, baselining_since FROM appliances WHERE id = %s", (appliance_id,))
+        row = cur.fetchone()
+        if not row or row[0] != 'baselining':
+            return
+        since = row[1]
+        success, msg = do_set_baseline_calculated(appliance_id, since)
+        if success:
+            cur.execute("UPDATE appliances SET operational_status = 'normal' WHERE id = %s", (appliance_id,))
+            conn.commit()
+            cur.execute("SELECT sn.mac_address FROM sensor_nodes sn WHERE sn.appliance_id = %s", (appliance_id,))
+            mac_row = cur.fetchone()
+            if mac_row:
+                send_node_command(mac_row[0], "baselinesuccessack")
+            print(f"Baseline SUCCESS for device {appliance_id}")
+        else:
+            cur.execute("UPDATE appliances SET operational_status = 'normal' WHERE id = %s", (appliance_id,))
+            conn.commit()
+            cur.execute("SELECT sn.mac_address FROM sensor_nodes sn WHERE sn.appliance_id = %s", (appliance_id,))
+            mac_row = cur.fetchone()
+            if mac_row:
+                send_node_command(mac_row[0], "baselinefailack")
+            print(f"Baseline FAIL for device {appliance_id}: {msg}")
+    except Exception as e:
+        print(f"Baseline completion error: {e}")
+    finally:
+        if appliance_id in BASELINE_TIMER_TRACKER:
+            del BASELINE_TIMER_TRACKER[appliance_id]
+        cur.close()
+        release_conn(conn)
 
 @app.route('/api/device/<int:appliance_id>/remote_baseline', methods=['POST'])
 @login_required
@@ -1323,13 +1858,29 @@ def remote_baseline(appliance_id):
         
         if status in ['calibration_needed', 'calibrating']:
             return jsonify({'error': 'Must calibrate first'}), 400
+        if status == 'baselining':
+            return jsonify({'error': 'Baseline already in progress'}), 400
+        
+        latest_current = get_latest_current_for_appliance(appliance_id)
+        if latest_current < 0.4:
+            return jsonify({'error': f'Appliance must be running (current ≥ 0.4A). Current: {latest_current:.2f}A'}), 400
             
         cur.execute("UPDATE appliances SET operational_status = 'baselining', baselining_since = NOW() WHERE id = %s", (appliance_id,))
         conn.commit()
         
         send_node_command(mac, "baselinestartack")
         
-        return jsonify({"success": True, "message": "Baseline started remotely"})
+        # Cancel any existing timer
+        if appliance_id in BASELINE_TIMER_TRACKER:
+            BASELINE_TIMER_TRACKER[appliance_id].cancel()
+        
+        # HVAC: fixed 15 minutes. Dryer: up to 15 minutes (or cycle end handled by CYCLE_TRACKER alert logic).
+        duration = 900 if "HVAC" in app_type else 900
+        timer = threading.Timer(duration, _complete_baseline, args=[appliance_id])
+        BASELINE_TIMER_TRACKER[appliance_id] = timer
+        timer.start()
+        
+        return jsonify({"success": True, "message": "Baseline recording started"})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:
@@ -1352,8 +1903,8 @@ def pair_device():
     conn = get_conn()
     cur = conn.cursor()
     try:
-        initial_status = 'pending_baseline' if "Dryer" in dev_type else 'calibration_needed'
-        default_offset = -0.111 if "Dryer" in dev_type else -0.033
+        initial_status = 'normal' if "Dryer" in dev_type else 'calibration_needed'
+        default_offset = 0.0  # Deductor now applied in firmware
         
         cur.execute("""
             INSERT INTO appliances (user_id, name, type, location, brand, operational_status, sub_type, icompressor_offset) 
@@ -1373,9 +1924,10 @@ def pair_device():
         send_node_command(mac, cmd)
 
         if "Dryer" in dev_type:
-            flash(f'{name} added! Device is ready for 10-Minute Baseline Training.', 'success')
+            send_node_command(mac, "restore:normal")
+            flash(f'{name} added! Device is ready. Data will be logged when the appliance is running.', 'success')
         else:
-            flash(f'{name} added! Please hold BOTH physical buttons on the device to Calibrate.', 'success')
+            flash(f'{name} added! Place DHT1, DHT2, and DS18B20 at the AC supply mouth, then hold Button 2 for 5 seconds to calibrate.', 'success')
             
     except Exception as e:
         conn.rollback()
@@ -1486,9 +2038,7 @@ def baseline_calc_thread():
         if not conn: continue
         cur = conn.cursor()
         
-        cur.execute("SELECT id, baselining_since FROM appliances WHERE operational_status = 'baselining'")
-        baselining_devices = cur.fetchall()
-        
+        # Only handle calibration timeout (revert calibrating -> calibration_needed if offline)
         cur.execute("""
             UPDATE appliances 
             SET operational_status = 'calibration_needed'
@@ -1498,28 +2048,6 @@ def baseline_calc_thread():
             )
         """)
         
-        for dev_id, since in baselining_devices:
-            if not since: continue
-            diff = datetime.now() - since
-            
-            if diff.total_seconds() > 600:
-                print(f"10 minutes elapsed for device {dev_id}. Processing baseline.")
-                success, msg = do_set_baseline_calculated(dev_id, since)
-                if success:
-                    print(f"Baseline SUCCESS for device {dev_id}")
-                    cur.execute("SELECT sn.mac_address FROM sensor_nodes sn WHERE sn.appliance_id = %s", (dev_id,))
-                    mac_row = cur.fetchone()
-                    if mac_row:
-                        send_node_command(mac_row[0], "baselinesuccessack")
-                else:
-                    print(f"Baseline FAIL for device {dev_id}: {msg}")
-                    cur.execute("UPDATE appliances SET operational_status = 'pending_baseline' WHERE id = %s", (dev_id,))
-                    conn.commit()
-                    cur.execute("SELECT sn.mac_address FROM sensor_nodes sn WHERE sn.appliance_id = %s", (dev_id,))
-                    mac_row = cur.fetchone()
-                    if mac_row:
-                        send_node_command(mac_row[0], "baselinefailack")
-                        
         conn.commit()
         cur.close()
         release_conn(conn)

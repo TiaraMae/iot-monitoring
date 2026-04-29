@@ -463,10 +463,8 @@
                                     <span class="status-badge status-danger">Calib. Needed</span>
                                 {% elif a.status == 'calibrating' %}
                                     <span class="status-badge status-calibrating">Calibrating...</span>
-                                {% elif a.status == 'pending_baseline' %}
-                                    <span class="status-badge status-pending">Awaiting Training</span>
                                 {% elif a.status == 'baselining' %}
-                                    <span class="status-badge status-baselining">10-Min Training...</span>
+                                    <span class="status-badge status-baselining">Recording Baseline...</span>
                                 {% elif a.status == 'normal' %}
                                     <span class="status-badge status-normal">Normal</span>
                                 {% else %}
@@ -483,6 +481,9 @@
                                 <div class="data-point"><span class="data-label">Delta-T (Ret-Sup)</span><span class="data-value" id="mini-delta-{{ a.id }}">-- °C</span></div>
                                 <div class="data-point"><span class="data-label">Current</span><span class="data-value highlight" id="mini-amp-{{ a.id }}">-- A</span></div>
                             {% endif %}
+                        </div>
+                        <div style="margin-top:0.25rem;font-size:0.7rem;">
+                            <span id="mini-run-status-{{ a.id }}" style="display:none;" class="status-badge"></span>
                         </div>
                         <div id="offline-{{ a.id }}" style="display:none;position:absolute;bottom:0;left:0;right:0;background:var(--warning);color:white;text-align:center;font-size:0.75rem;padding:2px;">Awaiting Sensor Data...</div>
                     </div>
@@ -556,12 +557,33 @@
         <div class="detail-panel">
             <div class="detail-header">
                 <div class="detail-title" id="detail-title">Device Name</div>
-                <button class="close-btn" onclick="closeDeviceDetail()">&times;</button>
+                <div style="display:flex;align-items:center;gap:0.5rem;">
+                    <span id="detail-offline-status" class="status-badge status-danger" style="display:none;">Offline</span>
+                    <span id="detail-run-status" class="status-badge" style="display:none;"></span>
+                    <button class="close-btn" onclick="closeDeviceDetail()">&times;</button>
+                </div>
             </div>
 
             <div class="detail-body">
                 <!-- Status Action Bar -->
                 <div class="detail-actions" id="detail-action-bar"></div>
+
+                <!-- Chart Mode Toggle -->
+                <div id="chart-mode-bar" style="display:none; margin-bottom: 1rem; padding: 0.75rem; background: var(--surface); border-radius: var(--radius); border: 1px solid var(--border);">
+                    <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
+                        <label style="font-size: 0.85rem; font-weight: 600; color: var(--text);">Graph Mode:</label>
+                        <select id="chart-mode-select" onchange="onChartModeChange()" style="padding: 0.35rem 0.75rem; border-radius: var(--radius); border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.85rem;">
+                            <option value="live">Live Auto-Update (Last 1080 pts)</option>
+                            <option value="history">History Range</option>
+                        </select>
+                        <div id="history-range-inputs" style="display: none; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                            <input type="datetime-local" id="history-start" step="1" style="padding: 0.35rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem;" />
+                            <span style="color: var(--text-muted);">to</span>
+                            <input type="datetime-local" id="history-end" step="1" style="padding: 0.35rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem;" />
+                            <button class="btn btn-primary" onclick="applyHistoryRange()" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">Apply</button>
+                        </div>
+                    </div>
+                </div>
 
                 <!-- SPC Charts (Dynamic depending on HVAC or Dryer) -->
                 <div id="spc-charts-section" style="display:none">
@@ -580,6 +602,11 @@
                         <div class="spc-chart-wrapper"><canvas id="chart3"></canvas></div>
                         <div class="spc-legend" id="legend-chart-3"></div>
                     </div>
+                    <div class="spc-chart-section" id="section-chart-4" style="display:none;">
+                        <div class="spc-chart-title" id="title-chart-4">Chart 4</div>
+                        <div class="spc-chart-wrapper"><canvas id="chart4"></canvas></div>
+                        <div class="spc-legend" id="legend-chart-4"></div>
+                    </div>
                 </div>
 
                 <!-- Live Readings Grid -->
@@ -594,7 +621,7 @@
                 </div>
 
                 <!-- Data Table Section -->
-                <div style="margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--border);" id="table-container" style="display:none">
+                <div style="margin-top: 2rem; padding-top: 1.5rem; border-top: 1px solid var(--border); display: none;" id="table-container">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
                         <h3 style="font-size: 1.1rem; font-weight: 600;" id="table-title">Analytics Data</h3>
                         <button class="btn btn-primary" onclick="showExportModal()" id="btn-export" style="display:none;">📄 Export to Excel</button>
@@ -625,6 +652,36 @@
                                 <tr><td style="text-align:center; padding:2rem; color:var(--text-muted)">No maintenance records yet.</td></tr>
                             </tbody>
                         </table>
+                    </div>
+                </div>
+
+                <!-- Baseline Results Panel -->
+                <div id="baseline-results-panel" style="display:none; margin-top: 2rem; padding: 1rem; background: var(--surface); border-radius: var(--radius); border: 1px solid var(--border);">
+                    <h4 style="margin-bottom: 0.75rem; font-size: 1rem;">📊 Baseline Analysis</h4>
+                    <div id="baseline-results-content" style="font-size: 0.85rem; color: var(--text);"></div>
+                    <div style="margin-top: 0.75rem;">
+                        <button class="btn btn-primary" onclick="showThresholdPanel()" style="font-size: 0.8rem;">Edit Alert Thresholds</button>
+                        <button class="btn btn-secondary" onclick="document.getElementById('baseline-results-panel').style.display='none';" style="font-size: 0.8rem; margin-left: 0.5rem;">Dismiss</button>
+                    </div>
+                </div>
+
+                <!-- Threshold Config Panel -->
+                <div id="threshold-panel" style="display:none; margin-top: 1rem; padding: 1rem; background: var(--surface); border-radius: var(--radius); border: 1px solid var(--border);">
+                    <h4 style="margin-bottom: 0.75rem; font-size: 1rem;">⚙️ Alert Thresholds</h4>
+                    <div id="threshold-inputs" style="display: flex; flex-direction: column; gap: 0.75rem;">
+                        <!-- Populated dynamically -->
+                    </div>
+                    <div style="margin-top: 0.75rem; display: flex; gap: 0.5rem;">
+                        <button class="btn btn-primary" onclick="saveThresholds()" style="font-size: 0.8rem;">Save Thresholds</button>
+                        <button class="btn btn-secondary" onclick="document.getElementById('threshold-panel').style.display='none';" style="font-size: 0.8rem;">Cancel</button>
+                    </div>
+                </div>
+
+                <!-- Alerts Panel -->
+                <div id="alerts-panel" style="margin-top: 1rem;">
+                    <h4 style="font-size: 1rem; margin-bottom: 0.5rem;">🔔 Alerts</h4>
+                    <div id="alerts-content" style="max-height: 200px; overflow-y: auto;">
+                        <p style="font-size: 0.85rem; color: var(--text-muted);">Loading alerts...</p>
                     </div>
                 </div>
 
@@ -673,11 +730,12 @@
 
     <script>
         let currentDetailId = null;
-        let chart1 = null, chart2 = null, chart3 = null;
+        let chart1 = null, chart2 = null, chart3 = null, chart4 = null;
         let spcLimits = {};
         let statusPollInterval = null;
         let latestChartTimeMs = Date.now();
         let baselineTimerInterval = null;
+        let calibrationPollInterval = null;
 
         /* --- NAVIGATION --- */
         function toggleSidebar() {
@@ -784,10 +842,19 @@
                 const hasGraphs = (status !== 'calibration_needed' && status !== 'calibrating');
                 document.getElementById('spc-charts-section').style.display = hasGraphs ? 'block' : 'none';
                 document.getElementById('readings-grid').style.display = hasGraphs ? 'grid' : 'none';
+                document.getElementById('chart-mode-bar').style.display = hasGraphs ? 'block' : 'none';
+                
+                // Reset chart mode to live when opening a new device
+                chartMode = 'live';
+                document.getElementById('chart-mode-select').value = 'live';
+                document.getElementById('history-range-inputs').style.display = 'none';
+                historyStart = null;
+                historyEnd = null;
 
                 buildActionBar(status, id, isHVAC);
                 buildStatusPolling(id, type);
 
+                document.getElementById('table-container').style.display = 'block';
                 if (status === 'normal') {
                     document.getElementById('btn-export').style.display = 'inline-flex';
                     document.getElementById('btn-rebaseline').style.display = 'inline-flex';
@@ -798,6 +865,8 @@
 
                 updateDataTable();
                 updateMaintenanceTable();
+                loadAlerts();
+                checkBaselineResults();
 
                 if (hasGraphs) {
                     try {
@@ -819,9 +888,13 @@
             currentDetailId = null;
             if (statusPollInterval) { clearInterval(statusPollInterval); statusPollInterval = null; }
             if (baselineTimerInterval) { clearInterval(baselineTimerInterval); baselineTimerInterval = null; }
+            if (calibrationPollInterval) { clearInterval(calibrationPollInterval); calibrationPollInterval = null; }
+            const runBadge = document.getElementById('detail-run-status');
+            if (runBadge) { runBadge.style.display = 'none'; }
 
-            [chart1, chart2, chart3].forEach(c => { if(c) c.destroy(); });
-            chart1 = chart2 = chart3 = null;
+            [chart1, chart2, chart3, chart4].forEach(c => { if(c) c.destroy(); });
+            chart1 = chart2 = chart3 = chart4 = null;
+            chartTimestamps = [];
             spcLimits = {};
             latestChartTimeMs = Date.now();
         }
@@ -843,7 +916,9 @@
                     buildActionBar('baselining', id, isHVAC);
                 } else {
                     alert(data.error);
-                    btn.innerHTML = 'Start 10-Min Baseline';
+                    const card = document.querySelector(`.card[data-id="${id}"]`);
+                    const isHVAC = card && card.dataset.type.includes('HVAC');
+                    btn.innerHTML = isHVAC ? 'Start 10-Min Baseline' : 'Start Cycle Baseline';
                     btn.disabled = false;
                 }
             }).catch(e => {
@@ -854,12 +929,11 @@
         }
 
         function cancelRemoteBaseline(id) {
-            // Optional: you can add a new backend endpoint to cancel, or use an existing state reset logic.
-            alert("Cancel baseline requested. (Ensure backend logic handles this to reset to pending_baseline)");
+            alert("Cancel baseline requested. Baseline will reset to normal status.");
         }
 
         function rebaselineDevice() {
-            if(confirm("Are you sure you want to discard your old baseline and retrain the 10-minute window?")) {
+            if(confirm("Are you sure you want to discard your old baseline and start a new recording?")) {
                 startRemoteBaseline(currentDetailId);
             }
         }
@@ -868,6 +942,7 @@
         function buildActionBar(status, id, isHVAC) {
             const bar = document.getElementById('detail-action-bar');
             if (baselineTimerInterval) { clearInterval(baselineTimerInterval); baselineTimerInterval = null; }
+            if (calibrationPollInterval) { clearInterval(calibrationPollInterval); calibrationPollInterval = null; }
 
             if (status === 'calibration_needed') {
                 if (isHVAC) {
@@ -875,7 +950,7 @@
                         <div style="flex:1">
                             <h4 style="color:var(--danger); margin-bottom:5px">Calibration Required</h4>
                             <p style="font-size:0.85rem; color:var(--text-muted)">
-                                1. Place DHT1 & DHT2 together at the AC supply mouth.<br>
+                                1. Place DHT1, DHT2, and DS18B20 at the AC supply mouth.<br>
                                 2. <strong>Hold Button 2 on ESP32 for 5 seconds</strong> (buzzer beeps 1x).<br>
                                 3. Wait for Tcoil to drop 8°C. Buzzer beeps 3x when done.
                             </p>
@@ -890,72 +965,63 @@
                     <div style="flex:1">
                         <h4 style="color:var(--warning); margin-bottom:5px">Calibrating in progress...</h4>
                         <p style="font-size:0.85rem; color:var(--text-muted)">Do not move the sensors. Waiting for Coil Temp to drop 8°C.</p>
+                        <div id="calib-progress-${id}" style="margin-top:8px; display:none;">
+                            <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text); margin-bottom:4px;">
+                                <span id="calib-start-${id}">Start: --°C</span>
+                                <span id="calib-current-${id}">Current: --°C</span>
+                                <span id="calib-drop-${id}">Dropped: --°C</span>
+                            </div>
+                            <div style="background:var(--border); border-radius:4px; height:8px; overflow:hidden;">
+                                <div id="calib-bar-${id}" style="background:var(--warning); height:100%; width:0%; transition:width 0.3s;"></div>
+                            </div>
+                            <div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px; text-align:right;">
+                                Target: 8°C drop (<span id="calib-pct-${id}">0%</span>)
+                            </div>
+                        </div>
                     </div>
                     <div style="display:flex; align-items:center">
                         <span class="status-badge status-calibrating">Hardware Calibrating</span>
                     </div>
                 `;
-            } else if (status === 'pending_baseline') {
+                // Start polling calibration progress
+                startCalibrationPolling(id);
+            } else if (status === 'baselining') {
                 if (isHVAC) {
                     bar.innerHTML = `
-                        <div style="flex:1">
-                            <h4 style="color:var(--primary); margin-bottom:5px">Ready for Baseline Training</h4>
-                            <p style="font-size:0.85rem; color:var(--text-muted)">
-                                Calibration done!<br>
-                                1. Move sensors to proper positions (Return & Supply vents).<br>
-                                2. Turn AC On.<br>
-                                3. Click the Start button below or hold Button 2 for 2s on the device.
-                            </p>
-                            <div style="margin-top:10px;">
-                                <button id="btn-remote-baseline" class="btn btn-primary" onclick="startRemoteBaseline('${id}')">Start 10-Min Baseline</button>
-                            </div>
+                        <div style="flex:1;">
+                            <h4 style="color:var(--primary); margin-bottom:5px;">15-Minute Baseline Recording in Progress...</h4>
+                            <p style="font-size:0.85rem; color:var(--text-muted);">Do not turn off the appliance. Baseline will complete automatically after 15 minutes.</p>
                         </div>
-                        <div style="display:flex; align-items:center">
-                            <span class="status-badge status-pending">Awaiting Training</span>
+                        <div style="display:flex; align-items:center;">
+                            <span class="status-badge status-baselining">Recording Data...</span>
                         </div>
                     `;
                 } else {
                     bar.innerHTML = `
-                        <div style="flex:1">
-                            <h4 style="color:var(--primary); margin-bottom:5px">Ready for Baseline Training</h4>
-                            <p style="font-size:0.85rem; color:var(--text-muted)">
-                                1. Ensure sensors are installed in the exhaust duct.<br>
-                                2. Turn Gas Dryer On.<br>
-                                3. Click the Start button below or hold Button 2 for 2s on the device.
-                            </p>
-                            <div style="margin-top:10px;">
-                                <button id="btn-remote-baseline" class="btn btn-primary" onclick="startRemoteBaseline('${id}')">Start 10-Min Baseline</button>
-                            </div>
+                        <div style="flex:1;">
+                            <h4 style="color:var(--primary); margin-bottom:5px;">Recording Baseline Cycle...</h4>
+                            <p style="font-size:0.85rem; color:var(--text-muted);">Do not turn off the gas dryer. Baseline will complete automatically after the cycle ends or 15 minutes.</p>
                         </div>
-                        <div style="display:flex; align-items:center">
-                            <span class="status-badge status-pending">Awaiting Training</span>
+                        <div style="display:flex; align-items:center;">
+                            <span class="status-badge status-baselining">Recording Cycle...</span>
                         </div>
                     `;
                 }
-                    } else if (status === 'baselining') {
-        bar.innerHTML = `
-            <div style="flex:1;">
-                <h4 style="color:var(--primary); margin-bottom:5px;">10-Minute Baseline Recording in Progress...</h4>
-                <p style="font-size:0.85rem; color:var(--text-muted);">Do not turn off the appliance. 
-                <span id="timer-${id}" class="countdown-timer">Syncing...</span> remaining.</p>
-            </div>
-            <div style="display:flex; align-items:center;">
-                <span class="status-badge status-baselining">Recording Data...</span>
-            </div>
-        `;
-        
-        // Ping the backend for the exact remaining seconds
-        fetch(`/api/device/${id}/spc_limits`)
-            .then(r => r.json())
-            .then(d => {
-                startCountdownUI(id, d.remaining_seconds !== undefined ? d.remaining_seconds : 600);
-            })
-            .catch(() => startCountdownUI(id, 600)); // Fallback to 10 mins if network fails
-    } else {
+            } else {
+                // normal status
+                let baselineBtn = '';
+                if (isHVAC) {
+                    baselineBtn = `<button id="btn-remote-baseline" class="btn btn-primary" style="margin-left:10px;" onclick="startRemoteBaseline('${id}')">Start Baseline</button>`;
+                } else {
+                    baselineBtn = `<button id="btn-remote-baseline" class="btn btn-primary" style="margin-left:10px;" onclick="startRemoteBaseline('${id}')">Start Baseline</button>`;
+                }
                 bar.innerHTML = `
                     <div style="flex:1">
                         <h4 style="color:var(--success); margin-bottom:5px">System Normal & Actively Monitoring</h4>
-                        <p style="font-size:0.85rem; color:var(--text-muted)">Baselines set. To overwrite them, click 'Restart Baseline' below.</p>
+                        <p style="font-size:0.85rem; color:var(--text-muted)">Data is being logged when the appliance is running.</p>
+                    </div>
+                    <div style="display:flex; align-items:center; gap:0.5rem;">
+                        ${baselineBtn}
                     </div>
                 `;
             }
@@ -993,6 +1059,36 @@
         }, 1000);
     }
 
+    function startCalibrationPolling(id) {
+        if (calibrationPollInterval) clearInterval(calibrationPollInterval);
+        const progressDiv = document.getElementById(`calib-progress-${id}`);
+        if (progressDiv) progressDiv.style.display = 'block';
+        
+        function updateCalibUI(d) {
+            const startEl = document.getElementById(`calib-start-${id}`);
+            const currentEl = document.getElementById(`calib-current-${id}`);
+            const dropEl = document.getElementById(`calib-drop-${id}`);
+            const barEl = document.getElementById(`calib-bar-${id}`);
+            const pctEl = document.getElementById(`calib-pct-${id}`);
+            if (startEl) startEl.innerText = `Start: ${d.start_tcoil}°C`;
+            if (currentEl) currentEl.innerText = `Current: ${d.current_tcoil}°C`;
+            if (dropEl) dropEl.innerText = `Dropped: ${d.drop}°C`;
+            if (barEl) barEl.style.width = `${d.progress_pct}%`;
+            if (pctEl) pctEl.innerText = `${d.progress_pct}%`;
+        }
+        
+        // Fetch immediately
+        fetch(`/api/device/${id}/calibration_progress`).then(r => r.json()).then(d => {
+            if (!d.error) updateCalibUI(d);
+        }).catch(() => {});
+        
+        calibrationPollInterval = setInterval(() => {
+            fetch(`/api/device/${id}/calibration_progress`).then(r => r.json()).then(d => {
+                if (!d.error) updateCalibUI(d);
+            }).catch(() => {});
+        }, 3000);
+    }
+
         /* --- STATUS POLLING --- */
         function buildStatusPolling(id, type) {
             const isHVAC = type.includes('HVAC');
@@ -1009,8 +1105,7 @@
                             const badge = card.querySelector('.status-badge');
                             if (badge) {
                                 if (data.status === 'normal') { badge.className = 'status-badge status-normal'; badge.innerText = 'Normal'; }
-                                else if (data.status === 'baselining') { badge.className = 'status-badge status-baselining'; badge.innerText = '10-Min Training...'; }
-                                else if (data.status === 'pending_baseline') { badge.className = 'status-badge status-pending'; badge.innerText = 'Awaiting Training'; }
+                                else if (data.status === 'baselining') { badge.className = 'status-badge status-baselining'; badge.innerText = 'Recording Baseline...'; }
                                 else if (data.status === 'calibration_needed') { badge.className = 'status-badge status-danger'; badge.innerText = 'Calib. Needed'; }
                                 else if (data.status === 'calibrating') { badge.className = 'status-badge status-calibrating'; badge.innerText = 'Calibrating...'; }
                             }
@@ -1079,13 +1174,21 @@
     }
     
     // Fetch the correct analytics table data (Cycle Summary for Dryer, Daily Averages for HVAC)
-    const endpoint = isHVAC ? `/api/device/${currentDetailId}/hvac_analytics` : `/api/device/${currentDetailId}/dryer_analytics`;
+    let endpoint = isHVAC ? `/api/device/${currentDetailId}/hvac_analytics` : `/api/device/${currentDetailId}/dryer_analytics`;
+    if (chartMode === 'history' && historyStart && historyEnd) {
+        endpoint += `?start=${encodeURIComponent(historyStart)}&end=${encodeURIComponent(historyEnd)}`;
+    }
     
     fetch(endpoint)
         .then(r => r.json())
         .then(data => {
             const tbody = document.getElementById('table-body');
             const headers = document.getElementById('table-headers');
+            
+            if (data.error) {
+                tbody.innerHTML = `<tr><td colspan="11" style="text-align:center; padding:2rem; color:red;">Error: ${data.error}</td></tr>`;
+                return;
+            }
             
             if (!data || data.length === 0) {
                 tbody.innerHTML = `<tr><td colspan="11" style="text-align:center; padding:2rem; color:var(--text-muted);">No data available yet.</td></tr>`;
@@ -1127,8 +1230,8 @@
                         <td style="padding: 0.5rem 1rem;">${row.avg_coil} °C</td>
                     `;
                 } else {
-                    const startObj = new Date(row.start_time).toLocaleTimeString();
-                    const endObj = new Date(row.end_time).toLocaleTimeString();
+                    const startObj = new Date(row.start_time).toLocaleString();
+                    const endObj = new Date(row.end_time).toLocaleString();
                     tr.innerHTML = `
                         <td style="padding: 0.5rem 1rem;">${idx + 1}</td>
                         <td style="padding: 0.5rem 1rem; white-space: nowrap;">${startObj}</td>
@@ -1180,34 +1283,55 @@
         }
 
         /* --- CHARTS --- */
+        const MAX_CHART_POINTS = 1080;
+        let chartMode = 'live';
+        let historyStart = null;
+        let historyEnd = null;
+        let chartTimestamps = []; // parallel ISO timestamps for tooltip full date display
+        let initChartsRequestId = 0; // ignore stale fetch callbacks
+
+        function fmtTimeLabel(date) {
+            return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+        }
+
         function makeSPCChartOptions(yLabel) {
             return {
                 responsive: true, maintainAspectRatio: false, animation: false,
                 scales: {
-                    x: { type: 'time', time: { unit: 'minute', tooltipFormat: 'HH:mm:ss' }, ticks: { maxTicksLimit: 6, font: { size: 10 } } },
+                    x: { type: 'category', ticks: { maxTicksLimit: 8, autoSkip: true, font: { size: 10 } } },
                     y: { title: { display: true, text: yLabel, font: { size: 10 } }, ticks: { font: { size: 10 } } }
                 },
-                plugins: { legend: { display: false } }
+                plugins: {
+                    legend: { display: false },
+                    tooltip: {
+                        callbacks: {
+                            title: function(context) {
+                                const idx = context[0].dataIndex;
+                                const ts = chartTimestamps[idx];
+                                if (ts) {
+                                    const d = new Date(ts);
+                                    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
+                                }
+                                return '';
+                            }
+                        }
+                    }
+                }
             };
         }
 
-        function updateChartWindows(maxTimeMs) {
-            const minTimeMs = maxTimeMs - (6 * 60 * 60 * 1000); // exactly 6 hours back
-            [chart1, chart2, chart3].forEach(c => {
-                if (c && c.options && c.options.scales && c.options.scales.x) {
-                    c.options.scales.x.min = minTimeMs;
-                    c.options.scales.x.max = maxTimeMs;
-                }
-            });
-        }
-
         function initCharts(id, isHVAC) {
-            [chart1, chart2, chart3].forEach(c => { if(c) c.destroy(); });
+            const reqId = ++initChartsRequestId;
+            [chart1, chart2, chart3, chart4].forEach(c => { if(c) c.destroy(); });
+            chart1 = chart2 = chart3 = chart4 = null;
+            latestChartTimeMs = 0;  // Reset dedup tracker before loading history
 
             const mkDataset = (label, color, dash, fill=false) => ({
                 label: label, data: [], borderColor: color, backgroundColor: fill ? color+'33' : 'transparent',
                 borderWidth: dash.length ? 1.5 : 2, borderDash: dash, pointRadius: dash.length ? 0 : 2, tension: 0.3, fill: fill
             });
+
+            document.getElementById('section-chart-4').style.display = isHVAC ? 'none' : 'block';
 
             if (isHVAC) {
                 document.getElementById('title-chart-1').innerText = "T Return minus Supply Temperature";
@@ -1253,113 +1377,175 @@
                 });
 
             } else {
-                // Dryer Charts
-                document.getElementById('title-chart-1').innerText = "Exhaust Temperature & Humidity";
+                // Dryer Charts — 4 separate graphs
+                document.getElementById('title-chart-1').innerText = "Exhaust Temperature";
                 document.getElementById('legend-chart-1').innerHTML = `
                     <span><span class="spc-legend-line" style="background:#DC2626"></span>Temp °C</span>
-                    <span><span class="spc-legend-line" style="background:#0284C7"></span>RH %</span>
+                    <span><span class="spc-legend-line" style="background:#EF4444; border-top:2px dashed #EF4444"></span>UCL</span>
+                    <span><span class="spc-legend-line" style="background:#64748B; border-top:2px dashed #64748B"></span>Mean</span>
+                    <span><span class="spc-legend-line" style="background:#3B82F6; border-top:2px dashed #3B82F6"></span>LCL</span>
                 `;
                 chart1 = new Chart(document.getElementById('chart1').getContext('2d'), {
                     type: 'line', data: { datasets: [
-                        mkDataset('Temp °C', '#DC2626', []), mkDataset('RH %', '#0284C7', [])
-                    ] }, options: makeSPCChartOptions('Val')
+                        mkDataset('Temp °C', '#DC2626', []), mkDataset('UCL', '#EF4444', [6,3]),
+                        mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
+                    ] }, options: makeSPCChartOptions('°C')
                 });
 
-                document.getElementById('title-chart-2').innerText = "Exhaust Pressure";
+                document.getElementById('title-chart-2').innerText = "Exhaust Humidity";
                 document.getElementById('legend-chart-2').innerHTML = `
-                    <span><span class="spc-legend-line" style="background:#059669"></span>Pressure hPa</span>
+                    <span><span class="spc-legend-line" style="background:#0284C7"></span>RH %</span>
+                    <span><span class="spc-legend-line" style="background:#EF4444; border-top:2px dashed #EF4444"></span>UCL</span>
+                    <span><span class="spc-legend-line" style="background:#64748B; border-top:2px dashed #64748B"></span>Mean</span>
+                    <span><span class="spc-legend-line" style="background:#3B82F6; border-top:2px dashed #3B82F6"></span>LCL</span>
                 `;
                 chart2 = new Chart(document.getElementById('chart2').getContext('2d'), {
                     type: 'line', data: { datasets: [
-                        mkDataset('Pressure', '#059669', [], true)
+                        mkDataset('RH %', '#0284C7', []), mkDataset('UCL', '#EF4444', [6,3]),
+                        mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
+                    ] }, options: makeSPCChartOptions('%')
+                });
+
+                document.getElementById('title-chart-3').innerText = "Exhaust Pressure";
+                document.getElementById('legend-chart-3').innerHTML = `
+                    <span><span class="spc-legend-line" style="background:#059669"></span>Pressure hPa</span>
+                    <span><span class="spc-legend-line" style="background:#EF4444; border-top:2px dashed #EF4444"></span>UCL</span>
+                    <span><span class="spc-legend-line" style="background:#64748B; border-top:2px dashed #64748B"></span>Mean</span>
+                    <span><span class="spc-legend-line" style="background:#3B82F6; border-top:2px dashed #3B82F6"></span>LCL</span>
+                `;
+                chart3 = new Chart(document.getElementById('chart3').getContext('2d'), {
+                    type: 'line', data: { datasets: [
+                        mkDataset('Pressure', '#059669', [], true), mkDataset('UCL', '#EF4444', [6,3]),
+                        mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
                     ] }, options: makeSPCChartOptions('hPa')
                 });
 
-                document.getElementById('title-chart-3').innerText = "Motor Current (Gas Ignition Spikes)";
-                document.getElementById('legend-chart-3').innerHTML = `
+                document.getElementById('title-chart-4').innerText = "Motor Current (Gas Ignition Spikes)";
+                document.getElementById('legend-chart-4').innerHTML = `
                     <span><span class="spc-legend-line" style="background:#F59E0B"></span>Current A</span>
                 `;
-                chart3 = new Chart(document.getElementById('chart3').getContext('2d'), {
+                chart4 = new Chart(document.getElementById('chart4').getContext('2d'), {
                     type: 'line', data: { datasets: [
                         mkDataset('Current A', '#F59E0B', [], true)
                     ] }, options: makeSPCChartOptions('A')
                 });
             }
 
-               // Fetch history
-    fetch(`/api/device/${id}/latest_n?limit=4500`)
-        .then(r => r.json())
-        .then(hist => {
-            if (!hist || hist.error || hist.length === 0) return;
-            
-            const newestTimeMs = new Date(hist[hist.length - 1].time).getTime();
-            latestChartTimeMs = newestTimeMs;
-            
-            hist.forEach(d => {
-                if (isHVAC) {
-                    // Correctly load HVAC history without the [0] arrays
-                    pushToCharts(new Date(d.time), Math.abs(d.Treturn - d.Tsupply), d.Tcoil, d.Icompressor, false, isHVAC);
-                } else {
-                    // Correctly load Dryer history using real dryer variables
-                    pushToCharts(new Date(d.time), [d.Texhaust, d.RHexhaust], d.Pressure, d.Imotor, false, isHVAC);
-                }
-            });
-            
-            if (isHVAC && spcLimits && spcLimits.delta_t) {
-                applySPCLines();
+            // Fetch history
+            chartTimestamps = [];
+            const limit = chartMode === 'live' ? MAX_CHART_POINTS : 5000;
+            let url = `/api/device/${id}/latest_n?limit=${limit}`;
+            if (chartMode === 'history' && historyStart && historyEnd) {
+                url += `&start=${encodeURIComponent(historyStart)}&end=${encodeURIComponent(historyEnd)}`;
             }
-            
-            [chart1, chart2, chart3].forEach(c => {
-                if (c) c.update('none');
-            });
-        })
-        .catch(e => console.error("History fetch error:", e));
+            fetch(url)
+                .then(r => r.json())
+                .then(hist => {
+                    if (reqId !== initChartsRequestId) return; // ignore stale callback
+                    if (!hist || hist.error || hist.length === 0) return;
+                    
+                    hist.forEach(d => {
+                        if (isHVAC) {
+                            pushToCharts(new Date(d.time), Math.abs(d.Treturn - d.Tsupply), d.Tcoil, d.Icompressor, null, false, isHVAC);
+                        } else {
+                            pushToCharts(new Date(d.time), d.Texhaust, d.RHexhaust, d.Pressure, d.Imotor, false, isHVAC);
+                        }
+                    });
+                    
+                    if (spcLimits) applySPCLines();
+                    
+                    [chart1, chart2, chart3, chart4].forEach(c => {
+                        if (c) c.update('none');
+                    });
+                })
+                .catch(e => console.error("History fetch error:", e));
         }
 
         function applySPCLines() {
-            if (!spcLimits || !spcLimits.deltat) return;
-            const maxMs = latestChartTimeMs;
-            const minMs = maxMs - (6 * 60 * 60 * 1000);
+            if (!spcLimits) return;
 
             function setLines(chart, limits) {
                 if (!chart || !limits) return;
-                [limits.ucl, limits.mean, limits.lcl].forEach((val, i) => {
-                    chart.data.datasets[Math.floor(i)+1].data = [{x: minMs, y: val}, {x: maxMs, y: val}];
-                });
+                const n = chart.data.labels.length;
+                if (n === 0) return;
+                chart.data.datasets[1].data = Array(n).fill(limits.ucl);
+                chart.data.datasets[2].data = Array(n).fill(limits.mean);
+                chart.data.datasets[3].data = Array(n).fill(limits.lcl);
                 chart.update('quiet');
             }
-            setLines(chart1, spcLimits.deltat);
-            setLines(chart2, spcLimits.tcoil);
-            setLines(chart3, spcLimits.current);
+            if (spcLimits.deltat) {
+                setLines(chart1, spcLimits.deltat);
+                setLines(chart2, spcLimits.tcoil);
+                setLines(chart3, spcLimits.current);
+            } else if (spcLimits.temp) {
+                setLines(chart1, spcLimits.temp);
+                setLines(chart2, spcLimits.humidity);
+                setLines(chart3, spcLimits.pressure);
+            }
         }
 
-        function pushToCharts(time, val1, val2, val3, doUpdate=true, isHVAC=true) {
+        function pushToCharts(time, val1, val2, val3, val4, doUpdate=true, isHVAC=true) {
             const timeMs = time instanceof Date ? time.getTime() : time;
-            if (timeMs > latestChartTimeMs) latestChartTimeMs = timeMs;
-            const cutoffMs = latestChartTimeMs - (6.1 * 60 * 60 * 1000);
+            if (timeMs <= latestChartTimeMs) return; // skip duplicates / out-of-order
+            latestChartTimeMs = timeMs;
+            const label = time instanceof Date ? fmtTimeLabel(time) : fmtTimeLabel(new Date(time));
+            const isoStr = time instanceof Date ? time.toISOString() : new Date(time).toISOString();
 
-            function updateDataset(chart, dsIndex, val) {
+            function updateChart(chart, val) {
                 if (!chart) return;
-                const ds = chart.data.datasets[dsIndex].data;
-                ds.push({x: timeMs, y: val});
-                while (ds.length > 0 && ds[0].x < cutoffMs) ds.shift();
+                chart.data.labels.push(label);
+                chart.data.datasets[0].data.push(val);
+                if (chartMode === 'live') {
+                    while (chart.data.labels.length > MAX_CHART_POINTS) {
+                        chart.data.labels.shift();
+                        chart.data.datasets.forEach(ds => { if (ds.data.length) ds.data.shift(); });
+                    }
+                }
+            }
+            chartTimestamps.push(isoStr);
+            if (chartMode === 'live') {
+                while (chartTimestamps.length > MAX_CHART_POINTS) chartTimestamps.shift();
             }
 
             if(isHVAC) {
-                updateDataset(chart1, 0, val1); // Delta
-                updateDataset(chart2, 0, val2); // Tcoil
-                updateDataset(chart3, 0, val3); // Curr
+                updateChart(chart1, val1);
+                updateChart(chart2, val2);
+                updateChart(chart3, val3);
             } else {
-                updateDataset(chart1, 0, val1[0]); // Temp
-                updateDataset(chart1, 1, val1[1]); // RH
-                updateDataset(chart2, 0, val2);    // Pres
-                updateDataset(chart3, 0, val3);    // Curr
+                updateChart(chart1, val1);
+                updateChart(chart2, val2);
+                updateChart(chart3, val3);
+                updateChart(chart4, val4);
             }
 
             if (doUpdate) {
-                updateChartWindows(latestChartTimeMs);
-                [chart1, chart2, chart3].forEach(c => { if(c) c.update('quiet'); });
-                if (isHVAC && spcLimits && spcLimits.deltat) applySPCLines();
+                [chart1, chart2, chart3, chart4].forEach(c => { if(c) c.update('quiet'); });
+                if (spcLimits) applySPCLines();
+            }
+        }
+
+        /* --- CHART MODE TOGGLE --- */
+        function onChartModeChange() {
+            const mode = document.getElementById('chart-mode-select').value;
+            document.getElementById('history-range-inputs').style.display = (mode === 'history') ? 'flex' : 'none';
+            chartMode = mode;
+            if (mode === 'live' && currentDetailId) {
+                const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
+                if (card) initCharts(currentDetailId, card.dataset.type.includes('HVAC'));
+            }
+        }
+
+        function applyHistoryRange() {
+            const start = document.getElementById('history-start').value;
+            const end = document.getElementById('history-end').value;
+            if (!start || !end) { alert("Please select both start and end times."); return; }
+            historyStart = start;
+            historyEnd = end;
+            chartMode = 'history';
+            if (currentDetailId) {
+                const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
+                if (card) initCharts(currentDetailId, card.dataset.type.includes('HVAC'));
+                updateDataTable();
             }
         }
 
@@ -1369,15 +1555,43 @@
         const id = card.dataset.id;
         const type = card.dataset.type;
         
-        fetch(`/api/node/${id}/latest`)
-            .then(r => {
-                if (!r.ok) throw new Error("Offline");
-                return r.json();
-            })
+        fetch(`/api/device/${id}/latest`)
+            .then(r => r.json())
             .then(data => {
-                if (data.error) throw new Error("Error");
-                document.getElementById(`offline-${id}`).style.display = 'none';
+                const offlineBanner = document.getElementById(`offline-${id}`);
+                const runBadge = document.getElementById(`mini-run-status-${id}`);
                 
+                if (data.is_offline) {
+                    // Device hasn't checked in for >10 minutes
+                    offlineBanner.innerText = 'Device Offline';
+                    offlineBanner.style.background = 'var(--danger)';
+                    offlineBanner.style.display = 'block';
+                    if (runBadge) runBadge.style.display = 'none';
+                    return;
+                }
+                
+                if (!data.has_data) {
+                    // Node is alive but has never sent telemetry
+                    offlineBanner.innerText = 'Awaiting Sensor Data...';
+                    offlineBanner.style.background = 'var(--warning)';
+                    offlineBanner.style.display = 'block';
+                    if (runBadge) runBadge.style.display = 'none';
+                    return;
+                }
+                
+                // Online with data
+                offlineBanner.style.display = 'none';
+                
+                if (runBadge && data.running_status) {
+                    runBadge.style.display = 'inline-block';
+                    if (data.running_status === 'running') {
+                        runBadge.className = 'status-badge status-normal';
+                        runBadge.innerText = 'Running';
+                    } else {
+                        runBadge.className = 'status-badge status-pending';
+                        runBadge.innerText = 'Idle';
+                    }
+                }
                 if (type.includes("HVAC")) {
                     const delta = Math.abs(data.Treturn - data.Tsupply).toFixed(1);
                     const elD = document.getElementById(`mini-delta-${id}`);
@@ -1392,13 +1606,20 @@
                 }
             })
             .catch(() => {
-                document.getElementById(`offline-${id}`).style.display = 'block';
+                // Network / server error
+                const offlineBanner = document.getElementById(`offline-${id}`);
+                offlineBanner.innerText = 'Awaiting Sensor Data...';
+                offlineBanner.style.background = 'var(--warning)';
+                offlineBanner.style.display = 'block';
+                const runBadge = document.getElementById(`mini-run-status-${id}`);
+                if (runBadge) runBadge.style.display = 'none';
             });
     });
 }
 
         function updateDetailData() {
     if (!currentDetailId) return;
+    if (!document.getElementById('detail-overlay').classList.contains('active')) return;
     const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
     if (!card) return;
     const isHVAC = card.dataset.type.includes('HVAC');
@@ -1406,8 +1627,92 @@
     fetch(`/api/device/${currentDetailId}/latest`)
         .then(r => r.json())
         .then(data => {
+            const runBadge = document.getElementById('detail-run-status');
+            const offlineBadge = document.getElementById('detail-offline-status');
+            
+            if (data.is_offline) {
+                if (offlineBadge) {
+                    offlineBadge.style.display = 'inline-block';
+                    offlineBadge.innerText = 'Offline';
+                }
+                if (runBadge) runBadge.style.display = 'none';
+                document.getElementById('detail-t1').innerText = '-- °C';
+                if (isHVAC) {
+                    document.getElementById('detail-t2').innerText = '-- °C';
+                    document.getElementById('detail-t3').innerText = '-- °C';
+                    document.getElementById('detail-h1').innerText = '-- %';
+                    document.getElementById('detail-h2').innerText = '-- %';
+                    document.getElementById('detail-delta').innerText = '-- °C';
+                } else {
+                    document.getElementById('detail-h1').innerText = '-- %';
+                    document.getElementById('detail-delta').innerText = '-- hPa';
+                }
+                document.getElementById('detail-amp').innerText = '-- A';
+                return;
+            }
+            
+            if (!data.has_data) {
+                if (offlineBadge) {
+                    offlineBadge.style.display = 'inline-block';
+                    offlineBadge.innerText = 'Awaiting Data';
+                    offlineBadge.className = 'status-badge status-warning';
+                }
+                if (runBadge) runBadge.style.display = 'none';
+                document.getElementById('detail-t1').innerText = '-- °C';
+                if (isHVAC) {
+                    document.getElementById('detail-t2').innerText = '-- °C';
+                    document.getElementById('detail-t3').innerText = '-- °C';
+                    document.getElementById('detail-h1').innerText = '-- %';
+                    document.getElementById('detail-h2').innerText = '-- %';
+                    document.getElementById('detail-delta').innerText = '-- °C';
+                } else {
+                    document.getElementById('detail-h1').innerText = '-- %';
+                    document.getElementById('detail-delta').innerText = '-- hPa';
+                }
+                document.getElementById('detail-amp').innerText = '-- A';
+                return;
+            }
+            
+            if (offlineBadge) offlineBadge.style.display = 'none';
+            
+            // Handle uncalibrated HVAC
+            if (data.calibrated === false) {
+                if (runBadge) {
+                    runBadge.style.display = 'inline-block';
+                    runBadge.className = 'status-badge status-warning';
+                    runBadge.innerText = 'Uncalibrated';
+                }
+                // Clear numeric displays
+                document.getElementById('detail-t1').innerText = '-- °C';
+                if (isHVAC) {
+                    document.getElementById('detail-t2').innerText = '-- °C';
+                    document.getElementById('detail-t3').innerText = '-- °C';
+                    document.getElementById('detail-h1').innerText = '-- %';
+                    document.getElementById('detail-h2').innerText = '-- %';
+                    document.getElementById('detail-delta').innerText = '-- °C';
+                } else {
+                    document.getElementById('detail-h1').innerText = '-- %';
+                    document.getElementById('detail-delta').innerText = '-- hPa';
+                }
+                document.getElementById('detail-amp').innerText = '-- A';
+                return;
+            }
+            
             if (data.error) return;
             const now = new Date(data.time);
+            
+            if (runBadge && data.running_status) {
+                runBadge.style.display = 'inline-block';
+                if (data.running_status === 'running') {
+                    runBadge.className = 'status-badge status-normal';
+                    runBadge.innerText = 'Running';
+                } else {
+                    runBadge.className = 'status-badge status-pending';
+                    runBadge.innerText = 'Idle';
+                }
+            }
+            const timeMs = now.getTime();
+            const shouldPush = (chartMode === 'live') && (timeMs > latestChartTimeMs);
             
             if (isHVAC) {
                 const delta = Math.abs(data.Treturn - data.Tsupply);
@@ -1419,18 +1724,118 @@
                 document.getElementById('detail-amp').innerText = data.Icompressor.toFixed(2) + ' A';
                 document.getElementById('detail-delta').innerText = delta.toFixed(1) + ' °C';
                 
-                pushToCharts(now, delta, data.Tcoil, data.Icompressor, true, isHVAC);
+                if (shouldPush) {
+                    pushToCharts(now, delta, data.Tcoil, data.Icompressor, null, true, isHVAC);
+                }
             } else {
                 document.getElementById('detail-t1').innerText = data.Texhaust.toFixed(1) + ' °C';
                 document.getElementById('detail-h1').innerText = data.RHexhaust.toFixed(1) + ' %';
                 document.getElementById('detail-delta').innerText = data.Pressure.toFixed(1) + ' hPa';
                 document.getElementById('detail-amp').innerText = data.Imotor.toFixed(2) + ' A';
                 
-                pushToCharts(now, [data.Texhaust, data.RHexhaust], data.Pressure, data.Imotor, true, isHVAC);
+                if (shouldPush) {
+                    pushToCharts(now, data.Texhaust, data.RHexhaust, data.Pressure, data.Imotor, true, isHVAC);
+                }
             }
         })
         .catch(e => console.error("Error updating detail data:", e));
 }
+
+        function showThresholdPanel() {
+            const panel = document.getElementById('threshold-panel');
+            panel.style.display = 'block';
+            const inputsDiv = document.getElementById('threshold-inputs');
+            const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
+            const isHVAC = card && card.dataset.type.includes('HVAC');
+            
+            fetch(`/api/device/${currentDetailId}/baseline_analysis`).then(r => r.json()).then(data => {
+                if (data.error) return;
+                if (isHVAC) {
+                    inputsDiv.innerHTML = `
+                        <div><label style="font-size:0.8rem;">Delta-T Alert Range (±°C from mean)</label><input type="number" id="thresh-deltat" step="0.1" value="${data.deltat && data.deltat.std ? data.deltat.std * 3 : 3}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>
+                        <div><label style="font-size:0.8rem;">Coil Temp Alert Range (±°C from mean)</label><input type="number" id="thresh-tcoil" step="0.1" value="${data.tcoil && data.tcoil.std ? data.tcoil.std * 3 : 5}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>
+                    `;
+                } else {
+                    inputsDiv.innerHTML = `
+                        <div><label style="font-size:0.8rem;">Max Exhaust Humidity (%)</label><input type="number" id="thresh-rhexhaust" step="0.1" min="0" max="100" value="${data.alert_rhexhaust_threshold !== undefined ? data.alert_rhexhaust_threshold : 40.0}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>
+                        <div><label style="font-size:0.8rem;"><input type="checkbox" id="thresh-enabled" ${data.alert_enabled ? 'checked' : ''}> Enable Alerts</label></div>
+                    `;
+                }
+            }).catch(() => {});
+        }
+
+        function saveThresholds() {
+            const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
+            const isHVAC = card && card.dataset.type.includes('HVAC');
+            const payload = {};
+            if (isHVAC) {
+                // HVAC thresholds stored differently — for now just placeholder
+                alert('HVAC threshold saving not yet implemented.');
+                return;
+            } else {
+                const thr = document.getElementById('thresh-rhexhaust');
+                const en = document.getElementById('thresh-enabled');
+                if (thr) payload.alert_rhexhaust_threshold = parseFloat(thr.value);
+                if (en) payload.alert_enabled = en.checked;
+            }
+            fetch(`/api/device/${currentDetailId}/thresholds`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            }).then(r => r.json()).then(data => {
+                if (data.success) {
+                    document.getElementById('threshold-panel').style.display = 'none';
+                    alert('Thresholds saved.');
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown'));
+                }
+            }).catch(e => alert('Error saving thresholds: ' + e));
+        }
+
+        function loadAlerts() {
+            if (!currentDetailId) return;
+            const content = document.getElementById('alerts-content');
+            fetch(`/api/device/${currentDetailId}/alerts`).then(r => r.json()).then(data => {
+                if (!data || data.length === 0) {
+                    content.innerHTML = '<p style="font-size:0.85rem; color:var(--text-muted);">No alerts.</p>';
+                    return;
+                }
+                content.innerHTML = '';
+                data.forEach(alert => {
+                    const div = document.createElement('div');
+                    div.style.cssText = 'padding: 0.5rem; margin-bottom: 0.5rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem;';
+                    div.style.borderLeft = alert.resolved_at ? '3px solid var(--success)' : '3px solid var(--danger)';
+                    div.innerHTML = `<strong>${alert.alert_type}</strong> — ${alert.message}<br><span style="color:var(--text-muted);">${new Date(alert.created_at).toLocaleString()}</span>`;
+                    content.appendChild(div);
+                });
+            }).catch(() => {
+                content.innerHTML = '<p style="font-size:0.85rem; color:var(--text-muted);">Unable to load alerts.</p>';
+            });
+        }
+
+        function checkBaselineResults() {
+            if (!currentDetailId) return;
+            const panel = document.getElementById('baseline-results-panel');
+            const content = document.getElementById('baseline-results-content');
+            fetch(`/api/device/${currentDetailId}/baseline_analysis`).then(r => r.json()).then(data => {
+                if (data.error || !data.status) return;
+                const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
+                const isHVAC = card && card.dataset.type.includes('HVAC');
+                
+                let html = '';
+                if (isHVAC) {
+                    html += `<div>ΔT Mean: ${data.deltat && data.deltat.mean !== null ? data.deltat.mean.toFixed(2) : '--'} °C</div>`;
+                    html += `<div>Coil Temp Mean: ${data.tcoil && data.tcoil.mean !== null ? data.tcoil.mean.toFixed(2) : '--'} °C</div>`;
+                    html += `<div>Current Mean: ${data.current && data.current.mean !== null ? data.current.mean.toFixed(2) : '--'} A</div>`;
+                } else {
+                    html += `<div>Temp Mean: ${data.temp && data.temp.mean !== null ? data.temp.mean.toFixed(2) : '--'} °C</div>`;
+                    html += `<div>Humidity Mean: ${data.humidity && data.humidity.mean !== null ? data.humidity.mean.toFixed(2) : '--'} %</div>`;
+                    html += `<div>Pressure Mean: ${data.pressure && data.pressure.mean !== null ? data.pressure.mean.toFixed(2) : '--'} hPa</div>`;
+                    html += `<div>Current Min/Max: ${data.current && data.current.min !== null ? data.current.min.toFixed(2) : '--'} / ${data.current && data.current.max !== null ? data.current.max.toFixed(2) : '--'} A</div>`;
+                }
+                content.innerHTML = html;
+            }).catch(() => {});
+        }
 
         window.onload = () => {
             updateMiniCards();
