@@ -38,6 +38,11 @@ EVENT_DEDUPE_CACHE = {}
 CALIBRATION_TRACKER = {}  # appliance_id -> {start_tcoil, start_time}
 CYCLE_TRACKER = {}        # appliance_id -> {start_time, last_time}
 BASELINE_TIMER_TRACKER = {}  # appliance_id -> threading.Timer
+BASELINE_DRYER_TRACKER = {}  # appliance_id -> threading.Timer (cycle-end watcher)
+
+# Baseline timeout constants
+DRYER_BASELINE_NO_DATA_TIMEOUT = 300   # 5 minutes: fail if no running data arrives
+DRYER_BASELINE_CYCLE_END_TIMEOUT = 60   # 1 minute: cycle considered ended if no running data
 
 CLIENT_ID = f"FlaskBackend_{random.randint(10000, 99999)}"
 
@@ -147,21 +152,22 @@ def latest_row_for_appliance(appliance_id):
     if not conn: return None, None
     cur = conn.cursor()
     
-    cur.execute("SELECT type FROM appliances WHERE id = %s", (appliance_id,))
+    cur.execute("SELECT type, created_at FROM appliances WHERE id = %s", (appliance_id,))
     type_row = cur.fetchone()
     if not type_row:
         cur.close()
         release_conn(conn)
         return None, None
         
-    dev_type = type_row[0]
+    dev_type, created_at = type_row[0], type_row[1]
     
     if "Dryer" in dev_type:
         cur.execute("""
             SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor
             FROM dryer_readings dr
             JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
-            WHERE sn.appliance_id = %s
+            JOIN appliances a ON a.id = sn.appliance_id
+            WHERE sn.appliance_id = %s AND dr.time >= a.created_at
             ORDER BY dr.time DESC LIMIT 1
         """, (appliance_id,))
     else:
@@ -169,7 +175,8 @@ def latest_row_for_appliance(appliance_id):
             SELECT sr.time, sr.treturn, sr.rhreturn, sr.tsupply, sr.rhsupply, sr.tcoil, sr.icompressor
             FROM hvac_readings sr
             JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
-            WHERE sn.appliance_id = %s
+            JOIN appliances a ON a.id = sn.appliance_id
+            WHERE sn.appliance_id = %s AND sr.time >= a.created_at
             ORDER BY sr.time DESC LIMIT 1
         """, (appliance_id,))
         
@@ -237,21 +244,25 @@ def get_latest_current_for_appliance(appliance_id):
     if not conn: return 0.0
     cur = conn.cursor()
     try:
-        cur.execute("SELECT type FROM appliances WHERE id = %s", (appliance_id,))
+        cur.execute("SELECT type, created_at FROM appliances WHERE id = %s", (appliance_id,))
         type_row = cur.fetchone()
         if not type_row: return 0.0
-        dev_type = type_row[0]
+        dev_type, created_at = type_row[0], type_row[1]
         if "Dryer" in dev_type:
             cur.execute("""
                 SELECT dr.imotor FROM dryer_readings dr
                 JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
-                WHERE sn.appliance_id = %s ORDER BY dr.time DESC LIMIT 1
+                JOIN appliances a ON a.id = sn.appliance_id
+                WHERE sn.appliance_id = %s AND dr.time >= a.created_at
+                ORDER BY dr.time DESC LIMIT 1
             """, (appliance_id,))
         else:
             cur.execute("""
                 SELECT sr.icompressor FROM hvac_readings sr
                 JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
-                WHERE sn.appliance_id = %s ORDER BY sr.time DESC LIMIT 1
+                JOIN appliances a ON a.id = sn.appliance_id
+                WHERE sn.appliance_id = %s AND sr.time >= a.created_at
+                ORDER BY sr.time DESC LIMIT 1
             """, (appliance_id,))
         row = cur.fetchone()
         return float(row[0]) if row and row[0] is not None else 0.0
@@ -505,6 +516,13 @@ def handle_node_events(mac, payload):
                         cur.execute("UPDATE appliances SET operational_status='normal' WHERE id=%s", (appliance_id,))
                         conn.commit()
                         app_status = 'normal'
+                        # Cancel any active baseline timers
+                        if appliance_id in BASELINE_TIMER_TRACKER:
+                            BASELINE_TIMER_TRACKER[appliance_id].cancel()
+                            del BASELINE_TIMER_TRACKER[appliance_id]
+                        if appliance_id in BASELINE_DRYER_TRACKER:
+                            BASELINE_DRYER_TRACKER[appliance_id].cancel()
+                            del BASELINE_DRYER_TRACKER[appliance_id]
                         
                     if "Dryer" in app_type:
                         send_node_command(mac, "settype:dryer")
@@ -738,6 +756,12 @@ def on_mqtt_message(client, userdata, msg):
                                 INSERT INTO dryer_readings (sensor_node_id, texhaust, rh_exhaust, pressure, imotor, time)
                                 VALUES (%s, %s, %s, %s, %s, %s)
                             """, (sensor_node_id, data.get("BME280Temp"), data.get("BME280Hum"), data.get("BME280Pres"), final_amps, actual_time))
+                            # If dryer is baselining, cancel safety timer and reset cycle-end watcher
+                            if operational_status == 'baselining':
+                                if appliance_id in BASELINE_TIMER_TRACKER:
+                                    BASELINE_TIMER_TRACKER[appliance_id].cancel()
+                                    del BASELINE_TIMER_TRACKER[appliance_id]
+                                _start_dryer_baseline_cycle_timer(appliance_id)
                         else:
                             cur.execute("""
                                 INSERT INTO hvac_readings (sensor_node_id, treturn, rhreturn, tsupply, rhsupply, tcoil, icompressor, time)
@@ -1089,13 +1113,13 @@ def export_excel(appliance_id):
     if not conn: return jsonify({'error': 'db error'}), 500
     cur = conn.cursor()
     
-    cur.execute("SELECT name, type, sub_type, operational_status FROM appliances WHERE id = %s", (appliance_id,))
+    cur.execute("SELECT name, type, sub_type, operational_status, created_at FROM appliances WHERE id = %s", (appliance_id,))
     app_info = cur.fetchone()
     if not app_info:
         cur.close(); release_conn(conn)
         return jsonify({'error': 'Not found'}), 404
         
-    app_name, dev_type, sub_type, status = app_info
+    app_name, dev_type, sub_type, status, created_at = app_info
     
     if status != 'normal':
         cur.close(); release_conn(conn)
@@ -1119,7 +1143,8 @@ def export_excel(appliance_id):
             SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor
             FROM dryer_readings r
             JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
-            WHERE sn.appliance_id = %s {date_filter}
+            JOIN appliances a ON a.id = sn.appliance_id
+            WHERE sn.appliance_id = %s AND r.time >= a.created_at {date_filter}
             ORDER BY r.time ASC
         """
     else:
@@ -1127,7 +1152,8 @@ def export_excel(appliance_id):
             SELECT r.time, r.treturn, r.rhreturn, r.tsupply, r.rhsupply, r.tcoil, r.icompressor
             FROM hvac_readings r
             JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
-            WHERE sn.appliance_id = %s {date_filter}
+            JOIN appliances a ON a.id = sn.appliance_id
+            WHERE sn.appliance_id = %s AND r.time >= a.created_at {date_filter}
             ORDER BY r.time ASC
         """
         
@@ -1137,26 +1163,26 @@ def export_excel(appliance_id):
     cal = get_appliance_calibration(appliance_id)
     cur.close(); release_conn(conn)
     
-    if not readings:
-        return jsonify({'error': 'No data in range'}), 404
-
     wb = Workbook()
     ws = wb.active
     ws.title = "Sensor Data"
-    
+
     header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
     header_font = Font(color="FFFFFF", bold=True)
-    
+
     ws.merge_cells('A1:D1')
     ws['A1'] = f"Device: {app_name}"
     ws['A1'].font = Font(size=14, bold=True)
-    
+
     ws.merge_cells('A2:D2')
-    ws['A2'] = f"Type: {dev_type} ({sub_type if sub_type else ''})"
-    
+    if "Dryer" in dev_type:
+        ws['A2'] = f"Type: {dev_type}"
+    else:
+        ws['A2'] = f"Type: {dev_type} ({sub_type if sub_type else ''})"
+
     ws.merge_cells('A3:D3')
     ws['A3'] = f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    
+
     ws.merge_cells('A4:D4')
     ws['A4'] = f"Data Points: {len(readings)}"
 
@@ -1172,31 +1198,38 @@ def export_excel(appliance_id):
         cell.font = header_font
         cell.alignment = Alignment(horizontal="center")
 
-    for r in readings:
-        row_idx += 1
-        t1 = apply_calibration(r[1], cal['t1_m'], cal['t1_c'])
-        h1 = apply_calibration(r[2], cal['h1_m'], cal['h1_c'])
-        
-        ws.cell(row=row_idx, column=1, value=r[0].strftime('%Y-%m-%d %H:%M:%S'))
-        
-        if "Dryer" in dev_type:
-            ws.cell(row=row_idx, column=2, value=round(t1, 2))
-            ws.cell(row=row_idx, column=3, value=round(h1, 2))
-            ws.cell(row=row_idx, column=4, value=round(r[3] or 0.0, 2))
-            ws.cell(row=row_idx, column=5, value=round(r[4] or 0, 2))
-        else:
-            t2 = apply_calibration(r[3], cal['t2_m'], cal['t2_c'])
-            h2 = apply_calibration(r[4], cal['h2_m'], cal['h2_c'])
-            t3 = apply_calibration(r[5], cal['tcoil_m'], cal['tcoil_c'])
-            amp = r[6] or 0
-            
-            ws.cell(row=row_idx, column=2, value=round(t1, 2))
-            ws.cell(row=row_idx, column=3, value=round(t2, 2))
-            ws.cell(row=row_idx, column=4, value=round(t3, 2))
-            ws.cell(row=row_idx, column=5, value=round(h1, 2))
-            ws.cell(row=row_idx, column=6, value=round(h2, 2))
-            ws.cell(row=row_idx, column=7, value=round(amp, 2))
-            ws.cell(row=row_idx, column=8, value=round(abs(t1 - t2), 2))
+    if not readings:
+        # Graceful empty export — write a "No data" message instead of returning JSON 404
+        ws.merge_cells(start_row=7, start_column=1, end_row=7, end_column=len(headers))
+        no_data_cell = ws.cell(row=7, column=1, value="No sensor data available for this device in the selected range.")
+        no_data_cell.alignment = Alignment(horizontal="center", vertical="center")
+        no_data_cell.font = Font(italic=True, color="999999")
+    else:
+        for r in readings:
+            row_idx += 1
+            t1 = apply_calibration(r[1], cal['t1_m'], cal['t1_c'])
+            h1 = apply_calibration(r[2], cal['h1_m'], cal['h1_c'])
+
+            ws.cell(row=row_idx, column=1, value=r[0].strftime('%Y-%m-%d %H:%M:%S'))
+
+            if "Dryer" in dev_type:
+                ws.cell(row=row_idx, column=2, value=round(t1, 2))
+                ws.cell(row=row_idx, column=3, value=round(h1, 2))
+                ws.cell(row=row_idx, column=4, value=round(r[3] or 0.0, 2))
+                ws.cell(row=row_idx, column=5, value=round(r[4] or 0, 2))
+            else:
+                t2 = apply_calibration(r[3], cal['t2_m'], cal['t2_c'])
+                h2 = apply_calibration(r[4], cal['h2_m'], cal['h2_c'])
+                t3 = apply_calibration(r[5], cal['tcoil_m'], cal['tcoil_c'])
+                amp = r[6] or 0
+
+                ws.cell(row=row_idx, column=2, value=round(t1, 2))
+                ws.cell(row=row_idx, column=3, value=round(t2, 2))
+                ws.cell(row=row_idx, column=4, value=round(t3, 2))
+                ws.cell(row=row_idx, column=5, value=round(h1, 2))
+                ws.cell(row=row_idx, column=6, value=round(h2, 2))
+                ws.cell(row=row_idx, column=7, value=round(amp, 2))
+                ws.cell(row=row_idx, column=8, value=round(abs(t1 - t2), 2))
 
     from openpyxl.utils import get_column_letter
     for col_idx in range(1, len(headers) + 1):
@@ -1215,7 +1248,12 @@ def export_excel(appliance_id):
         mac_row = cur.fetchone()
         maintenance_rows = []
         if mac_row:
-            cur.execute("SELECT timestamp FROM sensor_events WHERE sensor_node_mac = %s AND event_type = 'maintenance' ORDER BY timestamp DESC", (mac_row[0],))
+            cur.execute("""
+                SELECT timestamp FROM sensor_events
+                WHERE sensor_node_mac = %s AND event_type = 'maintenance'
+                  AND timestamp >= (SELECT created_at FROM appliances WHERE id = %s)
+                ORDER BY timestamp DESC
+            """, (mac_row[0], appliance_id))
             maintenance_rows = cur.fetchall()
         cur.close()
         release_conn(conn)
@@ -1254,13 +1292,13 @@ def api_calibration_progress(appliance_id):
     conn = get_conn()
     if not conn: return jsonify({'error': 'db'}), 500
     cur = conn.cursor()
-    cur.execute("SELECT operational_status, type FROM appliances WHERE id = %s", (appliance_id,))
+    cur.execute("SELECT operational_status, type, created_at FROM appliances WHERE id = %s", (appliance_id,))
     row = cur.fetchone()
     cur.close()
     release_conn(conn)
     
     if not row: return jsonify({'error': 'not found'}), 404
-    status, dev_type = row[0], row[1]
+    status, dev_type, created_at = row[0], row[1], row[2]
     
     if status != 'calibrating':
         return jsonify({'error': 'Not calibrating'}), 400
@@ -1275,7 +1313,9 @@ def api_calibration_progress(appliance_id):
     cur.execute("""
         SELECT sr.tcoil FROM hvac_readings sr
         JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
-        WHERE sn.appliance_id = %s ORDER BY sr.time DESC LIMIT 1
+        JOIN appliances a ON a.id = sn.appliance_id
+        WHERE sn.appliance_id = %s AND sr.time >= a.created_at
+        ORDER BY sr.time DESC LIMIT 1
     """, (appliance_id,))
     tcoil_row = cur.fetchone()
     cur.close()
@@ -1513,22 +1553,24 @@ def hvac_analytics(appliance_id):
         
         if start and end:
             cur.execute("""
-                SELECT DATE(r.time) as date, 
+                SELECT DATE(r.time) as date,
                        AVG(r.treturn), AVG(r.tsupply), AVG(r.tcoil)
                 FROM hvac_readings r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
-                WHERE sn.appliance_id = %s AND r.icompressor >= %s AND r.time >= %s AND r.time <= %s
+                JOIN appliances a ON a.id = sn.appliance_id
+                WHERE sn.appliance_id = %s AND r.icompressor >= %s AND r.time >= a.created_at AND r.time >= %s AND r.time <= %s
                 GROUP BY DATE(r.time)
                 ORDER BY DATE(r.time) DESC
                 LIMIT 30
             """, (appliance_id, base_current * 0.5, start, end))
         else:
             cur.execute("""
-                SELECT DATE(r.time) as date, 
+                SELECT DATE(r.time) as date,
                        AVG(r.treturn), AVG(r.tsupply), AVG(r.tcoil)
                 FROM hvac_readings r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
-                WHERE sn.appliance_id = %s AND r.icompressor >= %s
+                JOIN appliances a ON a.id = sn.appliance_id
+                WHERE sn.appliance_id = %s AND r.icompressor >= %s AND r.time >= a.created_at
                 GROUP BY DATE(r.time)
                 ORDER BY DATE(r.time) DESC
                 LIMIT 30
@@ -1558,7 +1600,7 @@ def dryer_analytics(appliance_id):
     if not conn: return jsonify({'error': 'db'}), 500
     try:
         cur = conn.cursor()
-        cur.execute("SELECT type, threshold_current_min, threshold_current_max FROM appliances WHERE id = %s", (appliance_id,))
+        cur.execute("SELECT type, threshold_current_min, threshold_current_max, baseline_current_mean FROM appliances WHERE id = %s", (appliance_id,))
         row = cur.fetchone()
         if not row or "Dryer" not in row[0]:
             return jsonify({'error': 'Not a dryer'}), 400
@@ -1566,12 +1608,16 @@ def dryer_analytics(appliance_id):
         # Dynamic cycle thresholds based on baseline; fallback to hardcoded defaults
         thresh_min = row[1]
         thresh_max = row[2]
+        baseline_current_mean = row[3]
         if thresh_min and thresh_max:
             cycle_start = float(thresh_min) * 0.8
             cycle_end = float(thresh_min) * 0.3
         else:
             cycle_start = 0.4   # match firmware send gate (>= 0.4 A)
             cycle_end = 0.15
+        
+        # Adaptive prominence threshold for ignition peak detection
+        prominence_threshold = max(0.5, float(baseline_current_mean) * 0.25) if baseline_current_mean else 0.5
             
         start = request.args.get('start')
         end = request.args.get('end')
@@ -1581,7 +1627,8 @@ def dryer_analytics(appliance_id):
                 SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor
                 FROM dryer_readings r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
-                WHERE sn.appliance_id = %s AND r.time >= %s AND r.time <= %s
+                JOIN appliances a ON a.id = sn.appliance_id
+                WHERE sn.appliance_id = %s AND r.time >= a.created_at AND r.time >= %s AND r.time <= %s
                 ORDER BY r.time ASC
             """, (appliance_id, start, end))
         else:
@@ -1589,7 +1636,8 @@ def dryer_analytics(appliance_id):
                 SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor
                 FROM dryer_readings r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
-                WHERE sn.appliance_id = %s
+                JOIN appliances a ON a.id = sn.appliance_id
+                WHERE sn.appliance_id = %s AND r.time >= a.created_at
                 ORDER BY r.time ASC
             """, (appliance_id,))
         readings = cur.fetchall()
@@ -1604,10 +1652,20 @@ def dryer_analytics(appliance_id):
         
         # Per-cycle peak detection state
         _prev_current = 0.0
-        _peak_rising = False
+        _peak_state = "IDLE"  # IDLE, RISING, FALLING
         _peak_max = 0.0
-        _peak_drops = 0
+        _peak_valley = 0.0
         _peak_values = []
+        
+        def _confirm_peak():
+            nonlocal _peak_state, _peak_max, _peak_valley
+            if _peak_state in ("RISING", "FALLING") and _peak_max > 0:
+                prominence = _peak_max - _peak_valley
+                if prominence >= prominence_threshold:
+                    _peak_values.append(_peak_max)
+            _peak_state = "IDLE"
+            _peak_max = 0.0
+            _peak_valley = 0.0
         
         for i, r in enumerate(readings):
             time_val, tex, rhex, press, imotor = r
@@ -1643,11 +1701,9 @@ def dryer_analytics(appliance_id):
                     cycles.append(current_cycle)
                     current_cycle = {}
                     
-                    # Reset peak state for next cycle
+                    # Confirm any pending peak and reset for next cycle
+                    _confirm_peak()
                     _prev_current = 0.0
-                    _peak_rising = False
-                    _peak_max = 0.0
-                    _peak_drops = 0
                     _peak_values = []
 
             if imotor > cycle_start and not in_cycle:
@@ -1661,9 +1717,7 @@ def dryer_analytics(appliance_id):
                     "_currents": []
                 }
                 _prev_current = imotor
-                _peak_rising = False
-                _peak_max = 0.0
-                _peak_drops = 0
+                _confirm_peak()
                 _peak_values = []
                 
             if in_cycle:
@@ -1673,26 +1727,21 @@ def dryer_analytics(appliance_id):
                     current_cycle["_rh_history"].append(rhex)
                 current_cycle["_currents"].append(imotor)
                 
-                # --- CURRENT PEAK DETECTION ---
-                # Peak = current goes up, then goes down for 3 consecutive points
+                # --- CURRENT PEAK DETECTION (dynamic state machine) ---
+                # Detects rise -> peak -> fall -> next rise (or cycle end)
+                # Prominence filter rejects noise fluctuations
                 if imotor > _prev_current:
-                    # Rising
-                    _peak_rising = True
-                    _peak_drops = 0
+                    if _peak_state in ("IDLE", "FALLING"):
+                        if _peak_state == "FALLING":
+                            _confirm_peak()
+                        _peak_valley = _prev_current
+                    _peak_state = "RISING"
                     if imotor > _peak_max:
                         _peak_max = imotor
-                elif _peak_rising and imotor < _prev_current:
-                    # Falling after rising
-                    _peak_drops += 1
-                    if _peak_drops >= 3:
-                        # Peak confirmed
-                        _peak_values.append(_peak_max)
-                        _peak_rising = False
-                        _peak_max = 0.0
-                        _peak_drops = 0
-                else:
-                    _peak_drops = 0
-                    
+                elif imotor < _prev_current:
+                    if _peak_state == "RISING":
+                        _peak_state = "FALLING"
+                
                 _prev_current = imotor
                 
             # Threshold-based end (defensive, for very low readings if any)
@@ -1718,10 +1767,8 @@ def dryer_analytics(appliance_id):
                 cycles.append(current_cycle)
                 current_cycle = {}
                 
+                _confirm_peak()
                 _prev_current = 0.0
-                _peak_rising = False
-                _peak_max = 0.0
-                _peak_drops = 0
                 _peak_values = []
 
         # Close any open cycle at end of dataset
@@ -1736,6 +1783,7 @@ def dryer_analytics(appliance_id):
             last_10 = valid_rh[-10:] if len(valid_rh) > 10 else valid_rh
             current_cycle["end_rh_avg"] = round(sum(last_10) / len(last_10), 2) if last_10 else current_cycle.get("start_rh", 0)
             
+            _confirm_peak()
             currents = current_cycle["_currents"]
             current_cycle["current_consumption"] = round(sum(currents), 2)
             current_cycle["current_spike_avg"] = round(sum(_peak_values) / len(_peak_values), 2) if _peak_values else 0.0
@@ -1782,10 +1830,13 @@ def cancel_baseline(appliance_id):
         cur.execute("UPDATE appliances SET operational_status = 'normal' WHERE id = %s", (appliance_id,))
         conn.commit()
         
-        # Cancel any active baseline timer
+        # Cancel any active baseline timers
         if appliance_id in BASELINE_TIMER_TRACKER:
             BASELINE_TIMER_TRACKER[appliance_id].cancel()
             del BASELINE_TIMER_TRACKER[appliance_id]
+        if appliance_id in BASELINE_DRYER_TRACKER:
+            BASELINE_DRYER_TRACKER[appliance_id].cancel()
+            del BASELINE_DRYER_TRACKER[appliance_id]
         
         send_node_command(mac, "baselinefailack")
         
@@ -1830,8 +1881,83 @@ def _complete_baseline(appliance_id):
     finally:
         if appliance_id in BASELINE_TIMER_TRACKER:
             del BASELINE_TIMER_TRACKER[appliance_id]
+        if appliance_id in BASELINE_DRYER_TRACKER:
+            del BASELINE_DRYER_TRACKER[appliance_id]
         cur.close()
         release_conn(conn)
+
+
+def _dryer_baseline_safety_timeout(appliance_id):
+    """Called if no running data arrives within 5 minutes of starting dryer baseline."""
+    conn = get_conn()
+    if not conn: return
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT operational_status FROM appliances WHERE id = %s", (appliance_id,))
+        row = cur.fetchone()
+        if not row or row[0] != 'baselining':
+            return
+        
+        # Check if any running data was recorded since baselining started
+        cur.execute("""
+            SELECT COUNT(*) FROM dryer_readings dr
+            JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
+            WHERE sn.appliance_id = %s AND dr.time >= (
+                SELECT baselining_since FROM appliances WHERE id = %s
+            )
+        """, (appliance_id, appliance_id))
+        count = cur.fetchone()[0]
+        
+        if count == 0:
+            # No running data received within 5 minutes - fail
+            cur.execute("UPDATE appliances SET operational_status = 'normal' WHERE id = %s", (appliance_id,))
+            conn.commit()
+            cur.execute("SELECT sn.mac_address FROM sensor_nodes sn WHERE sn.appliance_id = %s", (appliance_id,))
+            mac_row = cur.fetchone()
+            if mac_row:
+                send_node_command(mac_row[0], "baselinefailack")
+            print(f"Baseline FAIL for dryer {appliance_id}: no data within 5 minutes")
+        else:
+            # Data was received, cycle is ongoing - don't fail
+            print(f"Baseline safety timeout for dryer {appliance_id}: data received, continuing...")
+    except Exception as e:
+        print(f"Dryer baseline safety timeout error: {e}")
+    finally:
+        if appliance_id in BASELINE_TIMER_TRACKER:
+            del BASELINE_TIMER_TRACKER[appliance_id]
+        if conn:
+            cur.close()
+            release_conn(conn)
+
+
+def _start_dryer_baseline_cycle_timer(appliance_id):
+    """Start/reset a 1-minute timer that completes baseline when no running data arrives."""
+    if appliance_id in BASELINE_DRYER_TRACKER:
+        BASELINE_DRYER_TRACKER[appliance_id].cancel()
+    
+    timer = threading.Timer(DRYER_BASELINE_CYCLE_END_TIMEOUT, _dryer_baseline_cycle_timeout, args=[appliance_id])
+    BASELINE_DRYER_TRACKER[appliance_id] = timer
+    timer.start()
+
+
+def _dryer_baseline_cycle_timeout(appliance_id):
+    """Called when 1 minute passes with no running data during dryer baselining."""
+    conn = get_conn()
+    if not conn: return
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT operational_status FROM appliances WHERE id = %s", (appliance_id,))
+        row = cur.fetchone()
+        if row and row[0] == 'baselining':
+            _complete_baseline(appliance_id)
+    except Exception as e:
+        print(f"Dryer baseline cycle timeout error: {e}")
+    finally:
+        if appliance_id in BASELINE_DRYER_TRACKER:
+            del BASELINE_DRYER_TRACKER[appliance_id]
+        if conn:
+            cur.close()
+            release_conn(conn)
 
 @app.route('/api/device/<int:appliance_id>/remote_baseline', methods=['POST'])
 @login_required
@@ -1856,9 +1982,11 @@ def remote_baseline(appliance_id):
         if status == 'baselining':
             return jsonify({'error': 'Baseline already in progress'}), 400
         
-        latest_current = get_latest_current_for_appliance(appliance_id)
-        if latest_current < 0.4:
-            return jsonify({'error': f'Appliance must be running (current ≥ 0.4A). Current: {latest_current:.2f}A'}), 400
+        # HVAC must be running before starting baseline; Dryer can start while idle
+        if "HVAC" in app_type:
+            latest_current = get_latest_current_for_appliance(appliance_id)
+            if latest_current < 0.4:
+                return jsonify({'error': f'Appliance must be running (current ≥ 0.4A). Current: {latest_current:.2f}A'}), 400
             
         cur.execute("UPDATE appliances SET operational_status = 'baselining', baselining_since = NOW() WHERE id = %s", (appliance_id,))
         conn.commit()
@@ -1868,14 +1996,22 @@ def remote_baseline(appliance_id):
         # Cancel any existing timer
         if appliance_id in BASELINE_TIMER_TRACKER:
             BASELINE_TIMER_TRACKER[appliance_id].cancel()
+        if appliance_id in BASELINE_DRYER_TRACKER:
+            BASELINE_DRYER_TRACKER[appliance_id].cancel()
+            del BASELINE_DRYER_TRACKER[appliance_id]
         
-        # HVAC: fixed 15 minutes. Dryer: up to 15 minutes (or cycle end handled by CYCLE_TRACKER alert logic).
-        duration = 900 if "HVAC" in app_type else 900
-        timer = threading.Timer(duration, _complete_baseline, args=[appliance_id])
-        BASELINE_TIMER_TRACKER[appliance_id] = timer
-        timer.start()
-        
-        return jsonify({"success": True, "message": "Baseline recording started"})
+        if "HVAC" in app_type:
+            # HVAC: fixed 15-minute recording window
+            timer = threading.Timer(900, _complete_baseline, args=[appliance_id])
+            BASELINE_TIMER_TRACKER[appliance_id] = timer
+            timer.start()
+            return jsonify({"success": True, "message": "Baseline recording started. Keep the appliance running for 15 minutes."})
+        else:
+            # Dryer: 5-minute safety timeout; cycle-end detection handles actual completion
+            timer = threading.Timer(DRYER_BASELINE_NO_DATA_TIMEOUT, _dryer_baseline_safety_timeout, args=[appliance_id])
+            BASELINE_TIMER_TRACKER[appliance_id] = timer
+            timer.start()
+            return jsonify({"success": True, "message": "Baseline started. Recording will begin when the dryer starts running."})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
     finally:

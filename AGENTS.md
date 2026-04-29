@@ -189,18 +189,34 @@ default_offset = -0.111 if "Dryer" in dev_type else -0.033
 
 > **Note:** Button 2 baseline trigger was removed. Baseline is now **web-triggered only** via `/api/device/<id>/remote_baseline`.
 
-### 4.5 Baseline Procedure (Both)
-1. User clicks **"Start Baseline Training"** in the web dashboard (or admin triggers `/api/device/<id>/remote_baseline`).
-2. Backend sets `operational_status = 'baselining'`, sends `baselinestartack` to node, and starts a **15-minute** `threading.Timer`.
-3. Node beeps twice to acknowledge.
-4. Appliance runs normally during the 15-minute window.
-5. When the timer fires, backend calculates means and standard deviations from all readings received during the window:
-   - HVAC: ΔT, T_coil, RH_return, RH_supply, current
-   - Dryer: heat_rise, RH_exhaust, pressure, current
-6. Results stored in `appliances` table as SPC baseline parameters.
-7. Node receives `baselinesuccessack` (3 beeps) or `baselinefailack` (2 long beeps).
+### 4.5 Baseline Procedure
 
-> **Baseline duration:** 15 minutes fixed for both HVAC and dryer.
+#### HVAC Baseline
+1. User clicks **"Start Baseline Training"** in the web dashboard.
+2. Backend verifies appliance is **running** (`current ≥ 0.4 A`). Rejects if idle.
+3. Backend sets `operational_status = 'baselining'`, sends `baselinestartack` to node, and starts a **15-minute** `threading.Timer`.
+4. Node beeps twice to acknowledge.
+5. Appliance runs normally during the 15-minute window.
+6. When the timer fires, backend calculates means and standard deviations from all readings received during the window.
+7. Results stored in `appliances` table as SPC baseline parameters.
+8. Node receives `baselinesuccessack` (3 beeps) or `baselinefailack` (2 long beeps).
+
+#### Dryer Baseline
+1. User clicks **"Start Baseline Training"** in the web dashboard. **Can be started while idle** — no running pre-check.
+2. Backend sets `operational_status = 'baselining'`, sends `baselinestartack` to node, and starts a **5-minute safety timer**.
+3. Node beeps twice to acknowledge.
+4. When the dryer starts running, the first running telemetry message cancels the safety timer and starts the **cycle-end watcher** (1-minute timeout).
+5. Each subsequent running reading resets the cycle-end watcher.
+6. When the dryer cycle ends (no running data for 1 minute), the watcher fires and completes baseline automatically.
+7. Backend calculates stats from the recorded cycle data and stores them in `appliances`.
+8. Node receives `baselinesuccessack` (3 beeps) or `baselinefailack` (2 long beeps).
+
+> **Safety timeout:** If no running data arrives within 5 minutes of starting dryer baseline, the backend sends `baselinefailack` and returns to `normal`.
+
+#### Cancellation
+- Clicking **Cancel Baseline** in the dashboard calls `POST /api/device/<id>/cancel_baseline`.
+- Backend cancels all timers, sends `baselinefailack` (2 long beeps), and returns to `normal`.
+- **Old baseline data is preserved** — `do_set_baseline_calculated()` only overwrites baseline columns at successful completion.
 
 ### 4.6 LED State Machine (Priority Order)
 LED shows the **highest-priority** active state:
@@ -389,6 +405,8 @@ For each appliance type, baseline statistics establish control limits:
 
 > **Hysteresis explained:** Cycle starts when current rises above ~64% of baseline mean, ends when it drops below ~24%. This handles gas-dryer ignition gaps without splitting a single cycle.
 
+> **Ignition peak detection:** Uses a dynamic state machine (`IDLE → RISING → FALLING`) with a **prominence threshold** of `max(0.5 A, baseline_current_mean × 0.25)`. Small noise fluctuations (e.g., ±0.03 A) are rejected. Real ignition peaks (typically +0.8–1.2 A above motor baseline) are confirmed. The drop length is dynamic — can be 2, 4, 10+ points.
+
 ### 5.7 Alert System
 
 - Backend monitors running→idle transitions via `CYCLE_TRACKER`.
@@ -485,7 +503,9 @@ The following can be set in a `.env` file (see `.env.example`):
    - HVAC (ZHT103C): factor = 11.0
    - Dryer (SCT-013): factor = 37.0
 
-6. **The baseline timer is a `threading.Timer` (15 min), not a polling thread.** It is started by `remote_baseline()` and fires once to call `_complete_baseline()`.
+6. **Baseline timers are appliance-specific:**
+   - **HVAC:** `threading.Timer(900)` — 15-minute fixed window.
+   - **Dryer:** `threading.Timer(300)` — 5-minute safety timeout. Cancelled on first running data. A second `threading.Timer(60)` — cycle-end watcher — resets on every running reading and fires when the cycle ends.
 
 7. **MQTT callbacks are async.** The `on_mqtt_message` handler spawns DB writes and node commands. Do not block it with synchronous I/O.
 
@@ -531,6 +551,22 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 - **Frontend:** `updateMiniCards()` rewritten to use `is_offline`/`has_data` flags instead of `.catch()`.
 - **Frontend:** Added offline badge (`detail-offline-status`) to detail modal header.
 
+### 2026-04-29 — Baseline Redesign, Ignition Detection, UI Fixes
+- **Backend:** Dryer baseline redesigned from fixed 15-minute timer to **cycle-based recording**.
+  - Can start while idle (no running pre-check).
+  - 5-minute safety timeout: fails if no running data arrives.
+  - 1-minute cycle-end detection: auto-completes baseline when cycle ends.
+  - `BASELINE_DRYER_TRACKER` for cycle-end watcher timers.
+  - Reconnect abort now cancels all baseline timers properly.
+- **Backend:** HVAC baseline keeps running pre-check + 15-minute timer.
+- **Backend:** Cancel baseline endpoint now cleans up both `BASELINE_TIMER_TRACKER` and `BASELINE_DRYER_TRACKER`.
+- **Backend:** Dryer ignition detection replaced rigid "3-drop" rule with dynamic state machine (`IDLE → RISING → FALLING`) + prominence threshold `max(0.5 A, baseline_current_mean × 0.25)`.
+- **Backend:** Excel export returns valid `.xlsx` with "No data" message instead of JSON 404 when empty.
+- **Backend:** Excel export, analytics, live cards/charts, and calibration progress all now filter by `appliances.created_at` to prevent old pairing data leaks.
+- **Frontend:** `btn-rebaseline` only shown after `baseline_analysis` confirms baseline stats exist.
+- **Frontend:** `cancelRemoteBaseline()` wired to backend `POST /api/device/<id>/cancel_baseline`.
+- **Frontend:** Cancel button added to baselining action bar for both HVAC and Dryer.
+
 ### Prior Session — Major Features Added
 - Web-triggered baseline only (removed Button 2 baseline trigger).
 - Alert system (`alerts` table, configurable thresholds, humidity alerts for dryers).
@@ -551,6 +587,8 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 |-------|--------|-------|
 | BME280 reads 182°C / 100% RH / −204 hPa | **Hardware** | Sensor fault — check I2C wiring or replace BME280 |
 | `TESTING_GUIDE.md` untracked | **Git** | Exists in working tree but not committed |
+| Excel export empty data error | **Fixed** | Returns valid `.xlsx` with "No data available" message |
+| Rebaseline button visible before baseline | **Fixed** | Only shown after `baseline_analysis` confirms stats exist |
 | `alerts` table schema may need manual migration | **DB** | Run CREATE TABLE if not already present in local PG / Neon |
 
 ---
