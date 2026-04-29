@@ -148,27 +148,38 @@ default_offset = -0.111 if "Dryer" in dev_type else -0.033
 [HVAC Paired]
     |
     v
-[Need Calibration] --(Button 2 hold)--> [Calibrating]
+[Need Calibration] --(Button 2, 5s hold)--> [Calibrating]
     |                                   (ice-bath method)
     |                                       |
     |<--(backend sends calibrationfailack)--|
     |                                       |
     |<--(backend sends calibrationsuccessack)
     v
-[Need Baseline] --(Button 2 hold)--> [Baselining]
+[Need Baseline] --(web dashboard trigger)--> [Baselining]
     |                                       |
     |<--(backend sends baselinefailack)-----|
     |                                       |
     |<--(backend sends baselinesuccessack)
     v
-[Normal] --(Button 1 hold)--> [Maintenance Requested]
+[Normal] --(Button 1, 2s hold)--> [Maintenance Requested]
+
+[Dryer Paired]
+    |
+    v
+[Need Baseline] --(web dashboard trigger)--> [Baselining]
+    |                                       |
+    |<--(backend sends baselinefailack)-----|
+    |                                       |
+    |<--(backend sends baselinesuccessack)
+    v
+[Normal] --(Button 1, 2s hold)--> [Maintenance Requested]
 ```
 
-**Dryer skips calibration entirely** and goes straight to `Need Baseline` after pairing.
+**Dryer skips calibration entirely** and goes straight to `normal` after pairing (no calibration needed). Baseline is **web-triggered only** — physical Button 2 no longer starts baseline recording.
 
 ### 4.4 Calibration Procedure (HVAC Only)
-1. User holds **Button 2** for 2 seconds.
-2. Node sends `event_button2_action_request` to backend.
+1. User holds **Button 2** for **5 seconds**.
+2. Node sends `event_button2_calibration_request` to backend.
 3. Backend sends `startcalibration` to node.
 4. Node captures **baseline** sensor readings (T1, T2, T3, H1, H2).
 5. User places coil sensor (T3) in **ice water**.
@@ -176,26 +187,65 @@ default_offset = -0.111 if "Dryer" in dev_type else -0.033
 7. On success, node sends `calibration_success_request` with base/final readings.
 8. Backend computes linear regression slopes/intercepts and stores them in `appliances` table.
 
+> **Note:** Button 2 baseline trigger was removed. Baseline is now **web-triggered only** via `/api/device/<id>/remote_baseline`.
+
 ### 4.5 Baseline Procedure (Both)
-1. User holds **Button 2** for 2 seconds (or triggers remotely from dashboard).
-2. Backend sets `operational_status = 'baselining'` and records `baselining_since`.
-3. Node records data for **10 minutes** while appliance runs normally.
-4. Backend background thread (30-second poll) checks elapsed time.
-5. After 600 seconds, backend calculates means and standard deviations:
+1. User clicks **"Start Baseline Training"** in the web dashboard (or admin triggers `/api/device/<id>/remote_baseline`).
+2. Backend sets `operational_status = 'baselining'`, sends `baselinestartack` to node, and starts a **15-minute** `threading.Timer`.
+3. Node beeps twice to acknowledge.
+4. Appliance runs normally during the 15-minute window.
+5. When the timer fires, backend calculates means and standard deviations from all readings received during the window:
    - HVAC: ΔT, T_coil, RH_return, RH_supply, current
    - Dryer: heat_rise, RH_exhaust, pressure, current
 6. Results stored in `appliances` table as SPC baseline parameters.
+7. Node receives `baselinesuccessack` (3 beeps) or `baselinefailack` (2 long beeps).
 
-### 4.6 LED / Buzzer Signals
-| State | LED | Buzzer |
-|-------|-----|--------|
-| WiFi disconnected | Fast blink (200 ms) | — |
-| MQTT disconnected | Medium blink (500 ms) | — |
-| All connected | Solid ON | — |
-| Button pressed | — | 1 short beep (120 ms) |
-| Acknowledged | — | 2 short beeps |
-| Success | — | 3 short beeps |
-| Failure / Denied | — | 1 long beep (900–1500 ms) |
+> **Baseline duration:** 15 minutes fixed for both HVAC and dryer.
+
+### 4.6 LED State Machine (Priority Order)
+LED shows the **highest-priority** active state:
+
+| Priority | State | LED Pattern |
+|----------|-------|-------------|
+| 1 | Calibration in progress | Slow blink (1 s on / 1 s off) |
+| 2 | Baselining in progress | Alternating fast/slow blink |
+| 3 | WiFi disconnected | Fast blink (200 ms) |
+| 4 | MQTT disconnected | Medium blink (500 ms) |
+| 5 | Appliance running | Solid ON |
+| 6 | Idle (all connected) | Brief flash every 10 s |
+
+### 4.7 Buzzer Signals
+| Trigger | Pattern |
+|---------|---------|
+| `baselinestartack` | 2 short beeps |
+| `baselinesuccessack` | 3 short beeps |
+| `baselinefailack` | 2 long beeps (900 ms) |
+| `calibrationsuccessack` | 3 short beeps |
+| `maintenancedenied` | 1 long beep (1500 ms) |
+| Pairing success | 1 short beep |
+| Pairing cleared | 1 long beep |
+
+### 4.8 Data Gating & Running Status
+- Firmware **always** includes `"status":"running"` or `"status":"idle"` in telemetry based on `avgCurrent >= 0.4 A`.
+- Telemetry is **only published** when `lastAvgCurrent >= 0.4 A` (running). Idle samples are discarded, not buffered.
+- Idle periods update `last_seen` via periodic `checkin` events (see §4.9).
+
+### 4.9 Checkin / Offline Indicator System
+To distinguish "device offline" from "device alive but idle":
+
+- **Checkin event:** Node publishes `{"mac":"...","event":"checkin"}` every **10 minutes** when idle (`lastAvgCurrent < 0.4 A`).
+- **Immediate checkin:** Node also sends a checkin immediately upon receiving `restore:normal` from the backend (after power-cycle reconnect).
+- **Backend logic:** `api_device_latest` returns `is_offline = true` if `last_seen` is older than 10 minutes. Returns `has_data = false` if no telemetry readings exist yet.
+- **Frontend display:**
+  - `is_offline = true` → red banner: **"Device Offline"**
+  - `!has_data` → yellow banner: **"Awaiting Sensor Data..."**
+  - Online with data → banner hidden, normal values shown
+
+### 4.10 Pairing Persistence (NVS)
+`isPaired` and `applianceType` are persisted to ESP32 flash memory via the `Preferences` library (`nodecfg` namespace). This survives power cycles:
+- On boot, firmware reads NVS and restores `applianceType` and `isPaired`.
+- When `settype:dryer`/`hvac` is received after a reboot, `applyApplianceType()` sees `wasUnpaired = false` and prints **"PAIR CONFIRMED AGAIN"** instead of **"PAIR OK"** — no beep, no flow reset.
+- When `settype:unpaired` is received, NVS keys are cleared so the next boot starts fresh.
 
 ---
 
@@ -276,6 +326,13 @@ id | sensor_node_id | time | texhaust | rh_exhaust | tambient | rh_ambient | imo
 id | sensor_node_mac | event_type | timestamp
 ```
 
+#### `alerts`
+```sql
+id | appliance_id | alert_type | message | severity | created_at | acknowledged_at
+```
+- Populated by backend logic (e.g. end-of-cycle humidity spike for dryers).
+- Frontend shows active alerts in a panel and allows acknowledgment.
+
 #### `dryer_bme_readings`
 Legacy table from early testbed iterations. Not used by the production `iot_thesis` system.
 
@@ -286,19 +343,24 @@ Legacy table from early testbed iterations. Not used by the production `iot_thes
 | `GET /dashboard` | Required | Main UI |
 | `GET /api/unpaired_nodes` | Required | List unpaired nodes seen in last 30s |
 | `GET /api/node/<id>/latest` | Required | Live unpaired node readings |
-| `GET /api/device/<id>/latest` | Required | Latest calibrated reading for appliance |
+| `GET /api/device/<id>/latest` | Required | Latest calibrated reading + `is_offline`/`has_data` flags |
 | `GET /api/device/<id>/latest_n` | Required | Last N calibrated readings for charts |
 | `GET /api/device/<id>/table_data` | Required | Tabular data for detail view |
 | `GET /api/device/<id>/spc_limits` | Required | Baseline mean, UCL, LCL for SPC bands |
+| `GET /api/device/<id>/baseline_analysis` | Required | Detailed baseline stats per metric |
 | `GET /api/device/<id>/hvac_analytics` | Required | Daily averages (last 30 days) |
 | `GET /api/device/<id>/dryer_analytics` | Required | Cycle detection and stats |
 | `GET /api/device/<id>/export_excel` | Required | Full data export with maintenance log |
 | `POST /api/device/<id>/remote_baseline` | Required | Trigger baseline remotely |
 | `POST /api/device/<id>/cancel_baseline` | Required | Cancel active baseline |
+| `GET/POST /api/device/<id>/thresholds` | Required | Get/set alert thresholds |
+| `GET/POST /api/device/<id>/alerts` | Required | Get active alerts / acknowledge |
 | `POST /devices/pair` | Required | Pair node to new appliance |
 | `POST /devices/<id>/forget` | Required | Unpair and delete appliance |
 | `GET/POST /login` | Public | Authentication |
 | `GET/POST /signup` | Public | Registration |
+
+> **`api_device_latest` behavior:** Returns HTTP 200 for all states. Includes `is_offline` (no MQTT message >10 min) and `has_data` (telemetry exists) flags. Returns `idle` if last reading is >60 s old.
 
 ### 5.5 SPC Logic
 
@@ -308,12 +370,50 @@ For each appliance type, baseline statistics establish control limits:
 - Uses statistical control limits: `mean ± 3σ` for ΔT, T_coil, RH, and current
 
 **Non-Inverter HVAC & Gas Dryer:**
-- Uses absolute current thresholds: `threshold_current_min` and `threshold_current_max` (±20% of baseline mean)
+- Uses absolute current thresholds: `threshold_current_min` and `threshold_current_max`
 - Other parameters use `mean ± 3σ`
 
 **Dashboard visualization:**
 - SPC bands rendered as horizontal dashed lines on Chart.js graphs
 - Status badge changes color when latest reading exceeds UCL or falls below LCL
+
+### 5.6 Dryer Cycle Detection
+
+`dryer_analytics()` uses gap-based cycle detection on `dryer_readings`:
+
+1. **Cycle start threshold:** `baseline_current_mean × 0.8` (or fallback `0.4 A`)
+2. **Cycle end threshold:** `baseline_current_mean × 0.3` (or fallback `0.15 A`)
+3. **Gap end:** >600 seconds between consecutive readings forces cycle finalization
+4. **Noise filter:** Cycles shorter than 3 minutes are discarded
+5. **Per-cycle stats:** min/max temp, start/end RH, ignition count, current consumption, spike average
+
+> **Hysteresis explained:** Cycle starts when current rises above ~64% of baseline mean, ends when it drops below ~24%. This handles gas-dryer ignition gaps without splitting a single cycle.
+
+### 5.7 Alert System
+
+- Backend monitors running→idle transitions via `CYCLE_TRACKER`.
+- For dryers: if end-of-cycle RH exceeds the configured threshold, an alert is inserted into the `alerts` table.
+- Alerts are per-appliance, displayed in the dashboard alert panel.
+- Operator-configurable thresholds via `/api/device/<id>/thresholds`.
+
+### 5.8 Data Flow & MQTT Message Handling
+
+1. **`on_mqtt_message()`** receives telemetry on `iot/nodes/<MAC>/telemetry`:
+   - Only **running** data (`current ≥ 0.4 A`) is inserted into `hvac_readings` / `dryer_readings`.
+   - Idle readings only update `sensor_nodes.last_seen`.
+   - Unknown MACs are **auto-registered** into `sensor_nodes` with `status = 'unpaired'`.
+
+2. **`handle_node_events()`** receives events on `iot/nodes/<MAC>/events`:
+   - `event_request_config`: Updates `last_seen`, sends `settype:*` + `restore:*`.
+   - `checkin`: Updates `last_seen` (lightweight keepalive).
+   - `maintenance_request`: Allowed for dryers unconditionally; for HVAC only when `status = 'normal'`.
+   - `calibration_success_request` / `calibration_fail_request`: HVAC calibration state machine.
+   - **Deduplication:** `EVENT_DEDUPE_CACHE` prevents duplicate inserts within 5 seconds.
+
+3. **`CYCLE_TRACKER`** monitors dryer running→idle transitions:
+   - Tracks in-memory state per appliance.
+   - Processes stale cycles (>60 s gap) on new running data.
+   - Inserts humidity alerts when end-of-cycle RH exceeds threshold.
 
 ### 5.6 Calibration Data Flow
 
@@ -378,23 +478,30 @@ The following can be set in a `.env` file (see `.env.example`):
 2. **Do not commit `__pycache__/` or `.env`.** Both are in `.gitignore`.
 
 3. **Column naming convention:** The DB uses `rhreturn_*`, `rhsupply_*`, `rhexhaust_*`, `rhambient_*` (no underscore between `rh` and the location). Code must match this exactly.
-4. **Button 2 durations:** 2s = baseline/rebaseline, 5s = one-time HVAC calibration. The firmware uses release-based timing: release between 2–5s sends baseline; hold past 5s sends calibration.
 
-4. **Calibration factors are appliance-type dependent:**
+4. **Button 2 durations (updated):** 2s = maintenance request, 5s = one-time HVAC calibration. **Baseline is web-triggered only** — Button 2 no longer starts baseline recording.
+
+5. **Calibration factors are appliance-type dependent:**
    - HVAC (ZHT103C): factor = 11.0
    - Dryer (SCT-013): factor = 37.0
 
-5. **The baseline calculation thread runs every 30 seconds.** Any DB schema changes affecting `appliances` or baseline logic must be compatible with this polling interval.
+6. **The baseline timer is a `threading.Timer` (15 min), not a polling thread.** It is started by `remote_baseline()` and fires once to call `_complete_baseline()`.
 
-6. **MQTT callbacks are async.** The `on_mqtt_message` handler spawns DB writes and node commands. Do not block it with synchronous I/O.
+7. **MQTT callbacks are async.** The `on_mqtt_message` handler spawns DB writes and node commands. Do not block it with synchronous I/O.
 
-7. **The `fix_db_columns.py` script is a one-off utility.** It renames `subtype` → `sub_type` in `app.py` source. It is not a general migration tool.
+8. **The `fix_db_columns.py` script is a one-off utility.** It renames `subtype` → `sub_type` in `app.py` source. It is not a general migration tool.
 
-8. **Sensor nodes determine their own type from backend commands.** The node firmware does not auto-detect HVAC vs Dryer; it waits for `settype:hvac` or `settype:dryer` from the backend.
+9. **Sensor nodes determine their own type from backend commands.** The node firmware does not auto-detect HVAC vs Dryer; it waits for `settype:hvac` or `settype:dryer` from the backend.
 
-9. **Current readings are stored raw in DB** and calibrated on read via `apply_calibration()` in Python. The only exception is the `icompressor_offset` which is a DB column applied at query time.
+10. **Current readings are stored raw in DB** and calibrated on read via `apply_calibration()` in Python. The only exception is the `icompressor_offset` which is a DB column applied at query time.
 
-10. **The ESP32-C3 has limited RAM.** The offline queue (`MAX_QUEUE_SIZE = 200`) and string operations must not be increased without checking heap availability.
+11. **The ESP32-C3 has limited RAM.** The offline queue (`MAX_QUEUE_SIZE = 200`) and string operations must not be increased without checking heap availability.
+
+12. **Firmware only sends running telemetry.** Idle samples (`current < 0.4 A`) are discarded, not buffered. Do not expect idle data in the readings tables.
+
+13. **`api_device_latest` must return HTTP 200 for all states.** Do not return 404 for missing data — the frontend relies on `is_offline` and `has_data` flags.
+
+14. **Preferences (NVS) namespace is `nodecfg`.** Do not use a different namespace or collide with existing keys (`paired`, `type`).
 
 ---
 
@@ -410,15 +517,54 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 
 ---
 
-## 10. Quick Reference: File Responsibilities
+## 10. Recent Changes & Changelog
+
+### 2026-04-27 — Checkin / Offline Indicator Fix
+- **Firmware:** Moved checkin timer from `beepShort()` to `loop()` (critical bug fix).
+- **Firmware:** Added `publishCheckin()` helper; sends immediate checkin on `restore:normal`.
+- **Firmware:** Persisted `isPaired` + `applianceType` in NVS via `Preferences` library.
+- **Backend:** `event_request_config` now updates `last_seen` for **all** nodes, not just unpaired.
+- **Backend:** Removed duplicate `checkin` handler in `handle_node_events()`.
+
+### 2026-04-27 — Dashboard Enhancements
+- **Frontend:** Dryer cycle analytics Start/End columns now show full date+time (`toLocaleString`).
+- **Frontend:** `updateMiniCards()` rewritten to use `is_offline`/`has_data` flags instead of `.catch()`.
+- **Frontend:** Added offline badge (`detail-offline-status`) to detail modal header.
+
+### Prior Session — Major Features Added
+- Web-triggered baseline only (removed Button 2 baseline trigger).
+- Alert system (`alerts` table, configurable thresholds, humidity alerts for dryers).
+- Dryer cycle tracker with gap-based detection (>600 s gap) and 3-minute minimum duration filter.
+- `CYCLE_TRACKER` for end-of-cycle humidity monitoring.
+- `api_device_latest` staleness fix: returns `idle` if last reading >60 s old.
+- Chart deduplication (`timeMs <= latestChartTimeMs` guard + `initChartsRequestId`).
+- Maintenance history filtered by `appliance.created_at`.
+- Auto-register unknown MAC on `event_request_config`.
+- Config request retry every 10 s for unpaired nodes.
+- `calibrationAcked = true` for dryers immediately (fixes maintenance denied bug).
+
+---
+
+## 11. Known Issues
+
+| Issue | Status | Notes |
+|-------|--------|-------|
+| BME280 reads 182°C / 100% RH / −204 hPa | **Hardware** | Sensor fault — check I2C wiring or replace BME280 |
+| `TESTING_GUIDE.md` untracked | **Git** | Exists in working tree but not committed |
+| `alerts` table schema may need manual migration | **DB** | Run CREATE TABLE if not already present in local PG / Neon |
+
+---
+
+## 12. Quick Reference: File Responsibilities
 
 | File | Responsibility |
 |------|---------------|
-| `iot_thesis/app.py` | Everything backend: HTTP API, MQTT, DB, auth, SPC math, Excel export |
-| `iot_thesis/templates/dashboard.html` | Main SPA frontend |
+| `iot_thesis/app.py` | Everything backend: HTTP API, MQTT, DB, auth, SPC math, Excel export, alerts, cycle tracking |
+| `iot_thesis/templates/dashboard.html` | Main SPA frontend (Chart.js, real-time cards, detail modal, alert panel) |
 | `iot_thesis/Update_SensorNode.ino` | Production ESP32 firmware for both HVAC and Dryer |
 | `gas_dryer_test/esp32dryertest.py` | Testbed Flask dashboard for BME280 validation |
 | `gas_dryer_test/esp32dryertest.ino` | Testbed ESP32 firmware (BME280 + SCT-013) |
 | `fix_db_columns.py` | One-off source migration: `subtype` → `sub_type` |
 | `requirements.txt` | Python dependencies for both backends |
 | `.env.example` | Template for all overrideable credentials |
+| `TESTING_GUIDE.md` | Step-by-step testing procedures (untracked) |
