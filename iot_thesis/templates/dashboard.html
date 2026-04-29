@@ -857,7 +857,7 @@
                 document.getElementById('table-container').style.display = 'block';
                 if (status === 'normal') {
                     document.getElementById('btn-export').style.display = 'inline-flex';
-                    document.getElementById('btn-rebaseline').style.display = 'inline-flex';
+                    // btn-rebaseline visibility is set by checkBaselineResults() based on actual baseline data
                 } else {
                     document.getElementById('btn-export').style.display = 'none';
                     document.getElementById('btn-rebaseline').style.display = 'none';
@@ -929,7 +929,25 @@
         }
 
         function cancelRemoteBaseline(id) {
-            alert("Cancel baseline requested. Baseline will reset to normal status.");
+            if (!confirm('Cancel baseline recording? Any data collected will be discarded and the previous baseline will be kept.')) return;
+            fetch('/api/device/' + id + '/cancel_baseline', {method: 'POST'})
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    const card = document.querySelector('.card[data-id="' + id + '"]');
+                    if (card) card.dataset.status = 'normal';
+                    if (currentDetailId == id) {
+                        const isHVAC = card && card.dataset.type.includes('HVAC');
+                        buildActionBar('normal', id, isHVAC);
+                        document.getElementById('btn-export').style.display = 'inline-flex';
+                        checkBaselineResults();
+                    }
+                } else {
+                    alert(data.error || 'Failed to cancel baseline');
+                }
+            }).catch(e => {
+                alert('Failed to connect to cancel baseline');
+            });
         }
 
         function rebaselineDevice() {
@@ -992,18 +1010,20 @@
                             <h4 style="color:var(--primary); margin-bottom:5px;">15-Minute Baseline Recording in Progress...</h4>
                             <p style="font-size:0.85rem; color:var(--text-muted);">Do not turn off the appliance. Baseline will complete automatically after 15 minutes.</p>
                         </div>
-                        <div style="display:flex; align-items:center;">
+                        <div style="display:flex; align-items:center; gap:10px;">
                             <span class="status-badge status-baselining">Recording Data...</span>
+                            <button class="btn btn-secondary" onclick="cancelRemoteBaseline('${id}')">Cancel</button>
                         </div>
                     `;
                 } else {
                     bar.innerHTML = `
                         <div style="flex:1;">
                             <h4 style="color:var(--primary); margin-bottom:5px;">Recording Baseline Cycle...</h4>
-                            <p style="font-size:0.85rem; color:var(--text-muted);">Do not turn off the gas dryer. Baseline will complete automatically after the cycle ends or 15 minutes.</p>
+                            <p style="font-size:0.85rem; color:var(--text-muted);">Do not turn off the gas dryer. Baseline will complete automatically after the cycle ends.</p>
                         </div>
-                        <div style="display:flex; align-items:center;">
+                        <div style="display:flex; align-items:center; gap:10px;">
                             <span class="status-badge status-baselining">Recording Cycle...</span>
+                            <button class="btn btn-secondary" onclick="cancelRemoteBaseline('${id}')">Cancel</button>
                         </div>
                     `;
                 }
@@ -1114,7 +1134,7 @@
                                 buildActionBar(data.status, id, isHVAC);
                                 if (data.status === 'normal') {
                                     document.getElementById('btn-export').style.display = 'inline-flex';
-                                    document.getElementById('btn-rebaseline').style.display = 'inline-flex';
+                                    checkBaselineResults();
                                     updateDataTable();
                                 }
                             }
@@ -1823,17 +1843,26 @@
                 const isHVAC = card && card.dataset.type.includes('HVAC');
                 
                 let html = '';
+                let hasBaseline = false;
                 if (isHVAC) {
                     html += `<div>ΔT Mean: ${data.deltat && data.deltat.mean !== null ? data.deltat.mean.toFixed(2) : '--'} °C</div>`;
                     html += `<div>Coil Temp Mean: ${data.tcoil && data.tcoil.mean !== null ? data.tcoil.mean.toFixed(2) : '--'} °C</div>`;
                     html += `<div>Current Mean: ${data.current && data.current.mean !== null ? data.current.mean.toFixed(2) : '--'} A</div>`;
+                    hasBaseline = data.deltat && data.deltat.mean !== null;
                 } else {
                     html += `<div>Temp Mean: ${data.temp && data.temp.mean !== null ? data.temp.mean.toFixed(2) : '--'} °C</div>`;
                     html += `<div>Humidity Mean: ${data.humidity && data.humidity.mean !== null ? data.humidity.mean.toFixed(2) : '--'} %</div>`;
                     html += `<div>Pressure Mean: ${data.pressure && data.pressure.mean !== null ? data.pressure.mean.toFixed(2) : '--'} hPa</div>`;
                     html += `<div>Current Min/Max: ${data.current && data.current.min !== null ? data.current.min.toFixed(2) : '--'} / ${data.current && data.current.max !== null ? data.current.max.toFixed(2) : '--'} A</div>`;
+                    hasBaseline = data.temp && data.temp.mean !== null;
                 }
                 content.innerHTML = html;
+                
+                // Show/hide Restart Baseline button based on whether baseline actually exists
+                const rebaselineBtn = document.getElementById('btn-rebaseline');
+                if (rebaselineBtn) {
+                    rebaselineBtn.style.display = hasBaseline ? 'inline-flex' : 'none';
+                }
             }).catch(() => {});
         }
 

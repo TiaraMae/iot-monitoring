@@ -555,23 +555,26 @@ Baseline recording is initiated **exclusively from the web dashboard**. Physical
 
 ### Starting Baseline
 
-1. Ensure the appliance is **running** (current ≥ 0.4 A). The backend checks this before allowing baseline start.
-2. In the dashboard, click **Start Baseline Recording**.
-3. Backend sends `baselinestartack` to the node.
-4. Node beeps twice and enters baselining mode (LED alternating fast/slow blink).
-5. Backend sets `operational_status = 'baselining'` and records `baselining_since`.
+1. In the dashboard, click **Start Baseline Recording**.
+2. Backend sends `baselinestartack` to the node.
+3. Node beeps twice and enters baselining mode (LED alternating fast/slow blink).
+4. Backend sets `operational_status = 'baselining'` and records `baselining_since`.
+
+> **HVAC only:** The appliance must be **running** (current ≥ 0.4 A) before starting baseline. The backend rejects the request if idle.
+>
+> **Dryer:** Baseline can be started while idle. Recording begins automatically when the dryer starts running.
 
 ### Recording Duration
 
-- **Both HVAC and Dryer:** 15-minute fixed recording window.
-- Backend starts a `threading.Timer(900.0, _complete_baseline)`.
-- If the appliance stops (current < 0.4 A) during the window, the timer continues; the backend will still compute baselines from the data collected so far.
+- **HVAC:** 15-minute fixed recording window. The appliance should keep running for the full 15 minutes.
+- **Dryer:** Records **one full cycle**. The backend detects when the cycle ends (no running data for 1 minute) and completes baseline automatically.
+- **Dryer safety timeout:** If the dryer does not start within 5 minutes of clicking "Start Baseline," the recording fails automatically.
 
 ### Completion
 
-After 15 minutes, `_complete_baseline()` runs:
+When the recording window ends (15 min for HVAC, cycle end for Dryer), `_complete_baseline()` runs:
 
-1. Queries all readings since `baselining_since`.
+1. Queries all running readings since `baselining_since`.
 2. Calls `do_set_baseline_calculated()` to compute:
    - **HVAC:** mean and std for ΔT, coil temp, return RH, supply RH, current.
    - **Dryer:** mean and std for exhaust temp, exhaust RH, pressure, current.
@@ -582,10 +585,11 @@ After 15 minutes, `_complete_baseline()` runs:
 
 ### Cancellation
 
-Operators can click **Cancel Baseline** in the dashboard. The backend:
-1. Cancels the running timer.
+Operators can click **Cancel Baseline** in the dashboard during recording. The backend:
+1. Cancels all running timers.
 2. Sends `baselinefailack` to node (2 long beeps).
 3. Sets status back to `normal`.
+4. **Preserves any previously recorded baseline data** — old baselines are only overwritten on successful completion.
 
 ---
 
@@ -719,7 +723,7 @@ The backend maintains `CYCLE_TRACKER = {}` (appliance_id → `{start_time, last_
 | `calibration_needed` | Red "Calib. Needed" | Calibration instructions, "Start Calibration" button |
 | `calibrating` | Yellow "Calibrating..." | Progress message |
 | `normal` | Green "Normal" | "Start Baseline Recording" button |
-| `baselining` | Blue "Recording Baseline..." | Recording message (15 min), "Cancel" button |
+| `baselining` | Blue "Recording Baseline..." | Recording message + **Cancel** button |
 
 ### Uncalibrated HVAC Warning
 
@@ -814,15 +818,30 @@ Collapsible panel with:
 
 ### 4. Baseline Test
 
-**Objective:** Verify 15-minute baseline completes successfully.
+**Objective:** Verify baseline completes successfully.
 
-**Steps:**
-1. Start appliance (HVAC or dryer). Confirm current ≥ 0.4 A.
+**HVAC Steps:**
+1. Start appliance. Confirm current ≥ 0.4 A.
 2. In dashboard, click **Start Baseline Recording**.
 3. Confirm node beeps twice and LED alternates fast/slow.
-4. Wait 15 minutes.
+4. Keep appliance running for 15 minutes.
 5. Confirm node beeps 3 times and dashboard shows baseline results panel.
 6. Query `appliances` table: confirm `baseline_*_mean` and `baseline_*_std` are populated.
+
+**Dryer Steps:**
+1. Click **Start Baseline Recording** while dryer is idle.
+2. Confirm node beeps twice.
+3. Start the dryer. Confirm running telemetry arrives.
+4. Let the dryer run through one full cycle.
+5. After the cycle ends, wait ~1 minute for auto-completion.
+6. Confirm node beeps 3 times and dashboard shows baseline results panel.
+7. Query `appliances` table: confirm `baseline_*_mean` and `baseline_*_std` are populated.
+
+**Cancel Test:**
+1. Start baseline recording.
+2. Click **Cancel Baseline** before completion.
+3. Confirm node beeps 2 long beeps and status returns to `normal`.
+4. Verify old baseline data is preserved in `appliances`.
 
 ### 5. Data Gating Test
 
@@ -893,16 +912,18 @@ Collapsible panel with:
 | # | Task | Priority | Notes |
 |---|------|----------|-------|
 | 1 | ~~Fault Logic & Alert System~~ | ✅ Done | Dryer end-of-cycle humidity alerts implemented |
-| 2 | **SPC Limit Enforcement** | 🔴 High | Trigger alerts when UCL/LCL breached during operation |
-| 3 | **Discord Integration** | 🔴 High | Webhook alerts for maintenance reminders and fault notifications |
-| 4 | **Multi-Device Dashboard Stress Test** | 🟡 Medium | Verify UI performance with 5+ simultaneous devices |
-| 5 | **Unit Tests** | 🟡 Medium | pytest suite for SPC math, calibration regression, cycle detection |
-| 6 | **Docker Deployment** | 🟡 Medium | Containerize Flask app + PostgreSQL for easy cloud deployment |
-| 7 | **Mobile Responsive Polish** | 🟡 Medium | Test and fix dashboard on phone/tablet screens |
-| 8 | **PCB Design Files** | 🟢 Low | KiCad schematics and Gerber files |
-| 9 | **3D Enclosure** | 🟢 Low | STL files for sensor node housing |
-| 10 | **DB Migration Scripts** | 🟢 Low | Formalize schema creation and versioned migrations |
-| 11 | **CI/CD** | 🟢 Low | GitHub Actions for linting and basic tests |
+| 2 | ~~Baseline Redesign~~ | ✅ Done | Dryer: cycle-based baseline; HVAC: 15-min fixed; Cancel button wired |
+| 3 | ~~Ignition Detection~~ | ✅ Done | Dynamic state machine + prominence threshold for dryer cycle analytics |
+| 4 | **SPC Limit Enforcement** | 🔴 High | Trigger alerts when UCL/LCL breached during operation |
+| 5 | **Discord Integration** | 🔴 High | Webhook alerts for maintenance reminders and fault notifications |
+| 6 | **Multi-Device Dashboard Stress Test** | 🟡 Medium | Verify UI performance with 5+ simultaneous devices |
+| 7 | **Unit Tests** | 🟡 Medium | pytest suite for SPC math, calibration regression, cycle detection |
+| 8 | **Docker Deployment** | 🟡 Medium | Containerize Flask app + PostgreSQL for easy cloud deployment |
+| 9 | **Mobile Responsive Polish** | 🟡 Medium | Test and fix dashboard on phone/tablet screens |
+| 10 | **PCB Design Files** | 🟢 Low | KiCad schematics and Gerber files |
+| 11 | **3D Enclosure** | 🟢 Low | STL files for sensor node housing |
+| 12 | **DB Migration Scripts** | 🟢 Low | Formalize schema creation and versioned migrations |
+| 13 | **CI/CD** | 🟢 Low | GitHub Actions for linting and basic tests |
 
 ### Completed Recently
 - ✅ Web-triggered baseline only (removed physical button baseline)
@@ -913,6 +934,13 @@ Collapsible panel with:
 - ✅ Baseline results panel and threshold configuration UI
 - ✅ Chart deduplication guards and history mode static display
 - ✅ Full DB schema reference documentation
+- ✅ **Cycle-based dryer baseline** — auto-completes when cycle ends; 5-min safety timeout
+- ✅ **HVAC baseline** — running pre-check + 15-min fixed timer
+- ✅ **Cancel baseline** — wired to backend; preserves old baseline data
+- ✅ **Dynamic ignition detection** — prominence threshold rejects noise peaks
+- ✅ **Rebaseline button visibility** — only shown after baseline exists
+- ✅ **Excel export fixes** — empty data handling, old pairing data isolation
+- ✅ **Analytics & live data isolation** — filter by `appliances.created_at`
 
 ---
 
