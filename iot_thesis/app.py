@@ -481,9 +481,9 @@ def handle_node_events(mac, payload):
                 conn.commit()
                 print(f"Auto-registered unknown node {mac}")
             else:
-                # Update last_seen for existing unpaired nodes
+                # Update last_seen for any node that contacts us (proves it's alive)
                 cur.execute(
-                    "UPDATE sensor_nodes SET last_seen = NOW() WHERE mac_address = %s AND status = 'unpaired'",
+                    "UPDATE sensor_nodes SET last_seen = NOW() WHERE mac_address = %s",
                     (mac,)
                 )
                 conn.commit()
@@ -639,11 +639,6 @@ def handle_node_events(mac, payload):
                 cur.execute("UPDATE appliances SET operational_status = 'calibration_needed' WHERE id = %s", (appliance_id,))
                 conn.commit()
                 send_node_command(mac, "calibrationfailack")
-
-        elif event_type == "checkin":
-            # Lightweight keepalive — just refresh last_seen
-            cur.execute("UPDATE sensor_nodes SET last_seen = NOW() WHERE mac_address = %s", (mac,))
-            conn.commit()
 
         elif event_type == "maintenance_request":
             if "Dryer" in app_type or status == 'normal':

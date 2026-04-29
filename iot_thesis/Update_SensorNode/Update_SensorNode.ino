@@ -10,6 +10,7 @@
 #include <vector>
 #include <math.h>
 #include <esp_adc_cal.h>
+#include <Preferences.h>
 
 // =========================
 // WIFI CONFIG
@@ -74,6 +75,8 @@ struct SensorPair {
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
 String deviceMac = "";
+
+Preferences prefs;
 
 // =========================
 // DEVICE TYPE / FLOW STATE
@@ -173,14 +176,14 @@ void beepShort(int count, int onMs = 120, int offMs = 120) {
     buzzerOff();
     if (i < count - 1) delay(offMs);
   }
+}
 
-  // Periodic checkin when idle so backend doesn't mark us offline
-  const unsigned long CHECKIN_INTERVAL_MS = 600000UL;  // 10 minutes
-  if (client.connected() && lastAvgCurrent < 0.4 && (millis() - lastCheckinTime >= CHECKIN_INTERVAL_MS)) {
-    lastCheckinTime = millis();
-    String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"checkin\"}";
-    publishEventJson(ev);
-  }
+void publishCheckin() {
+  if (!client.connected()) return;
+  String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"checkin\"}";
+  publishEventJson(ev);
+  lastCheckinTime = millis();
+  Serial.println("TX CHECKIN");
 }
 
 void beepLongFail(unsigned long ms = 1200) {
@@ -296,6 +299,12 @@ void applyApplianceType(const String& newType) {
     isPaired = false;
     resetRuntimeFlowForPair();
 
+    // Clear persisted pairing state
+    prefs.begin("nodecfg", false);
+    prefs.remove("paired");
+    prefs.remove("type");
+    prefs.end();
+
     if (wasPaired) {
       beepLongFail(1500); 
     }
@@ -322,6 +331,12 @@ void applyApplianceType(const String& newType) {
     Serial.print("PAIR CONFIRMED AGAIN -> ");
     Serial.println(applianceType);
   }
+
+  // Persist pairing state across reboots
+  prefs.begin("nodecfg", false);
+  prefs.putBool("paired", isPaired);
+  prefs.putString("type", applianceType);
+  prefs.end();
 
   printWorkflow();
 }
@@ -405,6 +420,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
         calibrationAcked = true;
         calibState = CALIBIDLE;
         Serial.println("RESTORE -> normal (maintenance allowed)");
+        publishCheckin();  // Immediately tell backend we're alive
         printWorkflow();
         return;
     }
@@ -880,6 +896,18 @@ void setup() {
   delay(3000);
   Serial.println("Booting Sensor Node...");
 
+  // Restore pairing state from NVS (survives power cycles)
+  prefs.begin("nodecfg", true);
+  bool savedPaired = prefs.getBool("paired", false);
+  String savedType = prefs.getString("type", "unpaired");
+  prefs.end();
+  if (savedPaired && (savedType == "HVAC" || savedType == "Dryer")) {
+    isPaired = true;
+    applianceType = savedType;
+    Serial.print("RESTORED FROM NVS -> ");
+    Serial.println(applianceType);
+  }
+
   pinMode(PINBUTTON, INPUT_PULLUP);
   pinMode(PINBUTTON2, INPUT_PULLUP);
   pinMode(PINLED, OUTPUT);
@@ -1006,5 +1034,11 @@ void loop() {
       // Idle: discard samples, do not send or buffer
       resetAverages();
     }
+  }
+
+  // Periodic checkin when idle so backend doesn't mark us offline
+  const unsigned long CHECKIN_INTERVAL_MS = 600000UL;  // 10 minutes
+  if (client.connected() && lastAvgCurrent < 0.4 && (millis() - lastCheckinTime >= CHECKIN_INTERVAL_MS)) {
+    publishCheckin();
   }
 }
