@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>IoT Monitoring</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js/dist/chart.umd.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/luxon@3.3.0/build/global/luxon.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js/dist/chart.umd.js?v=2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/luxon@3.3.0/build/global/luxon.min.js?v=2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@1.3.1/dist/chartjs-adapter-luxon.umd.min.js?v=2"></script>
     <style>
         :root {
             --bg: #F8FAFC;
@@ -685,9 +685,23 @@
                     </div>
                 </div>
 
+                <!-- Manual Baseline Edit Panel -->
+                <div id="manual-baseline-panel" style="display:none; margin-top: 1rem; padding: 1rem; background: var(--surface); border-radius: var(--radius); border: 1px solid var(--border);">
+                    <h4 style="margin-bottom: 0.75rem; font-size: 1rem;">✏️ Edit Baseline Values</h4>
+                    <div id="manual-baseline-inputs" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 0.75rem;">
+                        <!-- Populated dynamically -->
+                    </div>
+                    <div style="margin-top: 0.75rem; display: flex; gap: 0.5rem;">
+                        <button class="btn btn-primary" onclick="saveManualBaseline()" style="font-size: 0.8rem;">Save Manual Baseline</button>
+                        <button class="btn btn-secondary" onclick="document.getElementById('manual-baseline-panel').style.display='none';" style="font-size: 0.8rem;">Cancel</button>
+                    </div>
+                </div>
+
                 <!-- Bottom Buttons -->
-                <div style="margin-top:1rem; padding-top:1rem; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:1rem;">
+                <div style="margin-top:1rem; padding-top:1rem; border-top:1px solid var(--border); display:flex; justify-content:flex-end; align-items:center; gap:1rem;">
+                    <span id="baseline-timestamp" style="font-size:0.75rem; color:var(--text-muted); margin-right:auto;"></span>
                     <button class="btn btn-warning" onclick="rebaselineDevice()" id="btn-rebaseline" style="display:none;">Restart Baseline</button>
+                    <button class="btn btn-secondary" onclick="showManualBaselinePanel()" id="btn-edit-baseline" style="display:none;">Edit Baseline Values</button>
                     <form id="forget-form" method="POST" onsubmit="return confirm('Are you sure you want to forget this device?');">
                         <button type="submit" class="btn btn-danger">Forget Device</button>
                     </form>
@@ -736,6 +750,7 @@
         let latestChartTimeMs = Date.now();
         let baselineTimerInterval = null;
         let calibrationPollInterval = null;
+        let currentDeviceHasBaseline = false;
 
         /* --- NAVIGATION --- */
         function toggleSidebar() {
@@ -815,7 +830,7 @@
         }
 
         /* --- DETAIL MODAL --- */
-        function openDeviceDetail(el) {
+        async function openDeviceDetail(el) {
             try {
                 const id = el.dataset.id;
                 const name = el.dataset.name;
@@ -826,6 +841,10 @@
                 currentDetailId = id;
                 document.getElementById('detail-title').innerText = name;
                 document.getElementById('forget-form').action = '/devices/' + id + '/forget';
+
+                // Reset manual baseline panel so stale data from previous device doesn't show
+                document.getElementById('manual-baseline-panel').style.display = 'none';
+                document.getElementById('manual-baseline-inputs').innerHTML = '';
 
                 // Show/hide grid details
                 document.getElementById('row-tcoil').style.display = isHVAC ? 'flex' : 'none';
@@ -851,7 +870,21 @@
                 historyStart = null;
                 historyEnd = null;
 
-                buildActionBar(status, id, isHVAC);
+                // Fetch baseline status BEFORE building action bar so Start Baseline is hidden correctly
+                try {
+                    const baselineRes = await fetch(`/api/device/${id}/baseline_analysis`).then(r => r.json());
+                    if (!baselineRes.error) {
+                        currentDeviceHasBaseline = isHVAC
+                            ? (baselineRes.deltat && baselineRes.deltat.mean !== null)
+                            : (baselineRes.temp && baselineRes.temp.mean !== null);
+                    } else {
+                        currentDeviceHasBaseline = false;
+                    }
+                } catch (e) {
+                    currentDeviceHasBaseline = false;
+                }
+
+                buildActionBar(status, id, isHVAC, currentDeviceHasBaseline);
                 buildStatusPolling(id, type);
 
                 document.getElementById('table-container').style.display = 'block';
@@ -861,6 +894,7 @@
                 } else {
                     document.getElementById('btn-export').style.display = 'none';
                     document.getElementById('btn-rebaseline').style.display = 'none';
+                    document.getElementById('btn-edit-baseline').style.display = 'none';
                 }
 
                 updateDataTable();
@@ -892,9 +926,12 @@
             const runBadge = document.getElementById('detail-run-status');
             if (runBadge) { runBadge.style.display = 'none'; }
 
+            // Hide manual baseline panel and clear stale inputs
+            document.getElementById('manual-baseline-panel').style.display = 'none';
+            document.getElementById('manual-baseline-inputs').innerHTML = '';
+
             [chart1, chart2, chart3, chart4].forEach(c => { if(c) c.destroy(); });
             chart1 = chart2 = chart3 = chart4 = null;
-            chartTimestamps = [];
             spcLimits = {};
             latestChartTimeMs = Date.now();
         }
@@ -913,7 +950,7 @@
                     const card = document.querySelector(`.card[data-id="${id}"]`);
                     if(card) { card.dataset.status = 'baselining'; }
                     const isHVAC = card.dataset.type.includes('HVAC');
-                    buildActionBar('baselining', id, isHVAC);
+                    buildActionBar('baselining', id, isHVAC, currentDeviceHasBaseline);
                 } else {
                     alert(data.error);
                     const card = document.querySelector(`.card[data-id="${id}"]`);
@@ -938,7 +975,7 @@
                     if (card) card.dataset.status = 'normal';
                     if (currentDetailId == id) {
                         const isHVAC = card && card.dataset.type.includes('HVAC');
-                        buildActionBar('normal', id, isHVAC);
+                        buildActionBar('normal', id, isHVAC, currentDeviceHasBaseline);
                         document.getElementById('btn-export').style.display = 'inline-flex';
                         checkBaselineResults();
                     }
@@ -956,8 +993,96 @@
             }
         }
 
+        /* --- MANUAL BASELINE INPUT --- */
+        function showManualBaselinePanel() {
+            if (!currentDetailId) return;
+            const panel = document.getElementById('manual-baseline-panel');
+            const inputsDiv = document.getElementById('manual-baseline-inputs');
+            const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
+            const isHVAC = card && card.dataset.type.includes('HVAC');
+            
+            fetch(`/api/device/${currentDetailId}/baseline_analysis`).then(r => r.json()).then(data => {
+                if (data.error) return;
+                let html = '';
+                if (isHVAC) {
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">ΔT Mean</label><input type="number" step="0.01" id="mb-deltat-mean" value="${data.deltat && data.deltat.mean !== null ? data.deltat.mean.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">ΔT Std</label><input type="number" step="0.01" id="mb-deltat-std" value="${data.deltat && data.deltat.std !== null ? data.deltat.std.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Coil Temp Mean</label><input type="number" step="0.01" id="mb-tcoil-mean" value="${data.tcoil && data.tcoil.mean !== null ? data.tcoil.mean.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Coil Temp Std</label><input type="number" step="0.01" id="mb-tcoil-std" value="${data.tcoil && data.tcoil.std !== null ? data.tcoil.std.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">RH Return Mean</label><input type="number" step="0.01" id="mb-rhreturn-mean" value="${data.rhreturn && data.rhreturn.mean !== null ? data.rhreturn.mean.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">RH Return Std</label><input type="number" step="0.01" id="mb-rhreturn-std" value="${data.rhreturn && data.rhreturn.std !== null ? data.rhreturn.std.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">RH Supply Mean</label><input type="number" step="0.01" id="mb-rhsupply-mean" value="${data.rhsupply && data.rhsupply.mean !== null ? data.rhsupply.mean.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">RH Supply Std</label><input type="number" step="0.01" id="mb-rhsupply-std" value="${data.rhsupply && data.rhsupply.std !== null ? data.rhsupply.std.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Current Mean</label><input type="number" step="0.01" id="mb-current-mean" value="${data.current && data.current.mean !== null ? data.current.mean.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Current Std</label><input type="number" step="0.01" id="mb-current-std" value="${data.current && data.current.std !== null ? data.current.std.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Current Min</label><input type="number" step="0.01" id="mb-current-min" value="${data.current && data.current.min !== null ? data.current.min.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Current Max</label><input type="number" step="0.01" id="mb-current-max" value="${data.current && data.current.max !== null ? data.current.max.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                } else {
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Heat Rise Mean</label><input type="number" step="0.01" id="mb-heat-rise-mean" value="${data.temp && data.temp.mean !== null ? data.temp.mean.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Heat Rise Std</label><input type="number" step="0.01" id="mb-heat-rise-std" value="${data.temp && data.temp.std !== null ? data.temp.std.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">RH Exhaust Mean</label><input type="number" step="0.01" id="mb-rhexhaust-mean" value="${data.humidity && data.humidity.mean !== null ? data.humidity.mean.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">RH Exhaust Std</label><input type="number" step="0.01" id="mb-rhexhaust-std" value="${data.humidity && data.humidity.std !== null ? data.humidity.std.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Pressure Mean</label><input type="number" step="0.01" id="mb-pressure-mean" value="${data.pressure && data.pressure.mean !== null ? data.pressure.mean.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Pressure Std</label><input type="number" step="0.01" id="mb-pressure-std" value="${data.pressure && data.pressure.std !== null ? data.pressure.std.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Current Mean</label><input type="number" step="0.01" id="mb-current-mean" value="${data.current && data.current.mean !== null ? data.current.mean.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Current Std</label><input type="number" step="0.01" id="mb-current-std" value="${data.current && data.current.std !== null ? data.current.std.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Current Min</label><input type="number" step="0.01" id="mb-current-min" value="${data.current && data.current.min !== null ? data.current.min.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                    html += `<div><label style="font-size:0.75rem; color:var(--text-muted);">Current Max</label><input type="number" step="0.01" id="mb-current-max" value="${data.current && data.current.max !== null ? data.current.max.toFixed(2) : ''}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>`;
+                }
+                inputsDiv.innerHTML = html;
+                panel.style.display = 'block';
+            }).catch(() => {});
+        }
+
+        function saveManualBaseline() {
+            if (!currentDetailId) return;
+            const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
+            const isHVAC = card && card.dataset.type.includes('HVAC');
+            const payload = {};
+            
+            if (isHVAC) {
+                payload.deltat_mean = parseFloat(document.getElementById('mb-deltat-mean').value);
+                payload.deltat_std = parseFloat(document.getElementById('mb-deltat-std').value);
+                payload.tcoil_mean = parseFloat(document.getElementById('mb-tcoil-mean').value);
+                payload.tcoil_std = parseFloat(document.getElementById('mb-tcoil-std').value);
+                payload.rhreturn_mean = parseFloat(document.getElementById('mb-rhreturn-mean').value);
+                payload.rhreturn_std = parseFloat(document.getElementById('mb-rhreturn-std').value);
+                payload.rhsupply_mean = parseFloat(document.getElementById('mb-rhsupply-mean').value);
+                payload.rhsupply_std = parseFloat(document.getElementById('mb-rhsupply-std').value);
+                payload.current_mean = parseFloat(document.getElementById('mb-current-mean').value);
+                payload.current_std = parseFloat(document.getElementById('mb-current-std').value);
+                payload.threshold_current_min = parseFloat(document.getElementById('mb-current-min').value);
+                payload.threshold_current_max = parseFloat(document.getElementById('mb-current-max').value);
+            } else {
+                payload.heat_rise_mean = parseFloat(document.getElementById('mb-heat-rise-mean').value);
+                payload.heat_rise_std = parseFloat(document.getElementById('mb-heat-rise-std').value);
+                payload.rhexhaust_mean = parseFloat(document.getElementById('mb-rhexhaust-mean').value);
+                payload.rhexhaust_std = parseFloat(document.getElementById('mb-rhexhaust-std').value);
+                payload.pressure_mean = parseFloat(document.getElementById('mb-pressure-mean').value);
+                payload.pressure_std = parseFloat(document.getElementById('mb-pressure-std').value);
+                payload.current_mean = parseFloat(document.getElementById('mb-current-mean').value);
+                payload.current_std = parseFloat(document.getElementById('mb-current-std').value);
+                payload.threshold_current_min = parseFloat(document.getElementById('mb-current-min').value);
+                payload.threshold_current_max = parseFloat(document.getElementById('mb-current-max').value);
+            }
+            
+            fetch(`/api/device/${currentDetailId}/manual_baseline`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            }).then(r => r.json()).then(data => {
+                if (data.success) {
+                    document.getElementById('manual-baseline-panel').style.display = 'none';
+                    checkBaselineResults();
+                    alert('Manual baseline saved successfully.');
+                } else {
+                    alert('Error: ' + (data.error || 'Unknown'));
+                }
+            }).catch(e => alert('Error saving manual baseline: ' + e));
+        }
+
         /* --- ACTION BAR BUILDER --- */
-        function buildActionBar(status, id, isHVAC) {
+        function buildActionBar(status, id, isHVAC, hasBaseline) {
             const bar = document.getElementById('detail-action-bar');
             if (baselineTimerInterval) { clearInterval(baselineTimerInterval); baselineTimerInterval = null; }
             if (calibrationPollInterval) { clearInterval(calibrationPollInterval); calibrationPollInterval = null; }
@@ -1030,9 +1155,8 @@
             } else {
                 // normal status
                 let baselineBtn = '';
-                if (isHVAC) {
-                    baselineBtn = `<button id="btn-remote-baseline" class="btn btn-primary" style="margin-left:10px;" onclick="startRemoteBaseline('${id}')">Start Baseline</button>`;
-                } else {
+                // Only show Start Baseline if no baseline exists yet
+                if (!hasBaseline) {
                     baselineBtn = `<button id="btn-remote-baseline" class="btn btn-primary" style="margin-left:10px;" onclick="startRemoteBaseline('${id}')">Start Baseline</button>`;
                 }
                 bar.innerHTML = `
@@ -1131,10 +1255,15 @@
                             }
                             // Update action bar in modal
                             if (currentDetailId == id) {
-                                buildActionBar(data.status, id, isHVAC);
+                                buildActionBar(data.status, id, isHVAC, currentDeviceHasBaseline);
                                 if (data.status === 'normal') {
                                     document.getElementById('btn-export').style.display = 'inline-flex';
-                                    checkBaselineResults();
+                                    checkBaselineResults().then(() => {
+                                        // Rebuild action bar with updated baseline state
+                                        if (currentDetailId == id) {
+                                            buildActionBar('normal', id, isHVAC, currentDeviceHasBaseline);
+                                        }
+                                    });
                                     updateDataTable();
                                 }
                             }
@@ -1307,7 +1436,7 @@
         let chartMode = 'live';
         let historyStart = null;
         let historyEnd = null;
-        let chartTimestamps = []; // parallel ISO timestamps for tooltip full date display
+        // Per-chart timestamp arrays are attached directly to Chart.js instances
         let initChartsRequestId = 0; // ignore stale fetch callbacks
 
         function fmtTimeLabel(date) {
@@ -1326,13 +1455,10 @@
                     tooltip: {
                         callbacks: {
                             title: function(context) {
+                                const chart = context[0].chart;
                                 const idx = context[0].dataIndex;
-                                const ts = chartTimestamps[idx];
-                                if (ts) {
-                                    const d = new Date(ts);
-                                    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString();
-                                }
-                                return '';
+                                const ts = chart.timeLabels ? chart.timeLabels[idx] : '';
+                                return ts || '';
                             }
                         }
                     }
@@ -1363,10 +1489,11 @@
                 `;
                 chart1 = new Chart(document.getElementById('chart1').getContext('2d'), {
                     type: 'line', data: { datasets: [
-                        mkDataset('T', '#2563EB', []), mkDataset('UCL', '#EF4444', [6,3]), 
+                        mkDataset('T', '#2563EB', []), mkDataset('UCL', '#EF4444', [6,3]),
                         mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
                     ] }, options: makeSPCChartOptions('°C')
                 });
+                chart1.timeLabels = [];
 
                 document.getElementById('title-chart-2').innerText = "Coil Temperature (Evaporator)";
                 document.getElementById('legend-chart-2').innerHTML = `
@@ -1377,10 +1504,11 @@
                 `;
                 chart2 = new Chart(document.getElementById('chart2').getContext('2d'), {
                     type: 'line', data: { datasets: [
-                        mkDataset('Tcoil', '#10B981', []), mkDataset('UCL', '#EF4444', [6,3]), 
+                        mkDataset('Tcoil', '#10B981', []), mkDataset('UCL', '#EF4444', [6,3]),
                         mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
                     ] }, options: makeSPCChartOptions('°C')
                 });
+                chart2.timeLabels = [];
 
                 document.getElementById('title-chart-3').innerText = "Compressor Current";
                 document.getElementById('legend-chart-3').innerHTML = `
@@ -1391,10 +1519,11 @@
                 `;
                 chart3 = new Chart(document.getElementById('chart3').getContext('2d'), {
                     type: 'line', data: { datasets: [
-                        mkDataset('Current', '#F59E0B', [], true), mkDataset('UCL', '#EF4444', [6,3]), 
+                        mkDataset('Current', '#F59E0B', [], true), mkDataset('UCL', '#EF4444', [6,3]),
                         mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
                     ] }, options: makeSPCChartOptions('A')
                 });
+                chart3.timeLabels = [];
 
             } else {
                 // Dryer Charts — 4 separate graphs
@@ -1411,6 +1540,7 @@
                         mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
                     ] }, options: makeSPCChartOptions('°C')
                 });
+                chart1.timeLabels = [];
 
                 document.getElementById('title-chart-2').innerText = "Exhaust Humidity";
                 document.getElementById('legend-chart-2').innerHTML = `
@@ -1425,6 +1555,7 @@
                         mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
                     ] }, options: makeSPCChartOptions('%')
                 });
+                chart2.timeLabels = [];
 
                 document.getElementById('title-chart-3').innerText = "Exhaust Pressure";
                 document.getElementById('legend-chart-3').innerHTML = `
@@ -1439,20 +1570,27 @@
                         mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
                     ] }, options: makeSPCChartOptions('hPa')
                 });
+                chart3.timeLabels = [];
 
                 document.getElementById('title-chart-4').innerText = "Motor Current (Gas Ignition Spikes)";
                 document.getElementById('legend-chart-4').innerHTML = `
                     <span><span class="spc-legend-line" style="background:#F59E0B"></span>Current A</span>
+                    <span><span class="spc-legend-line" style="background:#EF4444; border-top:2px dashed #EF4444"></span>UCL Max</span>
+                    <span><span class="spc-legend-line" style="background:#64748B; border-top:2px dashed #64748B"></span>Mean</span>
+                    <span><span class="spc-legend-line" style="background:#3B82F6; border-top:2px dashed #3B82F6"></span>LCL Min</span>
                 `;
                 chart4 = new Chart(document.getElementById('chart4').getContext('2d'), {
                     type: 'line', data: { datasets: [
-                        mkDataset('Current A', '#F59E0B', [], true)
+                        mkDataset('Current A', '#F59E0B', [], true),
+                        mkDataset('UCL Max', '#EF4444', [6,3]),
+                        mkDataset('Mean', '#64748B', [4,4]),
+                        mkDataset('LCL Min', '#3B82F6', [6,3])
                     ] }, options: makeSPCChartOptions('A')
                 });
+                chart4.timeLabels = [];
             }
 
             // Fetch history
-            chartTimestamps = [];
             const limit = chartMode === 'live' ? MAX_CHART_POINTS : 5000;
             let url = `/api/device/${id}/latest_n?limit=${limit}`;
             if (chartMode === 'history' && historyStart && historyEnd) {
@@ -1488,9 +1626,15 @@
                 if (!chart || !limits) return;
                 const n = chart.data.labels.length;
                 if (n === 0) return;
-                chart.data.datasets[1].data = Array(n).fill(limits.ucl);
-                chart.data.datasets[2].data = Array(n).fill(limits.mean);
-                chart.data.datasets[3].data = Array(n).fill(limits.lcl);
+                // In-place mutation avoids Chart.js metadata invalidation when arrays are replaced
+                const values = [limits.ucl, limits.mean, limits.lcl];
+                [1, 2, 3].forEach((dsIdx, i) => {
+                    const val = values[i];
+                    const ds = chart.data.datasets[dsIdx].data;
+                    while (ds.length < n) ds.push(val);
+                    while (ds.length > n) ds.pop();
+                    for (let j = 0; j < n; j++) ds[j] = val;
+                });
                 chart.update('quiet');
             }
             if (spcLimits.deltat) {
@@ -1501,6 +1645,9 @@
                 setLines(chart1, spcLimits.temp);
                 setLines(chart2, spcLimits.humidity);
                 setLines(chart3, spcLimits.pressure);
+                if (spcLimits.current && chart4) {
+                    setLines(chart4, spcLimits.current);
+                }
             }
         }
 
@@ -1509,33 +1656,32 @@
             if (timeMs <= latestChartTimeMs) return; // skip duplicates / out-of-order
             latestChartTimeMs = timeMs;
             const label = time instanceof Date ? fmtTimeLabel(time) : fmtTimeLabel(new Date(time));
-            const isoStr = time instanceof Date ? time.toISOString() : new Date(time).toISOString();
+            const timeLabel = time instanceof Date
+                ? time.toLocaleDateString() + ' ' + time.toLocaleTimeString()
+                : new Date(time).toLocaleDateString() + ' ' + new Date(time).toLocaleTimeString();
 
             function updateChart(chart, val) {
                 if (!chart) return;
                 chart.data.labels.push(label);
                 chart.data.datasets[0].data.push(val);
-                if (chartMode === 'live') {
-                    while (chart.data.labels.length > MAX_CHART_POINTS) {
-                        chart.data.labels.shift();
-                        chart.data.datasets.forEach(ds => { if (ds.data.length) ds.data.shift(); });
-                    }
-                }
-            }
-            chartTimestamps.push(isoStr);
-            if (chartMode === 'live') {
-                while (chartTimestamps.length > MAX_CHART_POINTS) chartTimestamps.shift();
+                if (!chart.timeLabels) chart.timeLabels = [];
+                chart.timeLabels.push(timeLabel);
             }
 
-            if(isHVAC) {
-                updateChart(chart1, val1);
-                updateChart(chart2, val2);
-                updateChart(chart3, val3);
-            } else {
-                updateChart(chart1, val1);
-                updateChart(chart2, val2);
-                updateChart(chart3, val3);
-                updateChart(chart4, val4);
+            updateChart(chart1, val1);
+            updateChart(chart2, val2);
+            updateChart(chart3, val3);
+            if (!isHVAC) updateChart(chart4, val4);
+
+            if (chartMode === 'live') {
+                [chart1, chart2, chart3, chart4].forEach(c => {
+                    if (!c) return;
+                    while (c.data.labels.length > MAX_CHART_POINTS) {
+                        c.data.labels.shift();
+                        c.data.datasets.forEach(ds => { if (ds.data.length) ds.data.shift(); });
+                        c.timeLabels.shift();
+                    }
+                });
             }
 
             if (doUpdate) {
@@ -1581,15 +1727,6 @@
                 const offlineBanner = document.getElementById(`offline-${id}`);
                 const runBadge = document.getElementById(`mini-run-status-${id}`);
                 
-                if (data.is_offline) {
-                    // Device hasn't checked in for >10 minutes
-                    offlineBanner.innerText = 'Device Offline';
-                    offlineBanner.style.background = 'var(--danger)';
-                    offlineBanner.style.display = 'block';
-                    if (runBadge) runBadge.style.display = 'none';
-                    return;
-                }
-                
                 if (!data.has_data) {
                     // Node is alive but has never sent telemetry
                     offlineBanner.innerText = 'Awaiting Sensor Data...';
@@ -1599,8 +1736,14 @@
                     return;
                 }
                 
-                // Online with data
-                offlineBanner.style.display = 'none';
+                // Show offline warning but still display last known values
+                if (data.is_offline) {
+                    offlineBanner.innerText = 'Device Offline';
+                    offlineBanner.style.background = 'var(--danger)';
+                    offlineBanner.style.display = 'block';
+                } else {
+                    offlineBanner.style.display = 'none';
+                }
                 
                 if (runBadge && data.running_status) {
                     runBadge.style.display = 'inline-block';
@@ -1650,27 +1793,6 @@
             const runBadge = document.getElementById('detail-run-status');
             const offlineBadge = document.getElementById('detail-offline-status');
             
-            if (data.is_offline) {
-                if (offlineBadge) {
-                    offlineBadge.style.display = 'inline-block';
-                    offlineBadge.innerText = 'Offline';
-                }
-                if (runBadge) runBadge.style.display = 'none';
-                document.getElementById('detail-t1').innerText = '-- °C';
-                if (isHVAC) {
-                    document.getElementById('detail-t2').innerText = '-- °C';
-                    document.getElementById('detail-t3').innerText = '-- °C';
-                    document.getElementById('detail-h1').innerText = '-- %';
-                    document.getElementById('detail-h2').innerText = '-- %';
-                    document.getElementById('detail-delta').innerText = '-- °C';
-                } else {
-                    document.getElementById('detail-h1').innerText = '-- %';
-                    document.getElementById('detail-delta').innerText = '-- hPa';
-                }
-                document.getElementById('detail-amp').innerText = '-- A';
-                return;
-            }
-            
             if (!data.has_data) {
                 if (offlineBadge) {
                     offlineBadge.style.display = 'inline-block';
@@ -1693,7 +1815,16 @@
                 return;
             }
             
-            if (offlineBadge) offlineBadge.style.display = 'none';
+            // Show offline badge if device is offline, but still display last known values
+            if (data.is_offline) {
+                if (offlineBadge) {
+                    offlineBadge.style.display = 'inline-block';
+                    offlineBadge.innerText = 'Offline';
+                    offlineBadge.className = 'status-badge status-danger';
+                }
+            } else {
+                if (offlineBadge) offlineBadge.style.display = 'none';
+            }
             
             // Handle uncalibrated HVAC
             if (data.calibrated === false) {
@@ -1834,10 +1965,10 @@
         }
 
         function checkBaselineResults() {
-            if (!currentDetailId) return;
+            if (!currentDetailId) return Promise.resolve();
             const panel = document.getElementById('baseline-results-panel');
             const content = document.getElementById('baseline-results-content');
-            fetch(`/api/device/${currentDetailId}/baseline_analysis`).then(r => r.json()).then(data => {
+            return fetch(`/api/device/${currentDetailId}/baseline_analysis`).then(r => r.json()).then(data => {
                 if (data.error || !data.status) return;
                 const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
                 const isHVAC = card && card.dataset.type.includes('HVAC');
@@ -1858,10 +1989,30 @@
                 }
                 content.innerHTML = html;
                 
+                // Update global flag for action bar logic
+                currentDeviceHasBaseline = hasBaseline;
+                
                 // Show/hide Restart Baseline button based on whether baseline actually exists
                 const rebaselineBtn = document.getElementById('btn-rebaseline');
                 if (rebaselineBtn) {
                     rebaselineBtn.style.display = hasBaseline ? 'inline-flex' : 'none';
+                }
+                
+                // Show/hide Edit Baseline button
+                const editBaselineBtn = document.getElementById('btn-edit-baseline');
+                if (editBaselineBtn) {
+                    editBaselineBtn.style.display = hasBaseline ? 'inline-flex' : 'none';
+                }
+                
+                // Show baseline timestamp
+                const tsEl = document.getElementById('baseline-timestamp');
+                if (tsEl) {
+                    if (data.baseline_set_at) {
+                        const d = new Date(data.baseline_set_at);
+                        tsEl.innerText = 'Baseline updated: ' + d.toLocaleString();
+                    } else {
+                        tsEl.innerText = '';
+                    }
                 }
             }).catch(() => {});
         }

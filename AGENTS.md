@@ -551,6 +551,36 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 - **Frontend:** `updateMiniCards()` rewritten to use `is_offline`/`has_data` flags instead of `.catch()`.
 - **Frontend:** Added offline badge (`detail-offline-status`) to detail modal header.
 
+### 2026-05-01 — Dryer Cycle Detection Fix
+- **Backend:** Gap threshold lowered from **600s → 60s** to correctly split separate dryer runs.
+- **Backend:** `cycle_start` decoupled from `threshold_current_min`. Now fixed at **0.4A** (matching firmware running gate) to ensure new cycles can start after gaps.
+- **Backend:** Noise filter reduced from **3.0 min → 1.0 min** to preserve short dryer bursts that were incorrectly discarded.
+- **Backend:** Added temporary debug logging to `dryer_analytics()` (subsequently cleaned up) to diagnose missing cycles.
+
+### 2026-04-30 — BME280 Hardware Failure Confirmed
+- **Hardware:** Created `BME280_Test.ino` diagnostic sketch (multiple iterations: simple, gas-test-style, I2C lockup recovery, dual-address 0x76/0x77).
+- **Hardware:** I2C scan shows **no devices found at all** on GPIO 8/9. Same sensor was previously detected but returned constant values (24.3°C / 67.3% / 707.5 hPa).
+- **Hardware:** User confirmed no external pull-up resistors on PCB. Old 3.3V module likely had built-in pull-ups; replacement modules do not.
+- **Hardware:** Tested on breadboard with fresh wiring — still not detected.
+- **Hardware:** Gas dryer test firmware (`esp32dryertest.ino`) also returns `❌ BME FAIL` — confirming sensor is **dead**, not a code issue.
+- **Hardware:** I2C lockup recovery attempted (SDA not stuck low) — no effect.
+- **Hardware:** Both I2C addresses tried (0x76, 0x77) — no response.
+- **Root cause:** BME280 chip is dead (likely undervoltage damage from 5V-rated module powered at 3.3V, or ESD). No software fix possible.
+
+### 2026-04-30 — Chart Tooltip Timestamp Fix & SPC Line Stability
+- **Frontend:** Eliminated global `chartTimeLabels` array. Each Chart.js instance now owns its own `timeLabels` array, preventing cross-chart contamination and phantom timestamps.
+- **Frontend:** Tooltip callback changed from `chartTimeLabels[context[0].dataIndex]` to `context[0].chart.timeLabels[context[0].dataIndex]`.
+- **Frontend:** `pushToCharts` trimming loop now shifts per-chart `timeLabels` in lockstep with that chart's data.
+- **Frontend:** `applySPCLines()` now mutates SPC line datasets **in-place** (push/pop/assign) instead of wholesale array replacement (`Array(n).fill(...)`). This avoids Chart.js v4 metadata invalidation that caused `dataIndex` misalignment during tooltip renders.
+- **Frontend:** Cache-busting query parameter (`?v=2`) added to CDN script tags to force browsers to load updated code.
+
+### 2026-04-30 — DB Timezone Fix & Backend Hardening
+- **Database:** `dryer_readings.time` column migrated from `TIMESTAMP WITHOUT TIME ZONE` to `TIMESTAMPTZ` to match `hvac_readings`. PostgreSQL converted existing naive local timestamps (assumed `Asia/Bangkok` UTC+7) into proper UTC-backed values, fixing browser misinterpretation that caused 7-hour timestamp shifts.
+- **Backend:** `on_mqtt_message` now uses `datetime.now(timezone.utc)` instead of `datetime.now()` (local time) when computing `actual_time`. Eliminates ambiguity when server timezone differs from UTC.
+- **Backend:** `ago_ms` / `ago` values capped with `max(0, ...)` to prevent negative deltas from creating future timestamps.
+- **Backend:** Future-timestamp guard clamps `actual_time` to `now_utc + 1 minute` if the device clock is wrong or sends bogus age values.
+- **Backend:** `api_device_latest` staleness check hardened: `is_stale = time_val > now or (now - time_val).total_seconds() > stale_threshold_seconds`. Future-dated readings now correctly show "Idle / Data Stale" instead of fake "Running".
+
 ### 2026-04-29 — Baseline Redesign, Ignition Detection, UI Fixes
 - **Backend:** Dryer baseline redesigned from fixed 15-minute timer to **cycle-based recording**.
   - Can start while idle (no running pre-check).
@@ -585,10 +615,14 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 
 | Issue | Status | Notes |
 |-------|--------|-------|
+| BME280 completely dead / not detected | **Hardware** | Sensor does not respond at 0x76 or 0x77. Confirmed dead by gas dryer test firmware (`❌ BME FAIL`). Constant readings (24.3°C / 67.3% / 707.5 hPa) were early signs of failure. Likely undervoltage damage (5V module at 3.3V) or ESD. Replace module. |
+| BME280 reads constant values / abnormal pressure | **Hardware** | Sensor returns identical T/H/P across 10s intervals (e.g., 24.3°C / 67.3% / 707.5 hPa). Early warning sign of sensor failure. Caused by undervoltage, missing pull-ups, or defective sensor. |
 | BME280 reads 182°C / 100% RH / −204 hPa | **Hardware** | Sensor fault — check I2C wiring or replace BME280 |
 | `TESTING_GUIDE.md` untracked | **Git** | Exists in working tree but not committed |
 | Excel export empty data error | **Fixed** | Returns valid `.xlsx` with "No data available" message |
 | Rebaseline button visible before baseline | **Fixed** | Only shown after `baseline_analysis` confirms stats exist |
+| Chart tooltip shows wrong timestamp after SPC lines render | **Fixed** | Per-chart `timeLabels` + in-place SPC updates prevent index drift |
+| `dryer_readings.time` stored naive local time (browser showed UTC+7 offset) | **Fixed** | Migrated to `TIMESTAMPTZ`; backend now inserts UTC consistently |
 | `alerts` table schema may need manual migration | **DB** | Run CREATE TABLE if not already present in local PG / Neon |
 
 ---
