@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Member Login - IoT Monitoring</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #050816;
+            color: #fff;
+        }
+        .card {
+            background: linear-gradient(135deg, #9070d0 0%, #472e9b 100%);
+            border-radius: 16px;
+            padding: 40px 50px;
+            width: 100%;
+            max-width: 420px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            backdrop-filter: blur(10px);
+        }
+        .icon {
+            width: 60px;
+            height: 60px;
+            border-radius: 50%;
+            border: 2px solid rgba(255,255,255,0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 10px auto;
+            font-size: 28px;
+        }
+        h2 {
+            text-align: center;
+            margin-bottom: 5px;
+            font-weight: 600;
+        }
+        .subtitle {
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 0.9rem;
+            color: #e0e0ff;
+        }
+        .form-group {
+            margin-bottom: 18px;
+        }
+        label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 0.9rem;
+        }
+        input[type="email"],
+        input[type="password"],
+        input[type="text"] {
+            width: 100%;
+            padding: 10px 12px;
+            border-radius: 6px;
+            border: none;
+            font-size: 0.95rem;
+        }
+        .remember-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin: 10px 0 20px 0;
+            font-size: 0.85rem;
+        }
+        .remember-left {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+        }
+        .btn {
+            width: 100%;
+            padding: 12px;
+            border-radius: 6px;
+            border: none;
+            background: #21d4fd;
+            color: #1a1a2e;
+            font-weight: 600;
+            font-size: 0.95rem;
+            cursor: pointer;
+            transition: background 0.2s, transform 0.1s;
+        }
+        .btn:hover {
+            background: #1fb5df;
+            transform: translateY(-1px);
+        }
+        .links-row {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 18px;
+            font-size: 0.85rem;
+        }
+        a {
+            color: #ffffff;
+            text-decoration: none;
+            opacity: 0.9;
+        }
+        a:hover {
+            opacity: 1;
+            text-decoration: underline;
+        }
+        .flash {
+            padding: 8px 10px;
+            border-radius: 8px;
+            margin-bottom: 16px;
+            font-size: 0.85rem;
+            text-align: center;
+        }
+        .flash.error {
+            background: rgba(255, 224, 224, 0.9);
+            color: #b00020;
+        }
+        .flash.success {
+            background: rgba(224, 255, 224, 0.9);
+            color: #006400;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">
+            <span>👤</span>
+        </div>
+        <h2>Member Login</h2>
+        <p class="subtitle">Sign in to your IoT monitoring dashboard</p>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+         {% for category, message in messages %}
+            {% if category == 'error' %}
+            <div class="flash {{ category }}">{{ message }}</div>
+            {% endif %}
+          {% endfor %}
+        {% endwith %}
+
+
+        <form method="POST" action="/login">
+            <div class="form-group">
+                <label for="email">Username / Email</label>
+                <input type="email" id="email" name="email" required placeholder="Enter your email">
+            </div>
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" required placeholder="Enter your password">
+            </div>
+
+            <div class="remember-row">
+                <div class="remember-left">
+                    <input type="checkbox" id="remember" name="remember">
+                    <label for="remember">Remember me</label>
+                </div>
+                <a href="/forgot-password">Forgot password?</a>
+            </div>
+
+            <button type="submit" class="btn">LOGIN</button>
+        </form>
+
+        <div class="links-row">
+            <a href="/signup">Don't have an account?</a>
+            <!-- could add other small links here later -->
+        </div>
+    </div>
+</body>
+</html>
