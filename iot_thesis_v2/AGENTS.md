@@ -38,6 +38,10 @@ iot_thesis_v2/
 
 Identical to v1. See root `AGENTS.md` for full pin map and sensor specs.
 
+### v2-Specific Hardware Notes
+- **Dryer SCT-013 Calibration Factor:** Updated to **30.0** (was 37.0 in v1). Deductor remains **0.111**.
+- **Pressure Precision:** BME280 pressure readings now report **2 decimal places** (was 1 decimal) for finer exhaust duct monitoring.
+
 ### Key Firmware Changes
 - `baselinestartack`, `baselinesuccessack`, `baselinefailack` commands are **removed**.
 - **New command:** `baseline:set` → node beeps 3 short beeps to confirm baseline configuration.
@@ -71,6 +75,35 @@ In addition to the existing `dryer_humidity_high` end-of-cycle alert:
 - `spc_lcl_breach` — reading fell below LCL.
 
 These are inserted in `on_mqtt_message()` immediately after a running reading is inserted.
+
+### Fault Alert System (NEW)
+Pattern-based fault detection gated behind `baseline_configured = TRUE`. All fault alerts use a **10-minute cooldown** per fault type.
+
+**Dryer Faults:**
+| Fault | Trigger | Severity |
+|-------|---------|----------|
+| `fault_dryer_roller_wear` | Per-cycle motor baseline median > UCL for 3 consecutive cycles | Warning |
+| `fault_dryer_belt_snapped` | Current < LCL and < 0.3A for >30s during cycle | Critical |
+| `fault_dryer_lint_blockage` | End-of-cycle RH > UCL AND max exhaust temp > UCL | Critical |
+| `fault_dryer_incomplete_drying` | End-of-cycle RH > mean but <= UCL | Info |
+
+**HVAC Faults:**
+| Fault | Trigger | Severity |
+|-------|---------|----------|
+| `fault_hvac_dirty_filter` | Min coil temp > UCL during STABLE_ON for 3+ consecutive cycles | Warning |
+| `fault_hvac_low_refrigerant` | Peak ΔT < LCL during STABLE_ON for 3+ consecutive cycles | Critical |
+| `fault_hvac_compressor_fault` | Avg current > UCL during STABLE_ON for 2+ consecutive cycles | Critical |
+
+**Motor Baseline Extraction (Dryer):**
+- Prominence threshold: `max(0.35A, baseline_mean × 0.20)` (lowered from 0.50A).
+- Hard threshold guard: readings > `mean × 1.15` are excluded.
+- Per-cycle median of non-spike, non-excluded readings = motor baseline.
+
+**Auto-Derived UCL/LCL (Dryer Current):**
+- If user enters only `mean` for dryer `current`, system auto-derives:
+  - UCL = `mean × 1.20`
+  - LCL = `mean × 0.80`
+- User can still override by entering explicit UCL/LCL values.
 
 ### Data Flow
 1. Node publishes running telemetry.
@@ -213,6 +246,15 @@ id | appliance_id | alert_type | message | value | threshold
 ---
 
 ## 8. Changelog
+
+### 2026-05-03 — Fault Alert System Implementation
+- **Backend:** Added `check_fault_alerts()`, `_check_dryer_faults()`, `_check_hvac_faults()` with per-cycle median tracking.
+- **Backend:** Lowered dryer spike prominence threshold from 0.50A to 0.35A based on data validation.
+- **Backend:** Added hard threshold guard (`mean × 1.15`) for motor baseline extraction.
+- **Backend:** Auto-derived UCL/LCL for dryer current when user provides only mean.
+- **Backend:** `dryer_analytics()` now computes per-cycle `motor_baseline_median`.
+- **Frontend:** Alerts panel renders fault alerts with severity-based colors (red=critical, orange=warning, blue=info).
+- **Frontend:** Dryer analytics table shows "Motor Current" column (median of non-spike readings).
 
 ### 2026-05-01 — v2 UI Polish & Delay Fixes
 - **Frontend:** Fixed Delta-RH row leaking onto dryer device cards (added `detail-deltarh` parent hide toggle in `openDeviceDetail()`).

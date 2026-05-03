@@ -11,6 +11,9 @@ This is the **second-generation** backend and frontend for the IoT-Based Monitor
 - **Sensor Node Feedback**: When baseline is saved, the backend sends `baseline:set` to the node, which beeps 3 times to give physical confirmation.
 - **Delta RH for HVAC**: The dashboard now displays humidity differential (Return RH − Supply RH) alongside temperature delta.
 - **Real-Time SPC Alerts**: New alert types `spc_ucl_breach` and `spc_lcl_breach` fire immediately when any running reading exceeds control limits.
+- **Fault Alert System** (see `FAULTALERT.md`): Research-backed pattern detection for 7 common appliance faults — 4 dryer faults (roller wear, belt snapped, lint blockage, incomplete drying) and 3 HVAC faults (dirty filter, low refrigerant, compressor fault). Uses per-cycle median for dryer mechanical faults and STABLE_ON state tracking for HVAC thermal faults. Only active after SPC baseline is configured.
+- **Dryer SCT-013 CF = 30.0**: Calibrated for the new current sensor with 0.111 deductor.
+- **Pressure Precision**: BME280 pressure now reports 2 decimal places for finer exhaust duct monitoring.
 - **Instant SPC Line Rendering**: SPC bands appear immediately when opening a device card, not after a 4-second polling delay.
 
 ## Architecture
@@ -36,7 +39,7 @@ v2 uses the same PostgreSQL server but expects a **new or migrated schema**:
 |-------|--------|
 | `appliances` | Removed all `baseline_*_mean/std` columns. Added `baseline_configured BOOLEAN`. Removed `baselining_since`. |
 | `spc_manual_baselines` | **NEW** table. Stores `ucl`, `lcl`, `mean` per appliance per metric. |
-| `alerts` | Same schema, but now populated with `spc_ucl_breach` / `spc_lcl_breach` in addition to `dryer_humidity_high`. |
+| `alerts` | Same schema, now populated with `spc_ucl_breach` / `spc_lcl_breach`, `dryer_humidity_high`, and `fault_*` alert types. |
 
 ### `spc_manual_baselines` Table
 
@@ -155,6 +158,6 @@ If you have existing v1 data you want to preserve:
 
 ## Known Issues / Notes
 
-- **`np.polyfit` not imported** in `app.py`: The HVAC calibration success handler references `np.polyfit()` but `numpy` is not imported. Add `import numpy as np` if calibration is used.
+- **`np.polyfit` import fixed** in `app.py`: `import numpy as np` added. HVAC calibration now works correctly.
 - **HVAC threshold UI**: HVAC threshold saving is not yet implemented (placeholder alert).
-- **BME280 hardware failure**: Confirmed dead sensor (no I2C response at 0x76 or 0x77). Replace with 3.3V-native module.
+- **BME280**: Sensor was replaced and is now working correctly. Historical note: previous module failed (no I2C response) — replaced with 3.3V-native module.

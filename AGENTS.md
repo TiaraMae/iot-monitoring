@@ -100,7 +100,7 @@ iot-monitoring/
 | **SCT-013** | GPIO 0 | Motor live wire current |
 
 - **Current sensor:** SCT-013
-- **Calibration factor:** 37.0
+- **Calibration factor:** 30.0
 - **RMS deductor:** 0.111
 
 ### 3.4 Current Sensing Math
@@ -115,14 +115,11 @@ Both firmwares use the same signal chain:
 
 In `Update_SensorNode.ino`:
 ```cpp
-float cf = (applianceType == "Dryer") ? 37.0 : 11.0;
+float cf = (applianceType == "Dryer") ? 30.0 : 11.0;
 return (trueVoltageMv / 1000.0) * cf;
 ```
 
-The deductor is applied as a database column `icompressor_offset` in `app.py`:
-```python
-default_offset = -0.111 if "Dryer" in dev_type else -0.033
-```
+The deductor is applied in firmware (`readCurrent()`) before the value is sent over MQTT. The backend stores `icompressor_offset` in the `appliances` table for historical reference, but it is **not applied** to current readings — the firmware already sends the deducted value.
 
 ---
 
@@ -501,7 +498,7 @@ The following can be set in a `.env` file (see `.env.example`):
 
 5. **Calibration factors are appliance-type dependent:**
    - HVAC (ZHT103C): factor = 11.0
-   - Dryer (SCT-013): factor = 37.0
+   - Dryer (SCT-013): factor = 30.0
 
 6. **Baseline timers are appliance-specific:**
    - **HVAC:** `threading.Timer(900)` — 15-minute fixed window.
@@ -513,7 +510,7 @@ The following can be set in a `.env` file (see `.env.example`):
 
 9. **Sensor nodes determine their own type from backend commands.** The node firmware does not auto-detect HVAC vs Dryer; it waits for `settype:hvac` or `settype:dryer` from the backend.
 
-10. **Current readings are stored raw in DB** and calibrated on read via `apply_calibration()` in Python. The only exception is the `icompressor_offset` which is a DB column applied at query time.
+10. **Current readings are stored with the firmware deductor already applied.** The `icompressor_offset` DB column exists for reference but is not actively used in current calculations. Temperature and humidity readings are calibrated on read via `apply_calibration()` in Python.
 
 11. **The ESP32-C3 has limited RAM.** The offline queue (`MAX_QUEUE_SIZE = 200`) and string operations must not be increased without checking heap availability.
 
@@ -566,6 +563,7 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 - **Hardware:** I2C lockup recovery attempted (SDA not stuck low) — no effect.
 - **Hardware:** Both I2C addresses tried (0x76, 0x77) — no response.
 - **Root cause:** BME280 chip is dead (likely undervoltage damage from 5V-rated module powered at 3.3V, or ESD). No software fix possible.
+- **Update (2026-05-03):** Sensor replaced with new 3.3V-native module. BME280 now detected and reading correctly.
 
 ### 2026-04-30 — Chart Tooltip Timestamp Fix & SPC Line Stability
 - **Frontend:** Eliminated global `chartTimeLabels` array. Each Chart.js instance now owns its own `timeLabels` array, preventing cross-chart contamination and phantom timestamps.
@@ -615,7 +613,7 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 
 | Issue | Status | Notes |
 |-------|--------|-------|
-| BME280 completely dead / not detected | **Hardware** | Sensor does not respond at 0x76 or 0x77. Confirmed dead by gas dryer test firmware (`❌ BME FAIL`). Constant readings (24.3°C / 67.3% / 707.5 hPa) were early signs of failure. Likely undervoltage damage (5V module at 3.3V) or ESD. Replace module. |
+| BME280 completely dead / not detected | **Fixed** | Original sensor failed (no I2C response). Replaced with new 3.3V-native module; sensor now working correctly. |
 | BME280 reads constant values / abnormal pressure | **Hardware** | Sensor returns identical T/H/P across 10s intervals (e.g., 24.3°C / 67.3% / 707.5 hPa). Early warning sign of sensor failure. Caused by undervoltage, missing pull-ups, or defective sensor. |
 | BME280 reads 182°C / 100% RH / −204 hPa | **Hardware** | Sensor fault — check I2C wiring or replace BME280 |
 | `TESTING_GUIDE.md` untracked | **Git** | Exists in working tree but not committed |

@@ -609,7 +609,7 @@ double readCurrentIrms() {
 
   float rmsADC = sqrt(variance);
   uint32_t trueVoltageMv = esp_adc_cal_raw_to_voltage((uint32_t)rmsADC, &adc1_chars);
-  float cf = (applianceType == "Dryer") ? 37.0 : 11.0;
+  float cf = (applianceType == "Dryer") ? 30.0 : 11.0;
   float deductor = (applianceType == "Dryer") ? 0.111 : 0.033;
   float currentVal = (trueVoltageMv / 1000.0) * cf - deductor;
   return (currentVal > 0.0) ? currentVal : 0.0;
@@ -834,7 +834,7 @@ String buildTelemetryPayload() {
   if (applianceType == "Dryer") {
     payload += "\"BME280Temp\":" + jnum(sumBME280T / MAX_SAMPLES, 1) + ",";
     payload += "\"BME280Hum\":" + jnum(sumBME280H / MAX_SAMPLES, 1) + ",";
-    payload += "\"BME280Pres\":" + jnum(sumBME280P / MAX_SAMPLES, 1) + ",";
+    payload += "\"BME280Pres\":" + jnum(sumBME280P / MAX_SAMPLES, 2) + ",";
   } else {
     payload += "\"DHT1Temp\":" + jnum(sumDHT1T / MAX_SAMPLES, 1) + ",";
     payload += "\"DHT1Hum\":" + jnum(sumDHT1H / MAX_SAMPLES, 1) + ",";

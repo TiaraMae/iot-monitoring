@@ -914,7 +914,7 @@ Collapsible panel with:
 | 1 | ~~Fault Logic & Alert System~~ | ✅ Done | Dryer end-of-cycle humidity alerts implemented |
 | 2 | ~~Baseline Redesign~~ | ✅ Done | Dryer: cycle-based baseline; HVAC: 15-min fixed; Cancel button wired |
 | 3 | ~~Ignition Detection~~ | ✅ Done | Dynamic state machine + prominence threshold for dryer cycle analytics |
-| 4 | **BME280 Hardware Fix** | 🔴 High | Replace dead BME280 module. Confirmed sensor death (no I2C response). Use 3.3V-native modules for PCB without external pull-ups. |
+| 4 | ~~BME280 Hardware Fix~~ | ✅ Done | Replaced dead BME280 with 3.3V-native module. Sensor now working correctly. |
 | 5 | **SPC Limit Enforcement** | 🔴 High | Trigger alerts when UCL/LCL breached during operation |
 | 6 | **Discord Integration** | 🔴 High | Webhook alerts for maintenance reminders and fault notifications |
 | 7 | **Multi-Device Dashboard Stress Test** | 🟡 Medium | Verify UI performance with 5+ simultaneous devices |
@@ -947,7 +947,7 @@ Collapsible panel with:
 - ✅ **`dryer_readings.time` timezone fix** — migrated from `TIMESTAMP` to `TIMESTAMPTZ` to prevent browser UTC misinterpretation
 - ✅ **Backend future-timestamp guard** — clamps incoming readings to `now + 1 min`; hardened staleness check detects future-dated rows
 - ✅ **BME280 diagnostic sketch** — `BME280_Test.ino` created for hardware debugging; tests I2C bus, detects lockups, tries both 0x76/0x77 addresses
-- ✅ **BME280 hardware failure confirmed** — Sensor dead (no response at 0x76 or 0x77). Gas dryer test firmware also shows `❌ BME FAIL`. Constant readings were early sign of failure. Diagnosed via multiple sketches; root cause likely undervoltage or ESD.
+- ✅ **BME280 hardware failure confirmed & fixed** — Original sensor died (no response at 0x76 or 0x77). Replaced with 3.3V-native module; sensor now working correctly.
 - ✅ **Dryer cycle detection fix** — Gap threshold 600s → 60s, `cycle_start` fixed at 0.4A (was `thresh_min * 0.8`), noise filter 3.0 min → 1.0 min. Fixes merged-cycle bug where multiple dryer runs were incorrectly grouped into one long cycle.
 
 ---

@@ -1252,7 +1252,7 @@
                         });
                     } else {
                         title.innerText = "Dryer Cycle Analytics";
-                        ['#', 'Start', 'End', 'Duration', 'Ignitions', 'Min Temp', 'Max Temp', 'Begin RH', 'End RH', 'Spike Avg (A)', 'Consumption (A)'].forEach(h => {
+                        ['#', 'Start', 'End', 'Duration', 'Ignitions', 'Min Temp', 'Max Temp', 'Begin RH', 'End RH', 'Spike Avg (A)', 'Motor Current (A)', 'Consumption (A)'].forEach(h => {
                             const th = document.createElement('th');
                             th.innerText = h;
                             th.style.cssText = "padding: 0.75rem 1rem; text-align: left; font-weight: 600; white-space: nowrap; font-size:0.8rem;";
@@ -1287,6 +1287,7 @@
                                 <td style="padding: 0.5rem 1rem;">${row.start_rh}%</td>
                                 <td style="padding: 0.5rem 1rem;">${row.end_rh_avg}%</td>
                                 <td style="padding: 0.5rem 1rem;">${row.current_spike_avg} A</td>
+                                <td style="padding: 0.5rem 1rem;">${row.motor_baseline_median || '-'} A</td>
                                 <td style="padding: 0.5rem 1rem;">${row.current_consumption} A</td>
                             `;
                         }
@@ -1802,7 +1803,7 @@
             } else {
                 document.getElementById('detail-t1').innerText = data.Texhaust.toFixed(1) + ' °C';
                 document.getElementById('detail-h1').innerText = data.RHexhaust.toFixed(1) + ' %';
-                document.getElementById('detail-delta').innerText = data.Pressure.toFixed(1) + ' hPa';
+                document.getElementById('detail-delta').innerText = data.Pressure.toFixed(2) + ' hPa';
                 document.getElementById('detail-amp').innerText = data.Imotor.toFixed(2) + ' A';
                 
                 if (shouldPush) {
@@ -1877,8 +1878,20 @@
                     const div = document.createElement('div');
                     div.style.cssText = 'padding: 0.5rem; margin-bottom: 0.5rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem;';
                     const isSPCBreach = alert.alert_type === 'spc_ucl_breach' || alert.alert_type === 'spc_lcl_breach';
+                    const isCriticalFault = ['fault_dryer_belt_snapped', 'fault_dryer_lint_blockage', 'fault_hvac_low_refrigerant', 'fault_hvac_compressor_fault'].includes(alert.alert_type);
+                    const isWarningFault = ['fault_dryer_roller_wear', 'fault_hvac_dirty_filter'].includes(alert.alert_type);
+                    const isInfoFault = alert.alert_type === 'fault_dryer_incomplete_drying';
                     if (alert.resolved_at) {
                         div.style.borderLeft = '3px solid var(--success)';
+                    } else if (isCriticalFault) {
+                        div.style.borderLeft = '3px solid #EF4444';
+                        div.style.background = '#FEF2F2';
+                    } else if (isWarningFault) {
+                        div.style.borderLeft = '3px solid #F59E0B';
+                        div.style.background = '#FFFBEB';
+                    } else if (isInfoFault) {
+                        div.style.borderLeft = '3px solid #3B82F6';
+                        div.style.background = '#EFF6FF';
                     } else if (isSPCBreach) {
                         div.style.borderLeft = '3px solid var(--danger)';
                         div.style.background = '#FEF2F2';
