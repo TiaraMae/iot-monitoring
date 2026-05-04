@@ -180,4 +180,3 @@ If you have existing v1 data you want to preserve:
 - **`np.polyfit` import fixed** in `app.py`: `import numpy as np` added. HVAC calibration now works correctly.
 - **HVAC threshold UI**: HVAC threshold saving is not yet implemented (placeholder alert).
 - **BME280**: Sensor was replaced and is now working correctly. Historical note: previous module failed (no I2C response) — replaced with 3.3V-native module.
-- **Discord webhook requires `requests` library**: Already listed in `requirements.txt`.
