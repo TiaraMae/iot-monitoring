@@ -90,8 +90,8 @@ Pattern-based fault detection gated behind `baseline_configured = TRUE`. All fau
 **HVAC Faults:**
 | Fault | Trigger | Severity |
 |-------|---------|----------|
-| `fault_hvac_dirty_filter` | Min coil temp > UCL during STABLE_ON for 3+ consecutive cycles | Warning |
-| `fault_hvac_low_refrigerant` | Peak ΔT < LCL during STABLE_ON for 3+ consecutive cycles | Critical |
+| `fault_hvac_dirty_filter` | Min coil temp < LCL during STABLE_ON for 3+ consecutive cycles | Warning |
+| `fault_hvac_low_refrigerant` | Peak ΔT < ((UCL + mean) / 2) during STABLE_ON for 3+ consecutive cycles, OR min coil temp > UCL | Critical |
 | `fault_hvac_compressor_fault` | Avg current > UCL during STABLE_ON for 2+ consecutive cycles | Critical |
 
 **Motor Baseline Extraction (Dryer):**

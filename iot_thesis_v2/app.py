@@ -774,33 +774,51 @@ def _evaluate_hvac_cycle(appliance_id, peak_deltat, min_tcoil, avg_current, base
     """Evaluate HVAC faults at the end of a STABLE_ON cycle."""
     fat = FAULT_ALERT_TRACKER.setdefault(appliance_id, {})
 
-    # --- Low Refrigerant (Critical) - peak dT < LCL for 3+ consecutive cycles ---
-    deltat_lcl = baselines.get('deltat', {}).get('lcl')
-    if deltat_lcl is not None and peak_deltat < deltat_lcl:
+    # --- Low Refrigerant (Critical) ---
+    # Primary: peak dT fails to reach upper half of envelope (< (UCL + mean) / 2)
+    # Confirmatory: min coil temp > UCL (coil warmer than normal)
+    deltat_ucl = baselines.get('deltat', {}).get('ucl')
+    deltat_mean = baselines.get('deltat', {}).get('mean')
+    deltat_threshold = (deltat_ucl + deltat_mean) / 2.0 if deltat_ucl is not None and deltat_mean is not None else None
+    tcoil_ucl = baselines.get('tcoil', {}).get('ucl')
+
+    low_ref_triggered = False
+    if deltat_threshold is not None and peak_deltat < deltat_threshold:
+        low_ref_triggered = True
+    if tcoil_ucl is not None and min_tcoil > tcoil_ucl:
+        low_ref_triggered = True
+
+    if low_ref_triggered:
         lr = fat.setdefault('fault_hvac_low_refrigerant', {'cycle_count': 0, 'last_trigger': None, 'active': False})
         lr['cycle_count'] += 1
         if lr['cycle_count'] >= 3:
+            if deltat_threshold is not None and peak_deltat < deltat_threshold:
+                msg = f"Low refrigerant - peak dT {peak_deltat:.2f}C below threshold {deltat_threshold:.2f}C for 3 consecutive cycles"
+                val, thresh = peak_deltat, deltat_threshold
+            else:
+                msg = f"Low refrigerant - min coil temp {min_tcoil:.2f}C above UCL {tcoil_ucl:.2f}C for 3 consecutive cycles"
+                val, thresh = min_tcoil, tcoil_ucl
             _insert_fault_alert(
-                appliance_id, 'fault_hvac_low_refrigerant',
-                f"Low refrigerant - peak dT {peak_deltat:.2f}C below LCL {deltat_lcl:.2f}C for 3 consecutive cycles",
-                peak_deltat, deltat_lcl, now, cur, conn)
+                appliance_id, 'fault_hvac_low_refrigerant', msg,
+                val, thresh, now, cur, conn)
             lr['cycle_count'] = 0
-    elif deltat_lcl is not None:
+    elif deltat_threshold is not None or tcoil_ucl is not None:
         if 'fault_hvac_low_refrigerant' in fat:
             fat['fault_hvac_low_refrigerant']['cycle_count'] = 0
 
-    # --- Dirty Filter (Warning) - min coil temp > UCL for 3+ consecutive cycles ---
-    tcoil_ucl = baselines.get('tcoil', {}).get('ucl')
-    if tcoil_ucl is not None and min_tcoil > tcoil_ucl:
+    # --- Dirty Filter (Warning) - min coil temp < LCL for 3+ consecutive cycles ---
+    # Physics: restricted airflow -> less heat load -> refrigerant supercools -> coil colder
+    tcoil_lcl = baselines.get('tcoil', {}).get('lcl')
+    if tcoil_lcl is not None and min_tcoil < tcoil_lcl:
         df = fat.setdefault('fault_hvac_dirty_filter', {'cycle_count': 0, 'last_trigger': None, 'active': False})
         df['cycle_count'] += 1
         if df['cycle_count'] >= 3:
             _insert_fault_alert(
                 appliance_id, 'fault_hvac_dirty_filter',
-                f"Dirty indoor filter - min coil temp {min_tcoil:.2f}C above UCL {tcoil_ucl:.2f}C for 3 consecutive cycles",
-                min_tcoil, tcoil_ucl, now, cur, conn)
+                f"Dirty indoor filter - min coil temp {min_tcoil:.2f}C below LCL {tcoil_lcl:.2f}C for 3 consecutive cycles",
+                min_tcoil, tcoil_lcl, now, cur, conn)
             df['cycle_count'] = 0
-    elif tcoil_ucl is not None:
+    elif tcoil_lcl is not None:
         if 'fault_hvac_dirty_filter' in fat:
             fat['fault_hvac_dirty_filter']['cycle_count'] = 0
 
