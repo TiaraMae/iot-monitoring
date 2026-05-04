@@ -18,9 +18,9 @@ Develop a retrofit-friendly, low-cost IoT sensor node that attaches to existing 
 
 ---
 
-## 2. Repository Layout — Two Independent Systems
+## 2. Repository Layout — Three Independent Systems
 
-This repo contains **two completely separate systems**. Do not mix their code, configs, or architectures.
+This repo contains **three completely separate systems**. Do not mix their code, configs, or architectures.
 
 ```
 iot-monitoring/
@@ -29,15 +29,26 @@ iot-monitoring/
 │   └── esp32dryertest/      # Arduino firmware (BME280 + SCT-013)
 │       └── esp32dryertest.ino
 │
-└── iot_thesis/              # FULL PRODUCTION SYSTEM
-    ├── app.py               # Flask backend (MQTT, DB, auth, SPC, API)
-    ├── fix_db_columns.py    # One-off DB migration utility
+├── iot_thesis/              # FULL PRODUCTION SYSTEM v1 (auto-baseline)
+│   ├── app.py               # Flask backend (MQTT, DB, auth, SPC, API)
+│   ├── fix_db_columns.py    # One-off DB migration utility
+│   ├── templates/
+│   │   ├── dashboard.html   # Single-page monitoring UI
+│   │   ├── login.html
+│   │   └── signup.html
+│   └── Update_SensorNode/   # Production ESP32 firmware
+│       └── Update_SensorNode.ino
+│
+└── iot_thesis_v2/           # ACTIVE DEVELOPMENT v2 (manual SPC + fault alerts)
+    ├── app.py               # Flask backend (manual baseline, fault detection, Discord)
     ├── templates/
-    │   ├── dashboard.html   # Single-page monitoring UI
+    │   ├── dashboard.html   # Inline baseline config, 4-chart layout
     │   ├── login.html
     │   └── signup.html
-    └── Update_SensorNode/   # Production ESP32 firmware
-        └── Update_SensorNode.ino
+    ├── Update_SensorNode/   # Cleaned firmware (baseline:set only)
+    ├── AGENTS.md
+    ├── FAULTALERT.md
+    └── README.md
 ```
 
 ### 2.1 `iot_thesis/` — Production System
@@ -100,7 +111,7 @@ iot-monitoring/
 | **SCT-013** | GPIO 0 | Motor live wire current |
 
 - **Current sensor:** SCT-013
-- **Calibration factor:** 37.0
+- **Calibration factor:** 30.0
 - **RMS deductor:** 0.111
 
 ### 3.4 Current Sensing Math
@@ -115,14 +126,11 @@ Both firmwares use the same signal chain:
 
 In `Update_SensorNode.ino`:
 ```cpp
-float cf = (applianceType == "Dryer") ? 37.0 : 11.0;
+float cf = (applianceType == "Dryer") ? 30.0 : 11.0;
 return (trueVoltageMv / 1000.0) * cf;
 ```
 
-The deductor is applied as a database column `icompressor_offset` in `app.py`:
-```python
-default_offset = -0.111 if "Dryer" in dev_type else -0.033
-```
+The deductor is applied in firmware (`readCurrent()`) before the value is sent over MQTT. The backend stores `icompressor_offset` in the `appliances` table for historical reference, but it is **not applied** to current readings — the firmware already sends the deducted value.
 
 ---
 
@@ -501,7 +509,7 @@ The following can be set in a `.env` file (see `.env.example`):
 
 5. **Calibration factors are appliance-type dependent:**
    - HVAC (ZHT103C): factor = 11.0
-   - Dryer (SCT-013): factor = 37.0
+   - Dryer (SCT-013): factor = 30.0
 
 6. **Baseline timers are appliance-specific:**
    - **HVAC:** `threading.Timer(900)` — 15-minute fixed window.
@@ -513,7 +521,7 @@ The following can be set in a `.env` file (see `.env.example`):
 
 9. **Sensor nodes determine their own type from backend commands.** The node firmware does not auto-detect HVAC vs Dryer; it waits for `settype:hvac` or `settype:dryer` from the backend.
 
-10. **Current readings are stored raw in DB** and calibrated on read via `apply_calibration()` in Python. The only exception is the `icompressor_offset` which is a DB column applied at query time.
+10. **Current readings are stored with the firmware deductor already applied.** The `icompressor_offset` DB column exists for reference but is not actively used in current calculations. Temperature and humidity readings are calibrated on read via `apply_calibration()` in Python.
 
 11. **The ESP32-C3 has limited RAM.** The offline queue (`MAX_QUEUE_SIZE = 200`) and string operations must not be increased without checking heap availability.
 
@@ -551,6 +559,37 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 - **Frontend:** `updateMiniCards()` rewritten to use `is_offline`/`has_data` flags instead of `.catch()`.
 - **Frontend:** Added offline badge (`detail-offline-status`) to detail modal header.
 
+### 2026-05-01 — Dryer Cycle Detection Fix
+- **Backend:** Gap threshold lowered from **600s → 60s** to correctly split separate dryer runs.
+- **Backend:** `cycle_start` decoupled from `threshold_current_min`. Now fixed at **0.4A** (matching firmware running gate) to ensure new cycles can start after gaps.
+- **Backend:** Noise filter reduced from **3.0 min → 1.0 min** to preserve short dryer bursts that were incorrectly discarded.
+- **Backend:** Added temporary debug logging to `dryer_analytics()` (subsequently cleaned up) to diagnose missing cycles.
+
+### 2026-04-30 — BME280 Hardware Failure Confirmed
+- **Hardware:** Created `BME280_Test.ino` diagnostic sketch (multiple iterations: simple, gas-test-style, I2C lockup recovery, dual-address 0x76/0x77).
+- **Hardware:** I2C scan shows **no devices found at all** on GPIO 8/9. Same sensor was previously detected but returned constant values (24.3°C / 67.3% / 707.5 hPa).
+- **Hardware:** User confirmed no external pull-up resistors on PCB. Old 3.3V module likely had built-in pull-ups; replacement modules do not.
+- **Hardware:** Tested on breadboard with fresh wiring — still not detected.
+- **Hardware:** Gas dryer test firmware (`esp32dryertest.ino`) also returns `❌ BME FAIL` — confirming sensor is **dead**, not a code issue.
+- **Hardware:** I2C lockup recovery attempted (SDA not stuck low) — no effect.
+- **Hardware:** Both I2C addresses tried (0x76, 0x77) — no response.
+- **Root cause:** BME280 chip is dead (likely undervoltage damage from 5V-rated module powered at 3.3V, or ESD). No software fix possible.
+- **Update (2026-05-03):** Sensor replaced with new 3.3V-native module. BME280 now detected and reading correctly.
+
+### 2026-04-30 — Chart Tooltip Timestamp Fix & SPC Line Stability
+- **Frontend:** Eliminated global `chartTimeLabels` array. Each Chart.js instance now owns its own `timeLabels` array, preventing cross-chart contamination and phantom timestamps.
+- **Frontend:** Tooltip callback changed from `chartTimeLabels[context[0].dataIndex]` to `context[0].chart.timeLabels[context[0].dataIndex]`.
+- **Frontend:** `pushToCharts` trimming loop now shifts per-chart `timeLabels` in lockstep with that chart's data.
+- **Frontend:** `applySPCLines()` now mutates SPC line datasets **in-place** (push/pop/assign) instead of wholesale array replacement (`Array(n).fill(...)`). This avoids Chart.js v4 metadata invalidation that caused `dataIndex` misalignment during tooltip renders.
+- **Frontend:** Cache-busting query parameter (`?v=2`) added to CDN script tags to force browsers to load updated code.
+
+### 2026-04-30 — DB Timezone Fix & Backend Hardening
+- **Database:** `dryer_readings.time` column migrated from `TIMESTAMP WITHOUT TIME ZONE` to `TIMESTAMPTZ` to match `hvac_readings`. PostgreSQL converted existing naive local timestamps (assumed `Asia/Bangkok` UTC+7) into proper UTC-backed values, fixing browser misinterpretation that caused 7-hour timestamp shifts.
+- **Backend:** `on_mqtt_message` now uses `datetime.now(timezone.utc)` instead of `datetime.now()` (local time) when computing `actual_time`. Eliminates ambiguity when server timezone differs from UTC.
+- **Backend:** `ago_ms` / `ago` values capped with `max(0, ...)` to prevent negative deltas from creating future timestamps.
+- **Backend:** Future-timestamp guard clamps `actual_time` to `now_utc + 1 minute` if the device clock is wrong or sends bogus age values.
+- **Backend:** `api_device_latest` staleness check hardened: `is_stale = time_val > now or (now - time_val).total_seconds() > stale_threshold_seconds`. Future-dated readings now correctly show "Idle / Data Stale" instead of fake "Running".
+
 ### 2026-04-29 — Baseline Redesign, Ignition Detection, UI Fixes
 - **Backend:** Dryer baseline redesigned from fixed 15-minute timer to **cycle-based recording**.
   - Can start while idle (no running pre-check).
@@ -585,11 +624,16 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 
 | Issue | Status | Notes |
 |-------|--------|-------|
+| BME280 completely dead / not detected | **Fixed** | Original sensor failed (no I2C response). Replaced with new 3.3V-native module; sensor now working correctly. |
+| BME280 reads constant values / abnormal pressure | **Hardware** | Sensor returns identical T/H/P across 10s intervals (e.g., 24.3°C / 67.3% / 707.5 hPa). Early warning sign of sensor failure. Caused by undervoltage, missing pull-ups, or defective sensor. |
 | BME280 reads 182°C / 100% RH / −204 hPa | **Hardware** | Sensor fault — check I2C wiring or replace BME280 |
 | `TESTING_GUIDE.md` untracked | **Git** | Exists in working tree but not committed |
 | Excel export empty data error | **Fixed** | Returns valid `.xlsx` with "No data available" message |
 | Rebaseline button visible before baseline | **Fixed** | Only shown after `baseline_analysis` confirms stats exist |
+| Chart tooltip shows wrong timestamp after SPC lines render | **Fixed** | Per-chart `timeLabels` + in-place SPC updates prevent index drift |
+| `dryer_readings.time` stored naive local time (browser showed UTC+7 offset) | **Fixed** | Migrated to `TIMESTAMPTZ`; backend now inserts UTC consistently |
 | `alerts` table schema may need manual migration | **DB** | Run CREATE TABLE if not already present in local PG / Neon |
+| Hardcoded credentials in source code | **Fixed** | Removed all fallback defaults from `os.getenv()`. App now requires `.env` file with `FLASK_SECRET_KEY`, `MQTT_PASS`, and `DB_PASSWORD`. See `iot_thesis_v2/README.md` |
 
 ---
 
@@ -597,9 +641,13 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 
 | File | Responsibility |
 |------|---------------|
-| `iot_thesis/app.py` | Everything backend: HTTP API, MQTT, DB, auth, SPC math, Excel export, alerts, cycle tracking |
-| `iot_thesis/templates/dashboard.html` | Main SPA frontend (Chart.js, real-time cards, detail modal, alert panel) |
+| `iot_thesis/app.py` | v1 backend: HTTP API, MQTT, DB, auth, auto-baseline SPC, Excel export |
+| `iot_thesis/templates/dashboard.html` | v1 frontend (Chart.js, real-time cards, detail modal, alert panel) |
 | `iot_thesis/Update_SensorNode.ino` | Production ESP32 firmware for both HVAC and Dryer |
+| `iot_thesis_v2/app.py` | **v2 backend** — manual SPC baselines, fault alerts, Discord webhooks |
+| `iot_thesis_v2/templates/dashboard.html` | **v2 frontend** — inline baseline config, 4-chart layout, severity colors |
+| `iot_thesis_v2/AGENTS.md` | v2 agent guidance (manual baseline, fault alerts, Discord) |
+| `iot_thesis_v2/FAULTALERT.md` | Deep technical spec for 7 fault types with research citations |
 | `gas_dryer_test/esp32dryertest.py` | Testbed Flask dashboard for BME280 validation |
 | `gas_dryer_test/esp32dryertest.ino` | Testbed ESP32 firmware (BME280 + SCT-013) |
 | `fix_db_columns.py` | One-off source migration: `subtype` → `sub_type` |
