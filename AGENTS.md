@@ -18,9 +18,9 @@ Develop a retrofit-friendly, low-cost IoT sensor node that attaches to existing 
 
 ---
 
-## 2. Repository Layout — Two Independent Systems
+## 2. Repository Layout — Three Independent Systems
 
-This repo contains **two completely separate systems**. Do not mix their code, configs, or architectures.
+This repo contains **three completely separate systems**. Do not mix their code, configs, or architectures.
 
 ```
 iot-monitoring/
@@ -29,15 +29,26 @@ iot-monitoring/
 │   └── esp32dryertest/      # Arduino firmware (BME280 + SCT-013)
 │       └── esp32dryertest.ino
 │
-└── iot_thesis/              # FULL PRODUCTION SYSTEM
-    ├── app.py               # Flask backend (MQTT, DB, auth, SPC, API)
-    ├── fix_db_columns.py    # One-off DB migration utility
+├── iot_thesis/              # FULL PRODUCTION SYSTEM v1 (auto-baseline)
+│   ├── app.py               # Flask backend (MQTT, DB, auth, SPC, API)
+│   ├── fix_db_columns.py    # One-off DB migration utility
+│   ├── templates/
+│   │   ├── dashboard.html   # Single-page monitoring UI
+│   │   ├── login.html
+│   │   └── signup.html
+│   └── Update_SensorNode/   # Production ESP32 firmware
+│       └── Update_SensorNode.ino
+│
+└── iot_thesis_v2/           # ACTIVE DEVELOPMENT v2 (manual SPC + fault alerts)
+    ├── app.py               # Flask backend (manual baseline, fault detection, Discord)
     ├── templates/
-    │   ├── dashboard.html   # Single-page monitoring UI
+    │   ├── dashboard.html   # Inline baseline config, 4-chart layout
     │   ├── login.html
     │   └── signup.html
-    └── Update_SensorNode/   # Production ESP32 firmware
-        └── Update_SensorNode.ino
+    ├── Update_SensorNode/   # Cleaned firmware (baseline:set only)
+    ├── AGENTS.md
+    ├── FAULTALERT.md
+    └── README.md
 ```
 
 ### 2.1 `iot_thesis/` — Production System
@@ -622,6 +633,7 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 | Chart tooltip shows wrong timestamp after SPC lines render | **Fixed** | Per-chart `timeLabels` + in-place SPC updates prevent index drift |
 | `dryer_readings.time` stored naive local time (browser showed UTC+7 offset) | **Fixed** | Migrated to `TIMESTAMPTZ`; backend now inserts UTC consistently |
 | `alerts` table schema may need manual migration | **DB** | Run CREATE TABLE if not already present in local PG / Neon |
+| Hardcoded credentials in source code | **Fixed** | Removed all fallback defaults from `os.getenv()`. App now requires `.env` file with `FLASK_SECRET_KEY`, `MQTT_PASS`, and `DB_PASSWORD`. See `iot_thesis_v2/README.md` |
 
 ---
 
@@ -629,9 +641,13 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 
 | File | Responsibility |
 |------|---------------|
-| `iot_thesis/app.py` | Everything backend: HTTP API, MQTT, DB, auth, SPC math, Excel export, alerts, cycle tracking |
-| `iot_thesis/templates/dashboard.html` | Main SPA frontend (Chart.js, real-time cards, detail modal, alert panel) |
+| `iot_thesis/app.py` | v1 backend: HTTP API, MQTT, DB, auth, auto-baseline SPC, Excel export |
+| `iot_thesis/templates/dashboard.html` | v1 frontend (Chart.js, real-time cards, detail modal, alert panel) |
 | `iot_thesis/Update_SensorNode.ino` | Production ESP32 firmware for both HVAC and Dryer |
+| `iot_thesis_v2/app.py` | **v2 backend** — manual SPC baselines, fault alerts, Discord webhooks |
+| `iot_thesis_v2/templates/dashboard.html` | **v2 frontend** — inline baseline config, 4-chart layout, severity colors |
+| `iot_thesis_v2/AGENTS.md` | v2 agent guidance (manual baseline, fault alerts, Discord) |
+| `iot_thesis_v2/FAULTALERT.md` | Deep technical spec for 7 fault types with research citations |
 | `gas_dryer_test/esp32dryertest.py` | Testbed Flask dashboard for BME280 validation |
 | `gas_dryer_test/esp32dryertest.ino` | Testbed ESP32 firmware (BME280 + SCT-013) |
 | `fix_db_columns.py` | One-off source migration: `subtype` → `sub_type` |

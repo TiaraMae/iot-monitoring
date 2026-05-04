@@ -65,7 +65,7 @@ Identical to v1. See root `AGENTS.md` for full pin map and sensor specs.
 - `save_spc_baselines(appliance_id, baselines)` — upserts UCL/LCL/Mean.
 - `check_spc_alerts(appliance_id, reading_data, dev_type)` — real-time SPC breach checker on every running telemetry insert.
 - `notify_node_baseline_set(appliance_id)` — publishes `baseline:set` to control topic.
-- `SPC_ALERT_COOLDOWN` — rate-limit dict to prevent alert spam (5-minute cooldown per metric).
+- `SPC_ALERT_COOLDOWN` — rate-limit dict to prevent alert spam (5-minute cooldown per metric **per direction**). Key is `(appliance_id, metric_name, alert_type)` so UCL and LCL breaches are independently throttled.
 - `api_baseline_config` endpoint (GET/POST).
 - `baseline_configured` column on `appliances`.
 
@@ -82,22 +82,23 @@ Pattern-based fault detection gated behind `baseline_configured = TRUE`. All fau
 **Dryer Faults:**
 | Fault | Trigger | Severity |
 |-------|---------|----------|
-| `fault_dryer_roller_wear` | Per-cycle motor baseline median > UCL for 3 consecutive cycles | Warning |
-| `fault_dryer_belt_snapped` | Current < LCL for >30s during cycle | Critical |
+| `fault_dryer_roller_wear` | Per-cycle motor baseline median > UCL at cycle end | Warning |
+| `fault_dryer_belt_snapped` | Per-cycle motor baseline median < LCL at cycle end **OR** cycle aborts via >60s gap with `min_current < LCL` | Critical |
 | `fault_dryer_lint_blockage` | End-of-cycle RH > UCL AND max exhaust temp > UCL | Critical |
 | `fault_dryer_incomplete_drying` | End-of-cycle RH > UCL | Info |
 
 **HVAC Faults:**
 | Fault | Trigger | Severity |
 |-------|---------|----------|
-| `fault_hvac_dirty_filter` | Min coil temp < LCL during STABLE_ON for 3+ consecutive cycles | Warning |
-| `fault_hvac_low_refrigerant` | Peak ΔT < ((UCL + mean) / 2) during STABLE_ON for 3+ consecutive cycles, OR min coil temp > UCL | Critical |
-| `fault_hvac_compressor_fault` | Avg current > UCL during STABLE_ON for 2+ consecutive cycles | Critical |
+| `fault_hvac_dirty_filter` | Min coil temp < LCL during STABLE_ON at cycle end | Warning |
+| `fault_hvac_low_refrigerant` | Min coil temp > UCL (primary) OR peak ΔT < ((UCL + mean) / 2) (confirmatory) during STABLE_ON at cycle end | Critical |
+| `fault_hvac_compressor_fault` | Avg current > UCL during STABLE_ON at cycle end | Critical |
 
 **Motor Baseline Extraction (Dryer):**
 - Prominence threshold: `max(0.35A, baseline_mean × 0.20)` (lowered from 0.50A).
 - Hard threshold guard: readings > `mean × 1.15` are excluded.
 - Per-cycle median of non-spike, non-excluded readings = motor baseline.
+- Refactored into `_compute_motor_baseline_median(motor_readings, filter_threshold=None)` helper to eliminate 4x duplicated code in `_finalize_dryer_cycle()` and `dryer_analytics()`.
 
 **Auto-Derived UCL/LCL (Dryer Current):**
 - If user enters only `mean` for dryer `current`, system auto-derives:
@@ -217,6 +218,11 @@ Each chart has 4 datasets: value line + UCL dashed + Mean dashed + LCL dashed.
 - "Start Baseline Recording" / "Cancel Baseline" buttons and timer UI.
 - SPC Summary panel (intermediate table between config and charts).
 - `btn-rebaseline` — replaced by bottom Configure/Edit flow.
+- HVAC threshold inputs — replaced with an informational message that HVAC uses SPC baseline limits.
+
+### Added UI Components
+- `.btn-secondary` CSS rule for Cancel and Test buttons.
+- HVAC threshold panel now displays: *"HVAC alerts use the SPC baseline UCL/LCL limits configured under each chart."*
 
 ---
 
@@ -262,7 +268,7 @@ id | email | password_hash | name | created_at | discord_webhook_url
 2. **UCL must be > LCL.** The backend validates this and rejects otherwise.
 3. **Mean is computed, not stored by user.** The DB stores UCL, LCL, and computed Mean.
 4. **Delta RH is HVAC-only.** The Delta-RH row in the readings grid is hidden for dryers via `detail-deltarh` parent display toggle.
-5. **Alert rate limiting:** `SPC_ALERT_COOLDOWN` prevents one alert per metric per 5 minutes. Do not remove this unless explicitly asked.
+5. **Alert rate limiting:** `SPC_ALERT_COOLDOWN` prevents one alert per metric **per direction** per 5 minutes. UCL and LCL breaches are independently throttled. Do not remove this unless explicitly asked.
 6. **`baseline:set` is the only baseline-related MQTT command.** Do not send `baselinestartack`, `baselinesuccessack`, etc.
 7. **The `deltarh` metric uses `abs(h1c - h2c)`** (absolute difference), same as `deltat`.
 8. **SPC lines are drawn in-place** (`applySPCLines()` uses push/pop/assign). Do not replace entire arrays — it causes Chart.js metadata invalidation.
@@ -277,6 +283,15 @@ id | email | password_hash | name | created_at | discord_webhook_url
 ---
 
 ## 8. Changelog
+
+### 2026-05-04 — Bug Fixes & Security Hardening
+- **Security:** Removed hardcoded credential defaults from `app.py`. Added `python-dotenv` loading. App raises `RuntimeError` on startup if `FLASK_SECRET_KEY`, `MQTT_PASS`, or `DB_PASSWORD` is missing. Local `.env` file (gitignored) is now required.
+- **Backend:** Direction-aware SPC cooldown — key changed to `(appliance_id, metric_name, alert_type)` so UCL and LCL breaches are independently rate-limited.
+- **Backend:** `forget_device()` now cleans up all in-memory trackers (`DRYER_CYCLE_STATS`, `HVAC_CYCLE_TRACKER`, `FAULT_ALERT_TRACKER`, `FAULT_ALERT_COOLDOWN`, `SPC_ALERT_COOLDOWN`, `CYCLE_TRACKER`, `CALIBRATION_TRACKER`) to prevent memory leaks.
+- **Backend:** Extracted `_compute_motor_baseline_median()` helper to eliminate duplicated median logic across `_finalize_dryer_cycle()` and `dryer_analytics()`.
+- **Backend:** Belt snap gap-detection — if a cycle aborts via >60s gap and `min_current < LCL` (or `belt_snap_start` was recorded), `fault_dryer_belt_snapped` is fired immediately.
+- **Frontend:** Added missing `.btn-secondary` CSS rule.
+- **Frontend:** Removed broken HVAC threshold inputs (which referenced non-existent `.std` properties). HVAC threshold panel now shows an informational message.
 
 ### 2026-05-03 — Fault Alert System Implementation
 - **Backend:** Added `check_fault_alerts()`, `_check_dryer_faults()`, `_check_hvac_faults()` with per-cycle median tracking.

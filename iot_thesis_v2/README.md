@@ -178,5 +178,15 @@ If you have existing v1 data you want to preserve:
 ## Known Issues / Notes
 
 - **`np.polyfit` import fixed** in `app.py`: `import numpy as np` added. HVAC calibration now works correctly.
-- **HVAC threshold UI**: HVAC threshold saving is not yet implemented (placeholder alert).
+- **HVAC threshold UI**: Removed. HVAC alerts now use the SPC baseline UCL/LCL limits configured under each chart. No separate threshold setup is needed.
 - **BME280**: Sensor was replaced and is now working correctly. Historical note: previous module failed (no I2C response) — replaced with 3.3V-native module.
+
+## Bug Fixes & Hardening (2026-05-04)
+
+- **Credential Hardening:** Removed all hardcoded password defaults from `app.py`. Added `python-dotenv` loading. App now fails fast with a clear `RuntimeError` if `FLASK_SECRET_KEY`, `MQTT_PASS`, or `DB_PASSWORD` is missing. Create a `.env` file in `iot_thesis_v2/` (gitignored) with your credentials.
+- **Direction-Aware SPC Cooldown:** `SPC_ALERT_COOLDOWN` key changed from `(appliance_id, metric_name)` to `(appliance_id, metric_name, alert_type)`. UCL and LCL breaches on the same metric are now rate-limited independently (5 min each).
+- **In-Memory Tracker Cleanup:** `forget_device()` now purges `appliance_id` from all in-memory dicts (`DRYER_CYCLE_STATS`, `HVAC_CYCLE_TRACKER`, `FAULT_ALERT_TRACKER`, `FAULT_ALERT_COOLDOWN`, `SPC_ALERT_COOLDOWN`, `CYCLE_TRACKER`, `CALIBRATION_TRACKER`) to prevent memory leaks.
+- **Motor Baseline Median Helper:** Extracted `_compute_motor_baseline_median()` to eliminate 4x duplicated median computation across `_finalize_dryer_cycle()` and `dryer_analytics()`.
+- **Belt Snap Gap Detection:** Added gap-based inference in `_check_dryer_faults()`. If a running cycle ends via >60s gap and `min_current < LCL` (or `belt_snap_start` was set), a `fault_dryer_belt_snapped` alert is triggered. This catches snaps that drop below the firmware's 0.4A gate before the 30s sustained-low timer fires.
+- **Frontend `.btn-secondary` CSS:** Added missing `.btn-secondary` rule so Cancel and Test buttons are properly styled.
+- **Frontend `.std` Fix:** Removed non-existent `data.deltat.std` / `data.tcoil.std` references from `showThresholdPanel()`. HVAC threshold panel now shows an informational message instead of broken inputs with hardcoded fallbacks.

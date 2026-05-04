@@ -18,25 +18,32 @@ from openpyxl.utils import get_column_letter
 
 import numpy as np
 import requests
+from dotenv import load_dotenv
 
 from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, send_file
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 
 app = Flask(__name__)
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'iot-thesis-secret-change-this-in-production')
+load_dotenv()
+
+app.secret_key = os.getenv('FLASK_SECRET_KEY')
+if not app.secret_key:
+    raise RuntimeError("FLASK_SECRET_KEY environment variable is required")
 
 # --- CONFIGURATION ---
 MQTT_HOST = os.getenv("MQTT_HOST", "d57bf82836a7485d9b67b270c681fe6e.s1.eu.hivemq.cloud")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "8883"))
 MQTT_USER = os.getenv("MQTT_USER", "esp32user")
-MQTT_PASS = os.getenv("MQTT_PASS", "IoTTHESIS1")
+MQTT_PASS = os.getenv("MQTT_PASS")
+if not MQTT_PASS:
+    raise RuntimeError("MQTT_PASS environment variable is required")
 
 UNPAIRED_CACHE = {}
 DEDUPE_CACHE = {}
 EVENT_DEDUPE_CACHE = {}
 CALIBRATION_TRACKER = {}  # appliance_id -> {start_tcoil, start_time}
 CYCLE_TRACKER = {}        # appliance_id -> {start_time, last_time}
-SPC_ALERT_COOLDOWN = {}   # (appliance_id, metric_name) -> last_alert_timestamp
+SPC_ALERT_COOLDOWN = {}   # (appliance_id, metric_name, alert_type) -> last_alert_timestamp
 
 # --- FAULT ALERT TRACKERS ---
 FAULT_ALERT_TRACKER = {}      # appliance_id -> {fault_type: {cycle_count, last_trigger, active}}
@@ -55,6 +62,10 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+if not DB_PASSWORD:
+    raise RuntimeError("DB_PASSWORD environment variable is required")
+
 from psycopg2 import pool
 try:
     db_pool = psycopg2.pool.SimpleConnectionPool(
@@ -63,7 +74,7 @@ try:
         port=int(os.getenv("DB_PORT", "5432")),
         dbname=os.getenv("DB_NAME", "iot_db"),
         user=os.getenv("DB_USER", "postgres"),
-        password=os.getenv("DB_PASSWORD", "IOTTHESIS")
+        password=DB_PASSWORD
     )
 except Exception as e:
     print(f"DB Pool Error: {e}")
@@ -503,12 +514,6 @@ def check_spc_alerts(appliance_id, reading_data, dev_type):
             lcl = bl['lcl']
             val = float(value)
 
-            # Rate limit: one alert per metric per 5 minutes
-            cooldown_key = (appliance_id, metric_name)
-            if cooldown_key in SPC_ALERT_COOLDOWN:
-                if (now - SPC_ALERT_COOLDOWN[cooldown_key]).total_seconds() < 300:
-                    continue
-
             alert_type = None
             threshold = None
             message = None
@@ -522,14 +527,22 @@ def check_spc_alerts(appliance_id, reading_data, dev_type):
                 threshold = lcl
                 message = f"{metric_name.upper()} {val:.2f} below LCL {lcl:.2f}"
 
-            if alert_type:
-                cur.execute("""
-                    INSERT INTO alerts (appliance_id, alert_type, message, value, threshold, created_at)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (appliance_id, alert_type, message, val, threshold, now))
-                conn.commit()
-                SPC_ALERT_COOLDOWN[cooldown_key] = now
-                send_discord_alert(appliance_id, alert_type, message, val, threshold)
+            if not alert_type:
+                continue
+
+            # Rate limit: one alert per metric per direction per 5 minutes
+            cooldown_key = (appliance_id, metric_name, alert_type)
+            if cooldown_key in SPC_ALERT_COOLDOWN:
+                if (now - SPC_ALERT_COOLDOWN[cooldown_key]).total_seconds() < 300:
+                    continue
+
+            cur.execute("""
+                INSERT INTO alerts (appliance_id, alert_type, message, value, threshold, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (appliance_id, alert_type, message, val, threshold, now))
+            conn.commit()
+            SPC_ALERT_COOLDOWN[cooldown_key] = now
+            send_discord_alert(appliance_id, alert_type, message, val, threshold)
     except Exception as e:
         print(f"SPC alert check error: {e}")
     finally:
@@ -578,24 +591,17 @@ def _check_dryer_faults(appliance_id, reading_data, baselines, now, cur, conn):
     if stats.get('in_cycle', False) and 'last_time' in stats:
         gap = (actual_time - stats['last_time']).total_seconds()
         if gap > 60:
-            _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn)
-            stats = DRYER_CYCLE_STATS[appliance_id] = {}
-
-    # Belt snap detection (immediate, during cycle)
-    if stats.get('in_cycle', False):
-        lcl = baselines.get('current', {}).get('lcl', 0.8)
-        if current < lcl:
-            if 'belt_snap_start' not in stats:
-                stats['belt_snap_start'] = actual_time
-            elif (actual_time - stats['belt_snap_start']).total_seconds() > 30:
-                if not stats.get('belt_snap_triggered', False):
+            lcl = baselines.get('current', {}).get('lcl', 0.8)
+            # Infer belt snap if cycle stopped abruptly with very low current
+            if not stats.get('belt_snap_triggered', False):
+                if stats.get('min_current', 999.0) < lcl:
                     _insert_fault_alert(
                         appliance_id, 'fault_dryer_belt_snapped',
-                        f"Belt snapped - motor current {current:.2f}A below LCL for >30s",
-                        current, lcl, now, cur, conn)
+                        f"Belt snapped - motor current dropped to {stats['min_current']:.2f}A before cycle abort",
+                        stats['min_current'], lcl, now, cur, conn)
                     stats['belt_snap_triggered'] = True
-        else:
-            stats.pop('belt_snap_start', None)
+            _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn)
+            stats = DRYER_CYCLE_STATS[appliance_id] = {}
 
     # Start new cycle
     if current > 0.4 and not stats.get('in_cycle', False):
@@ -660,6 +666,22 @@ def _check_dryer_faults(appliance_id, reading_data, baselines, now, cur, conn):
         _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn)
 
 
+def _compute_motor_baseline_median(motor_readings, filter_threshold=None):
+    """Compute median of motor baseline readings, optionally filtering outliers above filter_threshold."""
+    if not motor_readings:
+        return 0.0
+    readings = motor_readings
+    if filter_threshold is not None:
+        readings = [r for r in readings if r <= filter_threshold]
+        if not readings:
+            return 0.0
+    sorted_r = sorted(readings)
+    n = len(sorted_r)
+    if n % 2 == 1:
+        return sorted_r[n // 2]
+    return (sorted_r[n // 2 - 1] + sorted_r[n // 2]) / 2.0
+
+
 def _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn):
     """Finalize a dryer cycle and evaluate end-of-cycle faults + roller wear."""
     stats = DRYER_CYCLE_STATS.get(appliance_id, {})
@@ -670,12 +692,7 @@ def _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn):
     rh_history = stats.get('rh_history', [])
     max_temp = stats.get('max_temp', 0.0)
 
-    # Compute motor baseline median
-    median_current = 0.0
-    if motor_readings:
-        motor_readings_sorted = sorted(motor_readings)
-        n = len(motor_readings_sorted)
-        median_current = motor_readings_sorted[n // 2] if n % 2 == 1 else (motor_readings_sorted[n // 2 - 1] + motor_readings_sorted[n // 2]) / 2.0
+    median_current = _compute_motor_baseline_median(motor_readings)
 
     # Compute end-of-cycle RH (last 10 readings or last 2 min equivalent)
     end_rh_avg = 0.0
@@ -701,22 +718,21 @@ def _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn):
             f"Clothes not fully dried - end RH {end_rh_avg:.1f}% exceeds UCL {rhexhaust_ucl:.1f}%",
             end_rh_avg, rhexhaust_ucl, now, cur, conn)
 
-    # --- Roller Wear (Warning) - per-cycle median > UCL for 3 consecutive cycles ---
+    # --- Roller Wear (Warning) - per-cycle median > UCL ---
     current_ucl = baselines.get('current', {}).get('ucl')
     if current_ucl is not None and median_current > current_ucl:
-        tracker = FAULT_ALERT_TRACKER.setdefault(appliance_id, {})
-        roller = tracker.setdefault('fault_dryer_roller_wear', {'cycle_count': 0, 'last_trigger': None, 'active': False})
-        roller['cycle_count'] += 1
-        if roller['cycle_count'] >= 3:
-            _insert_fault_alert(
-                appliance_id, 'fault_dryer_roller_wear',
-                f"Barrel roller worn out - motor baseline {median_current:.3f}A exceeds UCL {current_ucl:.3f}A for 3 consecutive cycles",
-                median_current, current_ucl, now, cur, conn)
-            roller['cycle_count'] = 0
-    elif current_ucl is not None:
-        tracker = FAULT_ALERT_TRACKER.get(appliance_id, {})
-        if tracker and 'fault_dryer_roller_wear' in tracker:
-            tracker['fault_dryer_roller_wear']['cycle_count'] = 0
+        _insert_fault_alert(
+            appliance_id, 'fault_dryer_roller_wear',
+            f"Barrel roller worn out - motor baseline {median_current:.3f}A exceeds UCL {current_ucl:.3f}A",
+            median_current, current_ucl, now, cur, conn)
+
+    # --- Belt Snap (Critical) - per-cycle median < LCL ---
+    current_lcl = baselines.get('current', {}).get('lcl')
+    if current_lcl is not None and median_current < current_lcl:
+        _insert_fault_alert(
+            appliance_id, 'fault_dryer_belt_snapped',
+            f"Belt snapped - motor baseline {median_current:.3f}A below LCL {current_lcl:.3f}A",
+            median_current, current_lcl, now, cur, conn)
 
     # Clear cycle stats
     DRYER_CYCLE_STATS[appliance_id] = {}
@@ -775,67 +791,46 @@ def _evaluate_hvac_cycle(appliance_id, peak_deltat, min_tcoil, avg_current, base
     fat = FAULT_ALERT_TRACKER.setdefault(appliance_id, {})
 
     # --- Low Refrigerant (Critical) ---
-    # Primary: peak dT fails to reach upper half of envelope (< (UCL + mean) / 2)
-    # Confirmatory: min coil temp > UCL (coil warmer than normal)
+    # Primary: min coil temp > UCL (coil warmer than normal)
+    # Confirmatory: peak dT fails to reach upper half of envelope (< (UCL + mean) / 2)
     deltat_ucl = baselines.get('deltat', {}).get('ucl')
     deltat_mean = baselines.get('deltat', {}).get('mean')
     deltat_threshold = (deltat_ucl + deltat_mean) / 2.0 if deltat_ucl is not None and deltat_mean is not None else None
     tcoil_ucl = baselines.get('tcoil', {}).get('ucl')
 
     low_ref_triggered = False
-    if deltat_threshold is not None and peak_deltat < deltat_threshold:
-        low_ref_triggered = True
     if tcoil_ucl is not None and min_tcoil > tcoil_ucl:
+        low_ref_triggered = True
+    if deltat_threshold is not None and peak_deltat < deltat_threshold:
         low_ref_triggered = True
 
     if low_ref_triggered:
-        lr = fat.setdefault('fault_hvac_low_refrigerant', {'cycle_count': 0, 'last_trigger': None, 'active': False})
-        lr['cycle_count'] += 1
-        if lr['cycle_count'] >= 3:
-            if deltat_threshold is not None and peak_deltat < deltat_threshold:
-                msg = f"Low refrigerant - peak dT {peak_deltat:.2f}C below threshold {deltat_threshold:.2f}C for 3 consecutive cycles"
-                val, thresh = peak_deltat, deltat_threshold
-            else:
-                msg = f"Low refrigerant - min coil temp {min_tcoil:.2f}C above UCL {tcoil_ucl:.2f}C for 3 consecutive cycles"
-                val, thresh = min_tcoil, tcoil_ucl
-            _insert_fault_alert(
-                appliance_id, 'fault_hvac_low_refrigerant', msg,
-                val, thresh, now, cur, conn)
-            lr['cycle_count'] = 0
-    elif deltat_threshold is not None or tcoil_ucl is not None:
-        if 'fault_hvac_low_refrigerant' in fat:
-            fat['fault_hvac_low_refrigerant']['cycle_count'] = 0
+        if tcoil_ucl is not None and min_tcoil > tcoil_ucl:
+            msg = f"Low refrigerant - min coil temp {min_tcoil:.2f}C above UCL {tcoil_ucl:.2f}C"
+            val, thresh = min_tcoil, tcoil_ucl
+        else:
+            msg = f"Low refrigerant - peak dT {peak_deltat:.2f}C below threshold {deltat_threshold:.2f}C"
+            val, thresh = peak_deltat, deltat_threshold
+        _insert_fault_alert(
+            appliance_id, 'fault_hvac_low_refrigerant', msg,
+            val, thresh, now, cur, conn)
 
-    # --- Dirty Filter (Warning) - min coil temp < LCL for 3+ consecutive cycles ---
+    # --- Dirty Filter (Warning) - min coil temp < LCL ---
     # Physics: restricted airflow -> less heat load -> refrigerant supercools -> coil colder
     tcoil_lcl = baselines.get('tcoil', {}).get('lcl')
     if tcoil_lcl is not None and min_tcoil < tcoil_lcl:
-        df = fat.setdefault('fault_hvac_dirty_filter', {'cycle_count': 0, 'last_trigger': None, 'active': False})
-        df['cycle_count'] += 1
-        if df['cycle_count'] >= 3:
-            _insert_fault_alert(
-                appliance_id, 'fault_hvac_dirty_filter',
-                f"Dirty indoor filter - min coil temp {min_tcoil:.2f}C below LCL {tcoil_lcl:.2f}C for 3 consecutive cycles",
-                min_tcoil, tcoil_lcl, now, cur, conn)
-            df['cycle_count'] = 0
-    elif tcoil_lcl is not None:
-        if 'fault_hvac_dirty_filter' in fat:
-            fat['fault_hvac_dirty_filter']['cycle_count'] = 0
+        _insert_fault_alert(
+            appliance_id, 'fault_hvac_dirty_filter',
+            f"Dirty indoor filter - min coil temp {min_tcoil:.2f}C below LCL {tcoil_lcl:.2f}C",
+            min_tcoil, tcoil_lcl, now, cur, conn)
 
-    # --- Compressor Fault (Critical) - avg current > UCL for 2+ consecutive cycles ---
+    # --- Compressor Fault (Critical) - avg current > UCL ---
     current_ucl = baselines.get('current', {}).get('ucl')
     if current_ucl is not None and avg_current > current_ucl:
-        cf = fat.setdefault('fault_hvac_compressor_fault', {'cycle_count': 0, 'last_trigger': None, 'active': False})
-        cf['cycle_count'] += 1
-        if cf['cycle_count'] >= 2:
-            _insert_fault_alert(
-                appliance_id, 'fault_hvac_compressor_fault',
-                f"Compressor electrical fault - avg current {avg_current:.2f}A exceeds UCL {current_ucl:.2f}A for 2 consecutive cycles",
-                avg_current, current_ucl, now, cur, conn)
-            cf['cycle_count'] = 0
-    elif current_ucl is not None:
-        if 'fault_hvac_compressor_fault' in fat:
-            fat['fault_hvac_compressor_fault']['cycle_count'] = 0
+        _insert_fault_alert(
+            appliance_id, 'fault_hvac_compressor_fault',
+            f"Compressor electrical fault - avg current {avg_current:.2f}A exceeds UCL {current_ucl:.2f}A",
+            avg_current, current_ucl, now, cur, conn)
 
 
 def check_fault_alerts(appliance_id, reading_data, dev_type, actual_time):
@@ -1354,6 +1349,11 @@ def forget_device(appliance_id):
             send_node_command(mac_row[0], "settype:unpaired")
             print(f"Device forgotten: sent settype:unpaired to {mac_row[0]}")
         flash('Device forgotten.', 'success')
+    # Clean up in-memory trackers to prevent leaks
+    for tracker in (DRYER_CYCLE_STATS, HVAC_CYCLE_TRACKER, FAULT_ALERT_TRACKER,
+                    FAULT_ALERT_COOLDOWN, SPC_ALERT_COOLDOWN, CYCLE_TRACKER,
+                    CALIBRATION_TRACKER):
+        tracker.pop(appliance_id, None)
     return redirect(url_for('dashboard'))
 
 # --- API: UNPAIRED NODES ---
@@ -2168,21 +2168,12 @@ def dryer_analytics(appliance_id):
                     current_cycle["current_consumption"] = round(sum(currents), 2)
                     current_cycle["current_spike_avg"] = round(sum(_peak_values) / len(_peak_values), 2) if _peak_values else 0.0
                     current_cycle["ignition_count"] = len(_peak_values)
-                    # Compute motor baseline median with hard threshold guard
                     motor_readings = current_cycle.get("_motor_readings", [])
+                    filter_threshold = None
                     if motor_readings:
-                        cycle_mean = sum(motor_readings) / len(motor_readings)
-                        hard_thresh = cycle_mean * 1.15
-                        filtered = [r for r in motor_readings if r <= hard_thresh]
-                        if filtered:
-                            filtered_sorted = sorted(filtered)
-                            n = len(filtered_sorted)
-                            median_val = filtered_sorted[n // 2] if n % 2 == 1 else (filtered_sorted[n // 2 - 1] + filtered_sorted[n // 2]) / 2.0
-                            current_cycle["motor_baseline_median"] = round(median_val, 3)
-                        else:
-                            current_cycle["motor_baseline_median"] = 0.0
-                    else:
-                        current_cycle["motor_baseline_median"] = 0.0
+                        filter_threshold = (sum(motor_readings) / len(motor_readings)) * 1.15
+                    median_val = _compute_motor_baseline_median(motor_readings, filter_threshold=filter_threshold)
+                    current_cycle["motor_baseline_median"] = round(median_val, 3)
                     del current_cycle["_rh_history"]
                     del current_cycle["_currents"]
                     del current_cycle["_motor_readings"]
@@ -2239,21 +2230,12 @@ def dryer_analytics(appliance_id):
                 current_cycle["current_consumption"] = round(sum(currents), 2)
                 current_cycle["current_spike_avg"] = round(sum(_peak_values) / len(_peak_values), 2) if _peak_values else 0.0
                 current_cycle["ignition_count"] = len(_peak_values)
-                # Compute motor baseline median with hard threshold guard
                 motor_readings = current_cycle.get("_motor_readings", [])
+                filter_threshold = None
                 if motor_readings:
-                    cycle_mean = sum(motor_readings) / len(motor_readings)
-                    hard_thresh = cycle_mean * 1.15
-                    filtered = [r for r in motor_readings if r <= hard_thresh]
-                    if filtered:
-                        filtered_sorted = sorted(filtered)
-                        n = len(filtered_sorted)
-                        median_val = filtered_sorted[n // 2] if n % 2 == 1 else (filtered_sorted[n // 2 - 1] + filtered_sorted[n // 2]) / 2.0
-                        current_cycle["motor_baseline_median"] = round(median_val, 3)
-                    else:
-                        current_cycle["motor_baseline_median"] = 0.0
-                else:
-                    current_cycle["motor_baseline_median"] = 0.0
+                    filter_threshold = (sum(motor_readings) / len(motor_readings)) * 1.15
+                median_val = _compute_motor_baseline_median(motor_readings, filter_threshold=filter_threshold)
+                current_cycle["motor_baseline_median"] = round(median_val, 3)
                 del current_cycle["_rh_history"]
                 del current_cycle["_currents"]
                 del current_cycle["_motor_readings"]
@@ -2278,21 +2260,12 @@ def dryer_analytics(appliance_id):
             current_cycle["current_consumption"] = round(sum(currents), 2)
             current_cycle["current_spike_avg"] = round(sum(_peak_values) / len(_peak_values), 2) if _peak_values else 0.0
             current_cycle["ignition_count"] = len(_peak_values)
-            # Compute motor baseline median with hard threshold guard
             motor_readings = current_cycle.get("_motor_readings", [])
+            filter_threshold = None
             if motor_readings:
-                cycle_mean = sum(motor_readings) / len(motor_readings)
-                hard_thresh = cycle_mean * 1.15
-                filtered = [r for r in motor_readings if r <= hard_thresh]
-                if filtered:
-                    filtered_sorted = sorted(filtered)
-                    n = len(filtered_sorted)
-                    median_val = filtered_sorted[n // 2] if n % 2 == 1 else (filtered_sorted[n // 2 - 1] + filtered_sorted[n // 2]) / 2.0
-                    current_cycle["motor_baseline_median"] = round(median_val, 3)
-                else:
-                    current_cycle["motor_baseline_median"] = 0.0
-            else:
-                current_cycle["motor_baseline_median"] = 0.0
+                filter_threshold = (sum(motor_readings) / len(motor_readings)) * 1.15
+            median_val = _compute_motor_baseline_median(motor_readings, filter_threshold=filter_threshold)
+            current_cycle["motor_baseline_median"] = round(median_val, 3)
             del current_cycle["_rh_history"]
             del current_cycle["_currents"]
             del current_cycle["_motor_readings"]

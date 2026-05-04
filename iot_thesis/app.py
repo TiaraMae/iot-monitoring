@@ -16,18 +16,25 @@ import bcrypt
 import paho.mqtt.client as mqtt
 from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill
+from dotenv import load_dotenv
 
 from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, send_file
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 
 app = Flask(__name__)
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'iot-thesis-secret-change-this-in-production')
+load_dotenv()
+
+app.secret_key = os.getenv('FLASK_SECRET_KEY')
+if not app.secret_key:
+    raise RuntimeError("FLASK_SECRET_KEY environment variable is required")
 
 # --- CONFIGURATION ---
 MQTT_HOST = os.getenv("MQTT_HOST", "d57bf82836a7485d9b67b270c681fe6e.s1.eu.hivemq.cloud")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "8883"))
 MQTT_USER = os.getenv("MQTT_USER", "esp32user")
-MQTT_PASS = os.getenv("MQTT_PASS", "IoTTHESIS1")
+MQTT_PASS = os.getenv("MQTT_PASS")
+if not MQTT_PASS:
+    raise RuntimeError("MQTT_PASS environment variable is required")
 
 SENSOR_CALIBRATION_MAP = {}
 DEFAULT = 15.0
@@ -55,6 +62,10 @@ login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+if not DB_PASSWORD:
+    raise RuntimeError("DB_PASSWORD environment variable is required")
+
 from psycopg2 import pool
 try:
     db_pool = psycopg2.pool.SimpleConnectionPool(
@@ -63,7 +74,7 @@ try:
         port=int(os.getenv("DB_PORT", "5432")),
         dbname=os.getenv("DB_NAME", "iot_db"),
         user=os.getenv("DB_USER", "postgres"),
-        password=os.getenv("DB_PASSWORD", "IOTTHESIS")
+        password=DB_PASSWORD
     )
 except Exception as e:
     print(f"DB Pool Error: {e}")

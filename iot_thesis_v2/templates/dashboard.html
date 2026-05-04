@@ -350,6 +350,8 @@
         .btn-danger:hover { background: #FEE2E2; }
         .btn-warning { background: #FEF3C7; color: #92400E; border: 1px solid #FDE68A; }
         .btn-warning:hover { background: #FDE68A; }
+        .btn-secondary { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+        .btn-secondary:hover { background: var(--border); }
 
         .form-group { margin-bottom: 1.25rem; }
         .form-label { display: block; margin-bottom: 0.5rem; font-weight: 500; font-size: 0.9rem; }
@@ -981,29 +983,53 @@
                 if (data.error) return;
                 const guidance = isHVAC
                     ? 'HVAC: set UCL to the highest value and LCL to the lowest value observed during stable inverter modulation. The system auto-derives fault thresholds from these bounds.'
-                    : 'Dryer: baseline should capture the last 2–3 minutes of a normal cycle (end-of-cycle exhaust RH, temp, pressure, current).';
+                    : 'Dryer: set UCL/LCL for Temp, Humidity, and Pressure. For Motor Current, enter the observed baseline mean — UCL and LCL are auto-derived as ±20%.';
                 const guidanceHtml = `<div style="font-size:0.75rem; color:var(--text-muted); margin-bottom:0.5rem; padding:0.4rem 0.6rem; background:var(--bg); border-left:3px solid var(--primary); border-radius:0 4px 4px 0;"><strong>Guidance:</strong> ${guidance}</div>`;
                 chartMetrics.forEach(([key, label], idx) => {
                     const container = document.getElementById(`baseline-inputs-chart-${idx + 1}`);
                     if (!container) return;
-                    const vals = data.metrics && data.metrics[key] ? data.metrics[key] : {ucl: '', lcl: ''};
-                    const mean = (vals.ucl !== '' && vals.lcl !== '') ? ((parseFloat(vals.ucl) + parseFloat(vals.lcl)) / 2).toFixed(2) : '--';
-                    container.innerHTML = (idx === 0 ? guidanceHtml : '') + `
-                        <div style="display:flex; gap:1rem; align-items:flex-end; flex-wrap:wrap;">
-                            <div style="flex:1; min-width:100px;">
-                                <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">UCL</label>
-                                <input type="number" step="0.01" id="bl-${key}-ucl" value="${vals.ucl}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border); font-size:0.9rem;" oninput="updateMeanDisplay('${key}')">
+                    const vals = data.metrics && data.metrics[key] ? data.metrics[key] : {ucl: '', lcl: '', mean: ''};
+                    const isDryerCurrent = !isHVAC && key === 'current';
+
+                    if (isDryerCurrent) {
+                        const meanVal = (vals.mean !== '' && vals.mean !== undefined && vals.mean !== null) ? parseFloat(vals.mean).toFixed(2) : '';
+                        const uclDisp = meanVal !== '' ? (parseFloat(meanVal) * 1.20).toFixed(3) : '--';
+                        const lclDisp = meanVal !== '' ? (parseFloat(meanVal) * 0.80).toFixed(3) : '--';
+                        container.innerHTML = (idx === 0 ? guidanceHtml : '') + `
+                            <div style="display:flex; gap:1rem; align-items:flex-end; flex-wrap:wrap;">
+                                <div style="flex:1; min-width:100px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">Mean (A)</label>
+                                    <input type="number" step="0.01" id="bl-${key}-mean" value="${meanVal}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border); font-size:0.9rem;" oninput="updateDryerCurrentDisplay()">
+                                </div>
+                                <div style="min-width:80px; text-align:right;">
+                                    <span style="font-size:0.72rem; color:var(--text-muted);">UCL (auto)</span>
+                                    <div id="bl-${key}-ucl-display" style="font-size:0.95rem; font-weight:600; color:var(--text);">${uclDisp}</div>
+                                </div>
+                                <div style="min-width:80px; text-align:right;">
+                                    <span style="font-size:0.72rem; color:var(--text-muted);">LCL (auto)</span>
+                                    <div id="bl-${key}-lcl-display" style="font-size:0.95rem; font-weight:600; color:var(--text);">${lclDisp}</div>
+                                </div>
                             </div>
-                            <div style="flex:1; min-width:100px;">
-                                <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">LCL</label>
-                                <input type="number" step="0.01" id="bl-${key}-lcl" value="${vals.lcl}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border); font-size:0.9rem;" oninput="updateMeanDisplay('${key}')">
+                        `;
+                    } else {
+                        const mean = (vals.ucl !== '' && vals.lcl !== '') ? ((parseFloat(vals.ucl) + parseFloat(vals.lcl)) / 2).toFixed(2) : '--';
+                        container.innerHTML = (idx === 0 ? guidanceHtml : '') + `
+                            <div style="display:flex; gap:1rem; align-items:flex-end; flex-wrap:wrap;">
+                                <div style="flex:1; min-width:100px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">UCL</label>
+                                    <input type="number" step="0.01" id="bl-${key}-ucl" value="${vals.ucl}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border); font-size:0.9rem;" oninput="updateMeanDisplay('${key}')">
+                                </div>
+                                <div style="flex:1; min-width:100px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">LCL</label>
+                                    <input type="number" step="0.01" id="bl-${key}-lcl" value="${vals.lcl}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border); font-size:0.9rem;" oninput="updateMeanDisplay('${key}')">
+                                </div>
+                                <div style="min-width:80px; text-align:right;">
+                                    <span style="font-size:0.72rem; color:var(--text-muted);">Mean</span>
+                                    <div id="bl-${key}-mean" style="font-size:0.95rem; font-weight:600; color:var(--text);">${mean}</div>
+                                </div>
                             </div>
-                            <div style="min-width:80px; text-align:right;">
-                                <span style="font-size:0.72rem; color:var(--text-muted);">Mean</span>
-                                <div id="bl-${key}-mean" style="font-size:0.95rem; font-weight:600; color:var(--text);">${mean}</div>
-                            </div>
-                        </div>
-                    `;
+                        `;
+                    }
                     container.style.display = 'block';
                 });
                 document.getElementById('btn-configure-baseline').style.display = 'none';
@@ -1027,6 +1053,21 @@
             }
         }
 
+        function updateDryerCurrentDisplay() {
+            const meanEl = document.getElementById('bl-current-mean');
+            const uclEl = document.getElementById('bl-current-ucl-display');
+            const lclEl = document.getElementById('bl-current-lcl-display');
+            if (!meanEl || !uclEl || !lclEl) return;
+            const mean = parseFloat(meanEl.value);
+            if (!isNaN(mean)) {
+                uclEl.innerText = (mean * 1.20).toFixed(3);
+                lclEl.innerText = (mean * 0.80).toFixed(3);
+            } else {
+                uclEl.innerText = '--';
+                lclEl.innerText = '--';
+            }
+        }
+
         function saveBaselineConfig() {
             if (!currentDetailId) return;
             const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
@@ -1034,16 +1075,28 @@
             const metrics = isHVAC ? ['deltat', 'tcoil', 'deltarh', 'current'] : ['texhaust', 'rhexhaust', 'pressure', 'current'];
             const payload = { metrics: {} };
             for (const m of metrics) {
-                const uclEl = document.getElementById(`bl-${m}-ucl`);
-                const lclEl = document.getElementById(`bl-${m}-lcl`);
-                if (!uclEl || !lclEl) continue;
-                const ucl = uclEl.value;
-                const lcl = lclEl.value;
-                if (ucl === '' || lcl === '') {
-                    alert(`Please fill in UCL and LCL for all metrics.`);
-                    return;
+                const isDryerCurrent = !isHVAC && m === 'current';
+                if (isDryerCurrent) {
+                    const meanEl = document.getElementById(`bl-${m}-mean`);
+                    if (!meanEl) continue;
+                    const mean = meanEl.value;
+                    if (mean === '') {
+                        alert(`Please fill in Mean for Motor Current.`);
+                        return;
+                    }
+                    payload.metrics[m] = { mean: parseFloat(mean) };
+                } else {
+                    const uclEl = document.getElementById(`bl-${m}-ucl`);
+                    const lclEl = document.getElementById(`bl-${m}-lcl`);
+                    if (!uclEl || !lclEl) continue;
+                    const ucl = uclEl.value;
+                    const lcl = lclEl.value;
+                    if (ucl === '' || lcl === '') {
+                        alert(`Please fill in UCL and LCL for all metrics.`);
+                        return;
+                    }
+                    payload.metrics[m] = { ucl: parseFloat(ucl), lcl: parseFloat(lcl) };
                 }
-                payload.metrics[m] = { ucl: parseFloat(ucl), lcl: parseFloat(lcl) };
             }
             fetch(`/api/device/${currentDetailId}/baseline_config`, {
                 method: 'POST',
@@ -1931,10 +1984,7 @@
             fetch(`/api/device/${currentDetailId}/baseline_analysis`).then(r => r.json()).then(data => {
                 if (data.error) return;
                 if (isHVAC) {
-                    inputsDiv.innerHTML = `
-                        <div><label style="font-size:0.8rem;">Delta-T Alert Range (±°C from mean)</label><input type="number" id="thresh-deltat" step="0.1" value="${data.deltat && data.deltat.std ? data.deltat.std * 3 : 3}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>
-                        <div><label style="font-size:0.8rem;">Coil Temp Alert Range (±°C from mean)</label><input type="number" id="thresh-tcoil" step="0.1" value="${data.tcoil && data.tcoil.std ? data.tcoil.std * 3 : 5}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>
-                    `;
+                    inputsDiv.innerHTML = `<p style="font-size:0.85rem; color:var(--text-muted);">HVAC alerts use the SPC baseline UCL/LCL limits configured under each chart. No separate threshold setup is needed.</p>`;
                 } else {
                     inputsDiv.innerHTML = `
                         <div><label style="font-size:0.8rem;">Max Exhaust Humidity (%)</label><input type="number" id="thresh-rhexhaust" step="0.1" min="0" max="100" value="${data.alert_rhexhaust_threshold !== undefined ? data.alert_rhexhaust_threshold : 40.0}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border);"></div>
@@ -1949,8 +1999,7 @@
             const isHVAC = card && card.dataset.type.includes('HVAC');
             const payload = {};
             if (isHVAC) {
-                // HVAC thresholds stored differently — for now just placeholder
-                alert('HVAC threshold saving not yet implemented.');
+                document.getElementById('threshold-panel').style.display = 'none';
                 return;
             } else {
                 const thr = document.getElementById('thresh-rhexhaust');

@@ -165,9 +165,9 @@ All 22 additional events in the 0.35–0.50 A range are genuine spikes (jumping 
 |-----------|------------------|----------------|
 | Normal | 2.00 A | OK |
 | Roller wear (early, +15%) | 2.30 A | Below UCL — not yet triggered |
-| Roller wear (+20%) | 2.40 A | At UCL — triggers after 3-cycle confirmation |
+| Roller wear (+20%) | 2.40 A | At UCL — triggers immediately |
 | Roller wear (severe, +25%) | 2.50 A | Above UCL — triggers reliably |
-| Belt snap | < `current_LCL` (typically ~1.6 A for 2.0 A baseline) | Immediate fault |
+| Belt snap | < `current_LCL` (typically ~1.6 A for 2.0 A baseline) | Immediate fault at cycle end |
 
 ### 2.4 Baseline Input UX — Auto-Derived UCL/LCL
 
@@ -281,27 +281,19 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 
 **Research Base:** MCSA literature (Kia et al. 2009, Bellini et al. 2008) establishes that loss of mechanical load manifests as a sustained decrease in the stator current fundamental component. A sudden current drop below the normal operating range is the definitive signature of belt failure or loss of load.
 
-**Why This Check:** The firmware only sends telemetry when current ≥ 0.4 A. A reading below LCL (typically ~1.6 A for a 2.0 A baseline) while `in_cycle = True` confirms sustained collapse, not just a brief gap between ignition spikes. Belt snap is an immediate fault — no multi-cycle confirmation needed.
+**Why This Check:** The raw telemetry current includes gas ignition spikes, making point-in-time checks noisy. The per-cycle motor baseline median (spike-excluded) provides a clean measure of true motor load. If the median drops below LCL, the motor has lost its mechanical load. Belt snap is evaluated at cycle end using the median — no multi-cycle confirmation needed.
 
-**Trigger Condition:** `current < current_LCL` for **>30 seconds** while `in_cycle = True`.
+**Trigger Condition:** Per-cycle motor baseline `median < current_LCL` at **CYCLE_END**. Also triggered immediately if a running cycle aborts via >60s gap with `min_current < current_LCL` (early-warning for abrupt failures).
 
-**Code (`_check_dryer_faults()`):**
+**Code (`_finalize_dryer_cycle()`):**
 ```python
-    # Belt snap detection (immediate, during cycle)
-    if stats.get('in_cycle', False):
-        lcl = baselines.get('current', {}).get('lcl', 0.8)
-        if current < lcl:
-            if 'belt_snap_start' not in stats:
-                stats['belt_snap_start'] = actual_time
-            elif (actual_time - stats['belt_snap_start']).total_seconds() > 30:
-                if not stats.get('belt_snap_triggered', False):
-                    _insert_fault_alert(
-                        appliance_id, 'fault_dryer_belt_snapped',
-                        f"Belt snapped - motor current {current:.2f}A below LCL for >30s",
-                        current, lcl, now, cur, conn)
-                    stats['belt_snap_triggered'] = True
-        else:
-            stats.pop('belt_snap_start', None)
+    # --- Belt Snap (Critical) - per-cycle median < LCL ---
+    current_lcl = baselines.get('current', {}).get('lcl')
+    if current_lcl is not None and median_current < current_lcl:
+        _insert_fault_alert(
+            appliance_id, 'fault_dryer_belt_snapped',
+            f"Belt snapped - motor baseline {median_current:.3f}A below LCL {current_lcl:.3f}A",
+            median_current, current_lcl, now, cur, conn)
 ```
 
 ---
@@ -312,7 +304,7 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 | **Description** | Lint accumulation in the exhaust duct restricts airflow, causing overheating. |
 | **Root Cause** | Failure to clean lint filter or exhaust duct; exterior vent obstruction. |
 | **Primary Trigger** | End-of-cycle exhaust RH > `rhexhaust_UCL` **AND** end-of-cycle exhaust temp > `texhaust_UCL`. |
-| **Confirmatory** | Cycle duration > `baseline_cycle_duration × 1.30`. |
+| **Confirmatory** | None (lint blockage is purely end-of-cycle RH + temp). |
 | **Evaluation Point** | CYCLE_END only. |
 | **Severity** | Critical |
 | **Alert Type** | `fault_dryer_lint_blockage` |
@@ -389,8 +381,8 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 |-----------|--------|
 | **Description** | Refrigerant charge is below specification due to leak or improper installation. |
 | **Root Cause** | Micro-leaks in coil or lines; improper initial charge; Schrader valve leaks. |
-| **Primary Trigger** | Peak ΔT during STABLE_ON < `((deltat_UCL + deltat_mean) / 2)` for **3 consecutive STABLE_ON cycles**. |
-| **Confirmatory** | Minimum coil temp during STABLE_ON > `tcoil_UCL` (coil warmer than normal). |
+| **Primary Trigger** | Minimum coil temp during STABLE_ON > `tcoil_UCL` (coil warmer than normal). |
+| **Confirmatory** | Peak ΔT during STABLE_ON < `((deltat_UCL + deltat_mean) / 2)`. |
 | **Evaluation Point** | STABLE_ON only. |
 | **Severity** | Critical |
 | **Alert Type** | `fault_hvac_low_refrigerant` |
@@ -401,43 +393,36 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 
 **Research Base:** Sun et al. (2013) demonstrated that deviations in temperature differential (ΔT) and coil temperature are the strongest discriminators for refrigerant charge faults. Bonvini et al. (2014) validated that **thermal anomalies with normal current** indicate refrigerant-side faults (undercharge, leak).
 
-**Why This Check:** During normal stable operation, peak ΔT reaches the upper half of the envelope (near UCL). With low refrigerant, the peak fails to reach this upper half. The threshold `(UCL + mean) / 2` captures this "not reaching the upper half" signature without requiring a separate ON-phase baseline. The confirmatory `min_tcoil > UCL` catches the warmer coil signature.
+**Why This Check:** During normal stable operation, the evaporator coil should be cold. With low refrigerant, there's not enough liquid refrigerant to absorb heat, so the coil surface temperature rises (`min_tcoil > UCL`). The confirmatory `peak_deltat < ((UCL + mean) / 2)` catches the reduced temperature split caused by insufficient cooling capacity.
 
-**Trigger Condition:** `peak_deltat < ((deltat_UCL + deltat_mean) / 2)` **OR** `min_tcoil > tcoil_UCL` for **3 consecutive STABLE_ON cycles**.
+**Trigger Condition:** `min_tcoil > tcoil_UCL` **OR** `peak_deltat < ((deltat_UCL + deltat_mean) / 2)` at **STABLE_ON cycle end**. Alert fires immediately on first detection.
 
 **Code (`_evaluate_hvac_cycle()`):**
 ```python
     # --- Low Refrigerant (Critical) ---
-    # Primary: peak dT fails to reach upper half of envelope (< (UCL + mean) / 2)
-    # Confirmatory: min coil temp > UCL (coil warmer than normal)
+    # Primary: min coil temp > UCL (coil warmer than normal)
+    # Confirmatory: peak dT fails to reach upper half of envelope (< (UCL + mean) / 2)
     deltat_ucl = baselines.get('deltat', {}).get('ucl')
     deltat_mean = baselines.get('deltat', {}).get('mean')
     deltat_threshold = (deltat_ucl + deltat_mean) / 2.0 if deltat_ucl is not None and deltat_mean is not None else None
     tcoil_ucl = baselines.get('tcoil', {}).get('ucl')
 
     low_ref_triggered = False
-    if deltat_threshold is not None and peak_deltat < deltat_threshold:
-        low_ref_triggered = True
     if tcoil_ucl is not None and min_tcoil > tcoil_ucl:
+        low_ref_triggered = True
+    if deltat_threshold is not None and peak_deltat < deltat_threshold:
         low_ref_triggered = True
 
     if low_ref_triggered:
-        lr = fat.setdefault('fault_hvac_low_refrigerant', {'cycle_count': 0, 'last_trigger': None, 'active': False})
-        lr['cycle_count'] += 1
-        if lr['cycle_count'] >= 3:
-            if deltat_threshold is not None and peak_deltat < deltat_threshold:
-                msg = f"Low refrigerant - peak dT {peak_deltat:.2f}C below threshold {deltat_threshold:.2f}C for 3 consecutive cycles"
-                val, thresh = peak_deltat, deltat_threshold
-            else:
-                msg = f"Low refrigerant - min coil temp {min_tcoil:.2f}C above UCL {tcoil_ucl:.2f}C for 3 consecutive cycles"
-                val, thresh = min_tcoil, tcoil_ucl
-            _insert_fault_alert(
-                appliance_id, 'fault_hvac_low_refrigerant', msg,
-                val, thresh, now, cur, conn)
-            lr['cycle_count'] = 0
-    elif deltat_threshold is not None or tcoil_ucl is not None:
-        if 'fault_hvac_low_refrigerant' in fat:
-            fat['fault_hvac_low_refrigerant']['cycle_count'] = 0
+        if tcoil_ucl is not None and min_tcoil > tcoil_ucl:
+            msg = f"Low refrigerant - min coil temp {min_tcoil:.2f}C above UCL {tcoil_ucl:.2f}C"
+            val, thresh = min_tcoil, tcoil_ucl
+        else:
+            msg = f"Low refrigerant - peak dT {peak_deltat:.2f}C below threshold {deltat_threshold:.2f}C"
+            val, thresh = peak_deltat, deltat_threshold
+        _insert_fault_alert(
+            appliance_id, 'fault_hvac_low_refrigerant', msg,
+            val, thresh, now, cur, conn)
 ```
 
 ---
@@ -447,7 +432,7 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 |-----------|--------|
 | **Description** | Compressor draws excessive current due to mechanical strain or electrical fault. |
 | **Root Cause** | Failing compressor bearings, refrigerant overcharge, condenser blockage, starter relay failure. |
-| **Primary Trigger** | Average current during STABLE_ON > `current_UCL` for **2 consecutive STABLE_ON cycles**. |
+| **Primary Trigger** | Average current during STABLE_ON > `current_UCL` at **STABLE_ON cycle end**. |
 | **Confirmatory** | Coil temp and ΔT may be normal or abnormal depending on root cause. |
 | **Evaluation Point** | STABLE_ON only. |
 | **Severity** | Critical |
@@ -457,21 +442,18 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 
 **Research Base:** Sun et al. (2013) found that current draw deviations with normal thermal readings indicate condenser-side faults. Bonvini et al. (2014) validated that current anomalies combined with normal thermal parameters point to mechanical or electrical compressor issues.
 
-**Why This Check:** Current is the most direct measure of compressor electrical load. Two consecutive cycles catches the fault quickly while filtering out brief startup surges. Unlike refrigerant or airflow faults which primarily affect thermal parameters, compressor electrical faults directly elevate current draw.
+**Why This Check:** Current is the most direct measure of compressor electrical load. Evaluating at STABLE_ON cycle end filters out brief startup surges. Unlike refrigerant or airflow faults which primarily affect thermal parameters, compressor electrical faults directly elevate current draw.
 
-**Trigger Condition:** `avg_current > current_UCL` for **2 consecutive STABLE_ON cycles**.
+**Trigger Condition:** `avg_current > current_UCL` at **STABLE_ON cycle end**. Alert fires immediately on first detection.
 
 **Code (`_evaluate_hvac_cycle()`):**
 ```python
-    # --- Compressor Fault (Critical) - avg current > UCL for 2+ consecutive cycles ---
+    # --- Compressor Fault (Critical) - avg current > UCL ---
     current_ucl = baselines.get('current', {}).get('ucl')
     if current_ucl is not None and avg_current > current_ucl:
-        cf = fat.setdefault('fault_hvac_compressor_fault', {'cycle_count': 0, 'last_trigger': None, 'active': False})
-        cf['cycle_count'] += 1
-        if cf['cycle_count'] >= 2:
-            _insert_fault_alert(
-                appliance_id, 'fault_hvac_compressor_fault',
-                f"Compressor electrical fault - avg current {avg_current:.2f}A exceeds UCL {current_ucl:.2f}A for 2 consecutive cycles",
+        _insert_fault_alert(
+            appliance_id, 'fault_hvac_compressor_fault',
+            f"Compressor electrical fault - avg current {avg_current:.2f}A exceeds UCL {current_ucl:.2f}A",
                 avg_current, current_ucl, now, cur, conn)
             cf['cycle_count'] = 0
     elif current_ucl is not None:
@@ -488,8 +470,8 @@ The original Zone A/B/C framework is **not applicable** to cyclic appliance data
 
 | Rule Name | Condition | Use Case |
 |-----------|-----------|----------|
-| **Immediate Breach** | Single point beyond UCL or LCL during appropriate state | Belt snap, ignition failure |
-| **Cycle Sustained** | Cycle statistic (peak, min, median, avg) beyond limit for N consecutive cycles | Roller wear, refrigerant leak, dirty filter |
+| **Immediate Breach** | SPC point breach during running state | SPC ucl/lcl breach |
+| **Cycle Sustained** | Cycle statistic (peak, min, median, avg) beyond limit at cycle end | Roller wear, refrigerant leak, dirty filter, belt snap |
 | **End-of-Cycle** | End-of-cycle value beyond limit at CYCLE_END transition | Lint blockage, incomplete drying |
 
 ### 5.2 Cycle Statistic Definitions
