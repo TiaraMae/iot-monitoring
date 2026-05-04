@@ -17,6 +17,7 @@ from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
 import numpy as np
+import requests
 
 from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, send_file
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
@@ -144,6 +145,88 @@ def get_appliance_calibration(appliance_id):
 def apply_calibration(raw_val, m, c):
     if raw_val is None: return 0.0
     return (float(raw_val) * float(m)) + float(c)
+
+# --- DISCORD ALERT HELPERS ---
+def get_user_webhook(appliance_id):
+    """Fetch the Discord webhook URL for the user who owns this appliance."""
+    conn = get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT u.discord_webhook_url
+            FROM users u
+            JOIN appliances a ON a.user_id = u.id
+            WHERE a.id = %s
+        """, (appliance_id,))
+        row = cur.fetchone()
+        return row[0] if row and row[0] else None
+    except Exception as e:
+        print(f"Error fetching webhook: {e}")
+        return None
+    finally:
+        cur.close()
+        release_conn(conn)
+
+def get_appliance_name(appliance_id):
+    """Quick name lookup for an appliance."""
+    conn = get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT name FROM appliances WHERE id = %s", (appliance_id,))
+        row = cur.fetchone()
+        return row[0] if row else None
+    except Exception as e:
+        print(f"Error fetching appliance name: {e}")
+        return None
+    finally:
+        cur.close()
+        release_conn(conn)
+
+def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=None):
+    """Fire-and-forget Discord webhook alert. Non-blocking."""
+    try:
+        webhook_url = get_user_webhook(appliance_id)
+        if not webhook_url:
+            return
+
+        app_name = get_appliance_name(appliance_id)
+
+        color_map = {
+            'fault_dryer_belt_snapped': 0xEF4444,
+            'fault_dryer_lint_blockage': 0xEF4444,
+            'fault_hvac_low_refrigerant': 0xEF4444,
+            'fault_hvac_compressor_fault': 0xEF4444,
+            'fault_dryer_roller_wear': 0xF59E0B,
+            'fault_hvac_dirty_filter': 0xF59E0B,
+            'fault_dryer_incomplete_drying': 0x3B82F6,
+            'spc_ucl_breach': 0xEF4444,
+            'spc_lcl_breach': 0xEF4444,
+            'dryer_humidity_high': 0xEAB308,
+        }
+        color = color_map.get(alert_type, 0x64748B)
+
+        embed = {
+            "title": f"🚨 {alert_type.replace('_', ' ').title()}",
+            "description": message,
+            "color": color,
+            "fields": [
+                {"name": "Appliance", "value": app_name or f"ID {appliance_id}", "inline": True},
+                {"name": "Value", "value": str(value) if value is not None else "N/A", "inline": True},
+                {"name": "Threshold", "value": str(threshold) if threshold is not None else "N/A", "inline": True},
+            ],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "IoT Monitoring & Predictive Maintenance"}
+        }
+
+        resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=5)
+        if resp.status_code not in (200, 204):
+            print(f"Discord webhook returned {resp.status_code}: {resp.text}")
+    except Exception as e:
+        print(f"Discord alert failed: {e}")
 
 # --- DATA QUERY HELPERS ---
 def latest_row_for_appliance(appliance_id):
@@ -446,6 +529,7 @@ def check_spc_alerts(appliance_id, reading_data, dev_type):
                 """, (appliance_id, alert_type, message, val, threshold, now))
                 conn.commit()
                 SPC_ALERT_COOLDOWN[cooldown_key] = now
+                send_discord_alert(appliance_id, alert_type, message, val, threshold)
     except Exception as e:
         print(f"SPC alert check error: {e}")
     finally:
@@ -470,6 +554,7 @@ def _insert_fault_alert(appliance_id, alert_type, message, value, threshold, now
         """, (appliance_id, alert_type, message, value, threshold, now))
         conn.commit()
         FAULT_ALERT_COOLDOWN[cooldown_key] = now
+        send_discord_alert(appliance_id, alert_type, message, value, threshold)
         tracker = FAULT_ALERT_TRACKER.setdefault(appliance_id, {})
         ft = tracker.setdefault(alert_type, {'cycle_count': 0, 'last_trigger': now, 'active': True})
         ft['last_trigger'] = now
@@ -1089,6 +1174,9 @@ def on_mqtt_message(client, userdata, msg):
                                   f"Dry cycle incomplete — exhaust humidity {avg_rh:.1f}% exceeds threshold {threshold:.1f}%",
                                   avg_rh, threshold, cyc_start, cyc_end))
                             conn.commit()
+                            send_discord_alert(app_id, 'dryer_humidity_high',
+                                f"Dry cycle incomplete — exhaust humidity {avg_rh:.1f}% exceeds threshold {threshold:.1f}%",
+                                avg_rh, threshold)
 
                     if "Dryer" in appliance_type:
                         if is_running:
@@ -2203,6 +2291,64 @@ def dryer_analytics(appliance_id):
         if conn:
             cur.close()
             release_conn(conn)
+
+# --- DISCORD WEBHOOK API ---
+@app.route('/api/user/discord_webhook', methods=['GET'])
+@login_required
+def api_discord_webhook_get():
+    conn = get_conn()
+    if not conn:
+        return jsonify({'error': 'db'}), 500
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT discord_webhook_url FROM users WHERE id = %s", (current_user.id,))
+        row = cur.fetchone()
+        url = row[0] if row and row[0] else ''
+        masked = '...' + url[-20:] if len(url) > 20 else url
+        return jsonify({'url': url, 'masked': masked, 'configured': bool(url)})
+    finally:
+        cur.close()
+        release_conn(conn)
+
+@app.route('/api/user/discord_webhook', methods=['POST'])
+@login_required
+def api_discord_webhook_post():
+    data = request.get_json() or {}
+    url = data.get('url', '').strip()
+    conn = get_conn()
+    if not conn:
+        return jsonify({'error': 'db'}), 500
+    cur = conn.cursor()
+    try:
+        cur.execute("UPDATE users SET discord_webhook_url = %s WHERE id = %s", (url or None, current_user.id))
+        conn.commit()
+        return jsonify({'success': True, 'configured': bool(url)})
+    finally:
+        cur.close()
+        release_conn(conn)
+
+@app.route('/api/user/discord_webhook/test', methods=['POST'])
+@login_required
+def api_discord_webhook_test():
+    data = request.get_json() or {}
+    url = data.get('url', '').strip()
+    if not url:
+        return jsonify({'error': 'No webhook URL provided'}), 400
+    try:
+        embed = {
+            "title": "✅ Test Alert",
+            "description": "Your Discord webhook is configured correctly! Alerts from your IoT monitoring system will appear here.",
+            "color": 0x10B981,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "footer": {"text": "IoT Monitoring & Predictive Maintenance"}
+        }
+        resp = requests.post(url, json={"embeds": [embed]}, timeout=5)
+        if resp.status_code in (200, 204):
+            return jsonify({'success': True})
+        else:
+            return jsonify({'error': f'Discord returned status {resp.status_code}'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
 
 # --- MAIN ---
 if __name__ == '__main__':
