@@ -110,6 +110,26 @@ Pattern-based fault detection gated behind `baseline_configured = TRUE`. All fau
 2. Backend inserts into `hvac_readings` / `dryer_readings`.
 3. Backend calls `check_spc_alerts()` against `spc_manual_baselines`.
 4. If breached and rate-limit allows, inserts into `alerts`.
+5. If fault conditions are met, `check_fault_alerts()` evaluates cycle-aggregated patterns and inserts fault alerts.
+6. If a Discord webhook URL is configured for the user, `send_discord_alert()` fires a rich embed (fire-and-forget).
+
+### Discord Webhook Alerts (NEW)
+Each user can configure a personal Discord webhook URL. When any alert fires, a rich color-coded embed is sent to that user's Discord channel instantly.
+
+**Alert types that trigger Discord:**
+- SPC breaches (`spc_ucl_breach`, `spc_lcl_breach`)
+- Fault alerts (`fault_dryer_*`, `fault_hvac_*`)
+- Dryer humidity alerts (`dryer_humidity_high`)
+
+**Embed colors by severity:**
+| Severity | Color | Hex | Alert Types |
+|----------|-------|-----|-------------|
+| Critical | 🔴 Red | `#EF4444` | Belt snapped, lint blockage, low refrigerant, compressor fault, SPC breach |
+| Warning | 🟠 Orange | `#F59E0B` | Roller wear, dirty filter |
+| Info | 🔵 Blue | `#3B82F6` | Incomplete drying |
+| Humidity | 🟡 Yellow | `#EAB308` | Dryer humidity high |
+
+**Implementation:** `send_discord_alert()` is fire-and-forget. It fetches the user's webhook URL via `get_user_webhook(appliance_id)`, builds the embed, and POSTs via `requests`. Discord failures are logged but never block the DB alert insert.
 
 ### API Endpoints
 
@@ -133,6 +153,9 @@ Pattern-based fault detection gated behind `baseline_configured = TRUE`. All fau
 | `GET` | `/api/device/<id>/alerts` | List alerts (resolved/unresolved) — read-only |
 | `GET` | `/api/device/<id>/hvac_analytics` | Daily averages (last 30 days, compressor running) |
 | `GET` | `/api/device/<id>/dryer_analytics` | Cycle detection + ignition peak stats |
+| `GET` | `/api/user/discord_webhook` | Fetch current Discord webhook URL (masked) |
+| `POST` | `/api/user/discord_webhook` | Save/update Discord webhook URL |
+| `POST` | `/api/user/discord_webhook/test` | Send test embed to verify webhook |
 
 ---
 
@@ -222,8 +245,14 @@ id | appliance_id | metric_name | ucl | lcl | mean | created_at | updated_at
 id | appliance_id | alert_type | message | value | threshold
 | created_at | resolved_at | acknowledged | cycle_start_time | cycle_end_time
 ```
-- Populated by `check_spc_alerts()` (SPC breaches) and `_process_cycle_end()` (dryer humidity alerts).
+- Populated by `check_spc_alerts()` (SPC breaches), `_insert_fault_alert()` (fault alerts), and `_process_cycle_end()` (dryer humidity alerts).
 - `api_alerts` is **read-only** in v2 — no acknowledge/resolve endpoint.
+
+### `users`
+```sql
+id | email | password_hash | name | created_at | discord_webhook_url
+```
+- `discord_webhook_url` stores the user's personal Discord webhook (optional, `TEXT` column).
 
 ---
 
@@ -241,7 +270,9 @@ id | appliance_id | alert_type | message | value | threshold
 10. **`buildStatusPolling()` fires immediately** — the first poll runs on card click, not after 4 seconds.
 11. **`initCharts()` fetches `/spc_limits` immediately** — SPC lines appear as soon as limits arrive, not after polling delay.
 12. **Excel export fix:** Dryer exports show `Type: {dev_type}` (no `sub_type` leak). HVAC shows `Type: {dev_type} ({sub_type})`.
-13. **`np.polyfit` is NOT imported** in v2 `app.py`. The calibration success handler references it but will crash at runtime if calibration is triggered. Add `import numpy as np` if calibration is needed.
+13. **`import numpy as np` is now present** in v2 `app.py`. Calibration works correctly.
+14. **Discord webhook is per-user, not per-appliance.** The URL is stored on the `users` table. All alerts for all appliances owned by that user go to the same Discord channel.
+15. **`requests` library is required** for Discord webhook POSTs. Listed in `requirements.txt`.
 
 ---
 
@@ -255,6 +286,14 @@ id | appliance_id | alert_type | message | value | threshold
 - **Backend:** `dryer_analytics()` now computes per-cycle `motor_baseline_median`.
 - **Frontend:** Alerts panel renders fault alerts with severity-based colors (red=critical, orange=warning, blue=info).
 - **Frontend:** Dryer analytics table shows "Motor Current" column (median of non-spike readings).
+
+### 2026-05-03 — Discord Webhook Alert Integration
+- **Backend:** Added `send_discord_alert()`, `get_user_webhook()`, `get_appliance_name()` helpers.
+- **Backend:** Hooked Discord alerts into `check_spc_alerts()`, `_insert_fault_alert()`, and `_process_cycle_end()`.
+- **Backend:** Added `GET/POST /api/user/discord_webhook` and `POST /api/user/discord_webhook/test` endpoints.
+- **Frontend:** Added "🔔 Discord Alerts" sidebar nav item + settings modal with URL input, Save, and Test buttons.
+- **Deps:** Added `requests>=2.28.0` to `requirements.txt`.
+- **DB:** Added `discord_webhook_url TEXT` column to `users` table.
 
 ### 2026-05-01 — v2 UI Polish & Delay Fixes
 - **Frontend:** Fixed Delta-RH row leaking onto dryer device cards (added `detail-deltarh` parent hide toggle in `openDeviceDetail()`).

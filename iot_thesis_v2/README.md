@@ -15,6 +15,7 @@ This is the **second-generation** backend and frontend for the IoT-Based Monitor
 - **Dryer SCT-013 CF = 30.0**: Calibrated for the new current sensor with 0.111 deductor.
 - **Pressure Precision**: BME280 pressure now reports 2 decimal places for finer exhaust duct monitoring.
 - **Instant SPC Line Rendering**: SPC bands appear immediately when opening a device card, not after a 4-second polling delay.
+- **Discord Webhook Alerts**: Users can configure a personal Discord webhook URL to receive instant rich embed notifications for every alert (SPC breaches, fault alerts, dryer humidity). Multi-tenant — each user's alerts go to their own Discord channel.
 
 ## Architecture
 
@@ -40,6 +41,7 @@ v2 uses the same PostgreSQL server but expects a **new or migrated schema**:
 | `appliances` | Removed all `baseline_*_mean/std` columns. Added `baseline_configured BOOLEAN`. Removed `baselining_since`. |
 | `spc_manual_baselines` | **NEW** table. Stores `ucl`, `lcl`, `mean` per appliance per metric. |
 | `alerts` | Same schema, now populated with `spc_ucl_breach` / `spc_lcl_breach`, `dryer_humidity_high`, and `fault_*` alert types. |
+| `users` | Added `discord_webhook_url TEXT` column for per-user Discord integration. |
 
 ### `spc_manual_baselines` Table
 
@@ -90,7 +92,12 @@ CREATE TABLE spc_manual_baselines (
    - Node beeps 3 times.
    - SPC lines appear on charts immediately; alerts are now active.
    - Grey "Baseline updated: …" timestamp appears at the bottom.
-4. **Monitor** — real-time charts with SPC bands and instant breach alerts.
+4. **Discord Setup** (optional):
+   - Click "🔔 Discord Alerts" in the sidebar.
+   - Paste your Discord webhook URL (create one in Discord: Channel Settings → Integrations → Webhooks).
+   - Click **Test** to verify, then **Save**.
+   - All alerts for your appliances will now ping your Discord instantly.
+5. **Monitor** — real-time charts with SPC bands and instant breach alerts.
 
 ## API Endpoints (New/Changed)
 
@@ -100,6 +107,9 @@ CREATE TABLE spc_manual_baselines (
 | `/api/device/<id>/baseline_config` | POST | Save UCL/LCL values |
 | `/api/device/<id>/spc_limits` | GET | Reads from `spc_manual_baselines` |
 | `/api/device/<id>/baseline_analysis` | GET | Returns configured UCL/Mean/LCL + `baseline_set_at` timestamp |
+| `/api/user/discord_webhook` | GET | Fetch current Discord webhook URL (masked for security) |
+| `/api/user/discord_webhook` | POST | Save or clear Discord webhook URL |
+| `/api/user/discord_webhook/test` | POST | Send a test embed to verify the webhook works |
 
 Removed endpoints: `remote_baseline`, `cancel_baseline`, `manual_baseline`.
 
@@ -142,8 +152,17 @@ The Flask server starts on `http://0.0.0.0:5000`.
 
 ### Alerts Panel
 - Fetches from `GET /api/device/{id}/alerts`.
-- Shows `spc_ucl_breach`, `spc_lcl_breach`, and `dryer_humidity_high` alerts.
+- Shows `spc_ucl_breach`, `spc_lcl_breach`, `dryer_humidity_high`, and all `fault_*` alerts.
+- Severity-based colors: red = Critical, orange = Warning, blue = Info.
 - Read-only in v2 (no acknowledge/resolve buttons wired).
+
+### Discord Alerts
+- Sidebar nav item: "🔔 Discord Alerts" opens a settings modal.
+- Input: Discord webhook URL (validated as URL type).
+- **Test button**: Sends a green "✅ Test Alert" embed immediately.
+- **Save button**: Stores URL in `users.discord_webhook_url`.
+- When saved, all future alerts (SPC, faults, humidity) trigger a Discord embed with appliance name, value, threshold, and timestamp.
+- Fire-and-forget: Discord failures are logged but never block alert DB inserts.
 
 ## Firmware Note
 
@@ -161,3 +180,4 @@ If you have existing v1 data you want to preserve:
 - **`np.polyfit` import fixed** in `app.py`: `import numpy as np` added. HVAC calibration now works correctly.
 - **HVAC threshold UI**: HVAC threshold saving is not yet implemented (placeholder alert).
 - **BME280**: Sensor was replaced and is now working correctly. Historical note: previous module failed (no I2C response) — replaced with 3.3V-native module.
+- **Discord webhook requires `requests` library**: Already listed in `requirements.txt`.
