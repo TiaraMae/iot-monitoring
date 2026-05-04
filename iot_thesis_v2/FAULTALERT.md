@@ -167,7 +167,7 @@ All 22 additional events in the 0.35–0.50 A range are genuine spikes (jumping 
 | Roller wear (early, +15%) | 2.30 A | Below UCL — not yet triggered |
 | Roller wear (+20%) | 2.40 A | At UCL — triggers after 3-cycle confirmation |
 | Roller wear (severe, +25%) | 2.50 A | Above UCL — triggers reliably |
-| Belt snap | < 0.30 A | Immediate fault |
+| Belt snap | < `current_LCL` (typically ~1.6 A for 2.0 A baseline) | Immediate fault |
 
 ### 2.4 Baseline Input UX — Auto-Derived UCL/LCL
 
@@ -191,13 +191,24 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 |-----------|--------|
 | **Description** | Dryer completes cycle but clothes retain excessive moisture. |
 | **Root Cause** | Overloading, worn heating element, or short cycle. |
-| **Primary Trigger** | End-of-cycle exhaust RH > `rhexhaust_mean` but < `rhexhaust_UCL`. |
+| **Primary Trigger** | End-of-cycle exhaust RH > `rhexhaust_UCL`. |
 | **Confirmatory** | None. |
 | **Evaluation Point** | CYCLE_END only (transition from running to idle). |
 | **Severity** | Info |
 | **Alert Type** | `fault_dryer_incomplete_drying` |
 
-**Logic:** At cycle end, if exhaust RH is above the mean (expected dry value) but below UCL, the cycle did not achieve full dryness. This is a mild condition — not a blockage, just suboptimal drying.
+**Logic:** At cycle end, if exhaust RH exceeds the UCL, the cycle did not achieve full dryness. Since baselines represent the normal end-of-cycle range, anything outside the SPC band is abnormal. This is evaluated with `elif` after lint blockage (which also requires `end_RH > UCL` plus high temp) so only one end-of-cycle humidity alert fires per cycle.
+
+**Code (`_finalize_dryer_cycle()`):**
+```python
+    # --- Incomplete Drying (Info) ---
+    # Only check if lint blockage did not fire (guaranteed by elif)
+    elif rhexhaust_ucl is not None and end_rh_avg > rhexhaust_ucl:
+        _insert_fault_alert(
+            appliance_id, 'fault_dryer_incomplete_drying',
+            f"Clothes not fully dried - end RH {end_rh_avg:.1f}% exceeds UCL {rhexhaust_ucl:.1f}%",
+            end_rh_avg, rhexhaust_ucl, now, cur, conn)
+```
 
 ---
 
@@ -214,6 +225,33 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 
 **Logic:** Worn rollers increase torque. The motor draws more current to maintain RPM. We use the **per-cycle median** of spike-excluded readings. Requiring 3 consecutive cycles with median > UCL prevents false alarms from transient heavy loads or cool-down phases. A +20% worn motor (median ≈ UCL) triggers reliably within 3–5 cycles because wear is persistent across cycles.
 
+**Code (`_finalize_dryer_cycle()`):**
+```python
+    # Compute motor baseline median
+    median_current = 0.0
+    if motor_readings:
+        motor_readings_sorted = sorted(motor_readings)
+        n = len(motor_readings_sorted)
+        median_current = motor_readings_sorted[n // 2] if n % 2 == 1 else (motor_readings_sorted[n // 2 - 1] + motor_readings_sorted[n // 2]) / 2.0
+
+    # --- Roller Wear (Warning) - per-cycle median > UCL for 3 consecutive cycles ---
+    current_ucl = baselines.get('current', {}).get('ucl')
+    if current_ucl is not None and median_current > current_ucl:
+        tracker = FAULT_ALERT_TRACKER.setdefault(appliance_id, {})
+        roller = tracker.setdefault('fault_dryer_roller_wear', {'cycle_count': 0, 'last_trigger': None, 'active': False})
+        roller['cycle_count'] += 1
+        if roller['cycle_count'] >= 3:
+            _insert_fault_alert(
+                appliance_id, 'fault_dryer_roller_wear',
+                f"Barrel roller worn out - motor baseline {median_current:.3f}A exceeds UCL {current_ucl:.3f}A for 3 consecutive cycles",
+                median_current, current_ucl, now, cur, conn)
+            roller['cycle_count'] = 0
+    elif current_ucl is not None:
+        tracker = FAULT_ALERT_TRACKER.get(appliance_id, {})
+        if tracker and 'fault_dryer_roller_wear' in tracker:
+            tracker['fault_dryer_roller_wear']['cycle_count'] = 0
+```
+
 ---
 
 ### 3.3 Belt Snapped
@@ -221,13 +259,32 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 |-----------|--------|
 | **Description** | Drive belt connecting motor to drum has broken or slipped off. |
 | **Root Cause** | Age, overloading, or misalignment. |
-| **Primary Trigger** | Per-cycle minimum motor current < `current_LCL` for **>30 seconds** AND < 0.3 A. |
+| **Primary Trigger** | Per-cycle motor current < `current_LCL` for **>30 seconds** while `in_cycle = True`. |
 | **Confirmatory** | Current drops near zero while the dryer is supposedly running (current ≥ 0.4 A threshold was met, then collapsed). |
 | **Evaluation Point** | During RUNNING state. |
 | **Severity** | Critical |
 | **Alert Type** | `fault_dryer_belt_snapped` |
 
-**Logic:** A snapped belt means the motor spins freely. Current drops dramatically. A per-cycle minimum below LCL confirms the collapse is sustained, not just a brief gap between ignition spikes. Belt snap is an immediate fault — no multi-cycle confirmation needed.
+**Logic:** A snapped belt means the motor spins freely. Current drops dramatically. The firmware only sends telemetry when current ≥ 0.4 A, so a reading below LCL (typically ~1.6 A for a 2.0 A baseline) confirms sustained collapse, not just a brief gap between ignition spikes. Belt snap is an immediate fault — no multi-cycle confirmation needed.
+
+**Code (`_check_dryer_faults()`):**
+```python
+    # Belt snap detection (immediate, during cycle)
+    if stats.get('in_cycle', False):
+        lcl = baselines.get('current', {}).get('lcl', 0.8)
+        if current < lcl:
+            if 'belt_snap_start' not in stats:
+                stats['belt_snap_start'] = actual_time
+            elif (actual_time - stats['belt_snap_start']).total_seconds() > 30:
+                if not stats.get('belt_snap_triggered', False):
+                    _insert_fault_alert(
+                        appliance_id, 'fault_dryer_belt_snapped',
+                        f"Belt snapped - motor current {current:.2f}A below LCL for >30s",
+                        current, lcl, now, cur, conn)
+                    stats['belt_snap_triggered'] = True
+        else:
+            stats.pop('belt_snap_start', None)
+```
 
 ---
 
@@ -243,6 +300,19 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 | **Alert Type** | `fault_dryer_lint_blockage` |
 
 **Logic:** Lint blockage is a **cycle-outcome fault**, not a point-in-time fault. During the cycle, temps may look normal because heat is trapped. The definitive signature appears at cycle end: clothes remain wet (high RH) and the exhaust is overheated (high temp) because hot, moist air cannot escape. Both conditions must be true to avoid false alarms from overloaded drums (high RH but normal temp).
+
+**Code (`_finalize_dryer_cycle()`):**
+```python
+    # --- Lint Blockage (Critical) ---
+    rhexhaust_ucl = baselines.get('rhexhaust', {}).get('ucl')
+    texhaust_ucl = baselines.get('texhaust', {}).get('ucl')
+    if rhexhaust_ucl is not None and texhaust_ucl is not None:
+        if end_rh_avg > rhexhaust_ucl and max_temp > texhaust_ucl:
+            _insert_fault_alert(
+                appliance_id, 'fault_dryer_lint_blockage',
+                f"Lint blockage detected - end RH {end_rh_avg:.1f}% > UCL {rhexhaust_ucl:.1f}% and exhaust temp {max_temp:.1f}C > UCL {texhaust_ucl:.1f}C",
+                end_rh_avg, rhexhaust_ucl, now, cur, conn)
+```
 
 ---
 
@@ -263,6 +333,24 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 
 **Logic:** Restricted airflow reduces warm air passing over the coil. The coil cannot absorb enough heat, so it stays warmer than baseline (min temp > UCL). The temperature split (peak ΔT) also shrinks. We evaluate only during STABLE_ON because during STARTING, the coil is still cooling down and temps are naturally higher.
 
+**Code (`_evaluate_hvac_cycle()`):**
+```python
+    # --- Dirty Filter (Warning) - min coil temp > UCL for 3+ consecutive cycles ---
+    tcoil_ucl = baselines.get('tcoil', {}).get('ucl')
+    if tcoil_ucl is not None and min_tcoil > tcoil_ucl:
+        df = fat.setdefault('fault_hvac_dirty_filter', {'cycle_count': 0, 'last_trigger': None, 'active': False})
+        df['cycle_count'] += 1
+        if df['cycle_count'] >= 3:
+            _insert_fault_alert(
+                appliance_id, 'fault_hvac_dirty_filter',
+                f"Dirty indoor filter - min coil temp {min_tcoil:.2f}C above UCL {tcoil_ucl:.2f}C for 3 consecutive cycles",
+                min_tcoil, tcoil_ucl, now, cur, conn)
+            df['cycle_count'] = 0
+    elif tcoil_ucl is not None:
+        if 'fault_hvac_dirty_filter' in fat:
+            fat['fault_hvac_dirty_filter']['cycle_count'] = 0
+```
+
 ---
 
 ### 4.2 Low Refrigerant
@@ -278,6 +366,24 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 
 **Logic:** Low refrigerant reduces evaporator heat absorption. During stable operation, the coil cannot get as cold, and the temperature split (ΔT) fails to reach its normal peak. Comparing peak ΔT across consecutive STABLE_ON cycles normalizes for compressor cycling.
 
+**Code (`_evaluate_hvac_cycle()`):**
+```python
+    # --- Low Refrigerant (Critical) - peak dT < LCL for 3+ consecutive cycles ---
+    deltat_lcl = baselines.get('deltat', {}).get('lcl')
+    if deltat_lcl is not None and peak_deltat < deltat_lcl:
+        lr = fat.setdefault('fault_hvac_low_refrigerant', {'cycle_count': 0, 'last_trigger': None, 'active': False})
+        lr['cycle_count'] += 1
+        if lr['cycle_count'] >= 3:
+            _insert_fault_alert(
+                appliance_id, 'fault_hvac_low_refrigerant',
+                f"Low refrigerant - peak dT {peak_deltat:.2f}C below LCL {deltat_lcl:.2f}C for 3 consecutive cycles",
+                peak_deltat, deltat_lcl, now, cur, conn)
+            lr['cycle_count'] = 0
+    elif deltat_lcl is not None:
+        if 'fault_hvac_low_refrigerant' in fat:
+            fat['fault_hvac_low_refrigerant']['cycle_count'] = 0
+```
+
 ---
 
 ### 4.3 Compressor Electrical Fault / Hard Start
@@ -292,6 +398,24 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 | **Alert Type** | `fault_hvac_compressor_fault` |
 
 **Logic:** During stable operation, compressor current should be relatively constant. Sustained elevation above UCL indicates the compressor is working harder than normal. Two consecutive cycles catches the fault quickly while filtering out brief startup surges.
+
+**Code (`_evaluate_hvac_cycle()`):**
+```python
+    # --- Compressor Fault (Critical) - avg current > UCL for 2+ consecutive cycles ---
+    current_ucl = baselines.get('current', {}).get('ucl')
+    if current_ucl is not None and avg_current > current_ucl:
+        cf = fat.setdefault('fault_hvac_compressor_fault', {'cycle_count': 0, 'last_trigger': None, 'active': False})
+        cf['cycle_count'] += 1
+        if cf['cycle_count'] >= 2:
+            _insert_fault_alert(
+                appliance_id, 'fault_hvac_compressor_fault',
+                f"Compressor electrical fault - avg current {avg_current:.2f}A exceeds UCL {current_ucl:.2f}A for 2 consecutive cycles",
+                avg_current, current_ucl, now, cur, conn)
+            cf['cycle_count'] = 0
+    elif current_ucl is not None:
+        if 'fault_hvac_compressor_fault' in fat:
+            fat['fault_hvac_compressor_fault']['cycle_count'] = 0
+```
 
 ---
 

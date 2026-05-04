@@ -979,12 +979,16 @@
 
             fetch(`/api/device/${currentDetailId}/baseline_config`).then(r => r.json()).then(data => {
                 if (data.error) return;
+                const guidance = isHVAC
+                    ? 'HVAC: baseline should cover 10+ minutes of stable compressor running (steady ΔT, coil temp, current).'
+                    : 'Dryer: baseline should capture the last 2–3 minutes of a normal cycle (end-of-cycle exhaust RH, temp, pressure, current).';
+                const guidanceHtml = `<div style="font-size:0.75rem; color:var(--text-muted); margin-bottom:0.5rem; padding:0.4rem 0.6rem; background:var(--bg); border-left:3px solid var(--primary); border-radius:0 4px 4px 0;"><strong>Guidance:</strong> ${guidance}</div>`;
                 chartMetrics.forEach(([key, label], idx) => {
                     const container = document.getElementById(`baseline-inputs-chart-${idx + 1}`);
                     if (!container) return;
                     const vals = data.metrics && data.metrics[key] ? data.metrics[key] : {ucl: '', lcl: ''};
                     const mean = (vals.ucl !== '' && vals.lcl !== '') ? ((parseFloat(vals.ucl) + parseFloat(vals.lcl)) / 2).toFixed(2) : '--';
-                    container.innerHTML = `
+                    container.innerHTML = (idx === 0 ? guidanceHtml : '') + `
                         <div style="display:flex; gap:1rem; align-items:flex-end; flex-wrap:wrap;">
                             <div style="flex:1; min-width:100px;">
                                 <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">UCL</label>

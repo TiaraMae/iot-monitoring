@@ -584,7 +584,7 @@ def _check_dryer_faults(appliance_id, reading_data, baselines, now, cur, conn):
     # Belt snap detection (immediate, during cycle)
     if stats.get('in_cycle', False):
         lcl = baselines.get('current', {}).get('lcl', 0.8)
-        if current < lcl and current < 0.3:
+        if current < lcl:
             if 'belt_snap_start' not in stats:
                 stats['belt_snap_start'] = actual_time
             elif (actual_time - stats['belt_snap_start']).total_seconds() > 30:
@@ -694,13 +694,12 @@ def _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn):
                 end_rh_avg, rhexhaust_ucl, now, cur, conn)
 
     # --- Incomplete Drying (Info) ---
-    rhexhaust_mean = baselines.get('rhexhaust', {}).get('mean')
-    if rhexhaust_mean is not None and rhexhaust_ucl is not None:
-        if end_rh_avg > rhexhaust_mean and end_rh_avg <= rhexhaust_ucl:
-            _insert_fault_alert(
-                appliance_id, 'fault_dryer_incomplete_drying',
-                f"Clothes not fully dried - end RH {end_rh_avg:.1f}% above mean {rhexhaust_mean:.1f}%",
-                end_rh_avg, rhexhaust_mean, now, cur, conn)
+    # Only check if lint blockage did not fire (guaranteed by elif)
+    elif rhexhaust_ucl is not None and end_rh_avg > rhexhaust_ucl:
+        _insert_fault_alert(
+            appliance_id, 'fault_dryer_incomplete_drying',
+            f"Clothes not fully dried - end RH {end_rh_avg:.1f}% exceeds UCL {rhexhaust_ucl:.1f}%",
+            end_rh_avg, rhexhaust_ucl, now, cur, conn)
 
     # --- Roller Wear (Warning) - per-cycle median > UCL for 3 consecutive cycles ---
     current_ucl = baselines.get('current', {}).get('ucl')

@@ -83,9 +83,9 @@ Pattern-based fault detection gated behind `baseline_configured = TRUE`. All fau
 | Fault | Trigger | Severity |
 |-------|---------|----------|
 | `fault_dryer_roller_wear` | Per-cycle motor baseline median > UCL for 3 consecutive cycles | Warning |
-| `fault_dryer_belt_snapped` | Current < LCL and < 0.3A for >30s during cycle | Critical |
+| `fault_dryer_belt_snapped` | Current < LCL for >30s during cycle | Critical |
 | `fault_dryer_lint_blockage` | End-of-cycle RH > UCL AND max exhaust temp > UCL | Critical |
-| `fault_dryer_incomplete_drying` | End-of-cycle RH > mean but <= UCL | Info |
+| `fault_dryer_incomplete_drying` | End-of-cycle RH > UCL | Info |
 
 **HVAC Faults:**
 | Fault | Trigger | Severity |
