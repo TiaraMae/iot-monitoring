@@ -223,7 +223,7 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 |-----------|--------|
 | **Description** | Support rollers under the drum are worn, increasing mechanical friction. |
 | **Root Cause** | Normal wear, lack of lubrication, or debris accumulation. |
-| **Primary Trigger** | Per-cycle median motor baseline (spike-excluded) > `current_UCL` for **3 consecutive dryer cycles**. |
+| **Primary Trigger** | Per-cycle median motor baseline (spike-excluded) > `current_UCL` at **cycle end**. |
 | **Confirmatory** | None. |
 | **Evaluation Point** | During RUNNING state (excluding ignition windows). |
 | **Severity** | Warning |
@@ -233,9 +233,9 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 
 **Research Base:** Bodily et al. confirmed that motor current trending upward indicates bearing/roller degradation or belt slippage. IEEE 841-2001 recommends ±20% current deviation bands for abnormal mechanical loading detection. MCSA literature (Kia et al. 2009, Bellini et al. 2008) establishes that mechanical load changes manifest as sustained changes in the stator current fundamental component.
 
-**Why This Check:** The per-cycle median of spike-excluded readings filters out gas ignition spikes and captures the true motor load. Requiring 3 consecutive cycles with median > UCL prevents false alarms from transient heavy loads. A +20% worn motor (median ≈ UCL) triggers reliably within 3–5 cycles because wear is persistent across cycles.
+**Why This Check:** The per-cycle median of spike-excluded readings filters out gas ignition spikes and captures the true motor load. A +20% worn motor (median ≈ UCL) triggers immediately at cycle end because wear is persistent across cycles. A 10-minute cooldown per fault type prevents alert spam.
 
-**Trigger Condition:** `median_current > current_UCL` for **3 consecutive dryer cycles**.
+**Trigger Condition:** `median_current > current_UCL` at **cycle end** (fires immediately).
 
 **Code (`_finalize_dryer_cycle()`):**
 ```python
@@ -246,22 +246,13 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
         n = len(motor_readings_sorted)
         median_current = motor_readings_sorted[n // 2] if n % 2 == 1 else (motor_readings_sorted[n // 2 - 1] + motor_readings_sorted[n // 2]) / 2.0
 
-    # --- Roller Wear (Warning) - per-cycle median > UCL for 3 consecutive cycles ---
+    # --- Roller Wear (Warning) - per-cycle median > UCL (fires immediately) ---
     current_ucl = baselines.get('current', {}).get('ucl')
     if current_ucl is not None and median_current > current_ucl:
-        tracker = FAULT_ALERT_TRACKER.setdefault(appliance_id, {})
-        roller = tracker.setdefault('fault_dryer_roller_wear', {'cycle_count': 0, 'last_trigger': None, 'active': False})
-        roller['cycle_count'] += 1
-        if roller['cycle_count'] >= 3:
-            _insert_fault_alert(
-                appliance_id, 'fault_dryer_roller_wear',
-                f"Barrel roller worn out - motor baseline {median_current:.3f}A exceeds UCL {current_ucl:.3f}A for 3 consecutive cycles",
-                median_current, current_ucl, now, cur, conn)
-            roller['cycle_count'] = 0
-    elif current_ucl is not None:
-        tracker = FAULT_ALERT_TRACKER.get(appliance_id, {})
-        if tracker and 'fault_dryer_roller_wear' in tracker:
-            tracker['fault_dryer_roller_wear']['cycle_count'] = 0
+        _insert_fault_alert(
+            appliance_id, 'fault_dryer_roller_wear',
+            f"Barrel roller worn out - motor baseline {median_current:.3f}A exceeds UCL {current_ucl:.3f}A",
+            median_current, current_ucl, now, cur, conn)
 ```
 
 ---
@@ -341,7 +332,7 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 |-----------|--------|
 | **Description** | Air filter is clogged, restricting airflow across the evaporator coil. |
 | **Root Cause** | Neglected filter replacement; high dust environments. |
-| **Primary Trigger** | Minimum coil temp during STABLE_ON < `tcoil_LCL` for **3 consecutive STABLE_ON cycles**. |
+| **Primary Trigger** | Minimum coil temp during STABLE_ON < `tcoil_LCL` at **STABLE_ON cycle end**. |
 | **Confirmatory** | None. |
 | **Evaluation Point** | STABLE_ON only (≥10 min continuous compressor ON). |
 | **Severity** | Warning |
@@ -353,25 +344,18 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 
 **Why This Check:** During normal compressor-ON operation, the coil reaches its coldest point near LCL. Supercooling from restricted airflow pushes it **below** this bound. We check `min_tcoil < LCL` because the coil gets colder, not warmer.
 
-**Trigger Condition:** `min_tcoil < tcoil_LCL` for **3 consecutive STABLE_ON cycles**.
+**Trigger Condition:** `min_tcoil < tcoil_LCL` at **STABLE_ON cycle end** (fires immediately).
 
 **Code (`_evaluate_hvac_cycle()`):**
 ```python
-    # --- Dirty Filter (Warning) - min coil temp < LCL for 3+ consecutive cycles ---
+    # --- Dirty Filter (Warning) - min coil temp < LCL (fires immediately) ---
     # Physics: restricted airflow -> less heat load -> refrigerant supercools -> coil colder
     tcoil_lcl = baselines.get('tcoil', {}).get('lcl')
     if tcoil_lcl is not None and min_tcoil < tcoil_lcl:
-        df = fat.setdefault('fault_hvac_dirty_filter', {'cycle_count': 0, 'last_trigger': None, 'active': False})
-        df['cycle_count'] += 1
-        if df['cycle_count'] >= 3:
-            _insert_fault_alert(
-                appliance_id, 'fault_hvac_dirty_filter',
-                f"Dirty indoor filter - min coil temp {min_tcoil:.2f}C below LCL {tcoil_lcl:.2f}C for 3 consecutive cycles",
-                min_tcoil, tcoil_lcl, now, cur, conn)
-            df['cycle_count'] = 0
-    elif tcoil_lcl is not None:
-        if 'fault_hvac_dirty_filter' in fat:
-            fat['fault_hvac_dirty_filter']['cycle_count'] = 0
+        _insert_fault_alert(
+            appliance_id, 'fault_hvac_dirty_filter',
+            f"Dirty indoor filter - min coil temp {min_tcoil:.2f}C below LCL {tcoil_lcl:.2f}C",
+            min_tcoil, tcoil_lcl, now, cur, conn)
 ```
 
 ---
@@ -573,17 +557,59 @@ The existing `dryer_analytics()` per-cycle table should include:
 
 ---
 
-## 9. Severity Classification
+## 9. Discord Alert Behavior
 
-| Severity | Color | Faults | Recommended Action |
-|----------|-------|--------|-------------------|
-| **Critical** | Red | Belt Snapped, Lint Blockage, Low Refrigerant, Compressor Fault | Immediate shutdown / service call |
-| **Warning** | Orange | Roller Wear, Dirty Filter | Schedule maintenance within 24–48h |
-| **Info** | Blue | Incomplete Drying | Check load size / cycle settings |
+### What Goes to Discord
+Only **actionable fault alerts** are sent to Discord. Raw data-point alerts are suppressed.
+
+| Alert Type | Discord? | Reason |
+|------------|----------|--------|
+| `fault_dryer_incomplete_drying` | ✅ Yes | Actionable maintenance advice |
+| `fault_dryer_roller_wear` | ✅ Yes | Actionable maintenance advice |
+| `fault_dryer_belt_snapped` | ✅ Yes | Critical — immediate action required |
+| `fault_dryer_lint_blockage` | ✅ Yes | Critical — immediate action required |
+| `fault_hvac_dirty_filter` | ✅ Yes | Actionable maintenance advice |
+| `fault_hvac_low_refrigerant` | ✅ Yes | Critical — immediate action required |
+| `fault_hvac_compressor_fault` | ✅ Yes | Critical — immediate action required |
+| `spc_ucl_breach` | ❌ No | Raw data point spam — not actionable |
+| `spc_lcl_breach` | ❌ No | Raw data point spam — not actionable |
+| `dryer_humidity_high` | ❌ No | Replaced by `fault_dryer_incomplete_drying` (SPC-based, more precise) |
+
+### Discord Embed Format
+Fault alerts use a **maintenance-ticket style** embed instead of raw data dumps:
+
+```
+🔴 Belt Snapped
+Belt snapped — motor baseline 1.20A below LCL 1.60A
+━━━━━━━━━━━━━━━━━━━━
+📍 Appliance: Dryer Test
+🔍 Cause: Age, overloading, or misalignment.
+🔧 Recommended Action: Replace drive belt immediately.
+```
+
+The embed includes:
+- **Severity icon + human-readable title** (e.g., "🔴 Belt Snapped" instead of "🚨 Fault Dryer Belt Snapped")
+- **Fault message** with measured value and threshold
+- **Cause** explaining the physics/root cause
+- **Recommended Action** telling the user what to do
 
 ---
 
-## 10. References
+## 10. Alert Severity, Titles & Recommended Actions
+
+| Alert Type | Severity | Discord Title | Cause | Recommended Action |
+|------------|----------|---------------|-------|-------------------|
+| `fault_dryer_incomplete_drying` | 🔵 Info | Clothes Not Fully Dried | Overloading, worn heating element, or short cycle | Reduce load size and run another cycle |
+| `fault_dryer_roller_wear` | 🟠 Warning | Barrel Roller Worn Out | Support rollers under the drum are worn, increasing mechanical friction | Inspect and replace drum support rollers |
+| `fault_dryer_belt_snapped` | 🔴 Critical | Belt Snapped | Age, overloading, or misalignment | Replace drive belt immediately |
+| `fault_dryer_lint_blockage` | 🔴 Critical | Lint Blockage Detected | Failure to clean lint filter or exhaust duct; exterior vent obstruction | Clean lint filter and inspect exhaust duct |
+| `fault_hvac_dirty_filter` | 🟠 Warning | Dirty Indoor Filter | Neglected filter replacement; high dust environments | Replace or clean the indoor air filter |
+| `fault_hvac_low_refrigerant` | 🔴 Critical | Low Refrigerant | Micro-leaks in coil or lines; improper initial charge; Schrader valve leaks | Contact HVAC technician to check for leaks and recharge |
+| `fault_hvac_compressor_fault` | 🔴 Critical | Compressor Electrical Fault | Failing compressor bearings, refrigerant overcharge, condenser blockage, or starter relay failure | Contact HVAC technician for compressor inspection |
+
+---
+
+## 11. References
 
 1. Sun, B., Luh, P.B., Jia, Q.S., O’Neill, Z., Song, F. (2013). *Building energy doctors: An SPC and Kalman filter-based method for system-level fault detection in HVAC systems.* IEEE TASE, 11(1), 215-229.
 2. Bonvini, M., Sohn, M.D., Granderson, J., Wetter, M., Piette, M.A. (2014). *Robust on-line fault detection diagnosis for HVAC components based on nonlinear state estimation techniques.* Applied Energy, 124, 156-166.

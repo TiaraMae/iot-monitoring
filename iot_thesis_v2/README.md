@@ -161,7 +161,9 @@ The Flask server starts on `http://0.0.0.0:5000`.
 - Input: Discord webhook URL (validated as URL type).
 - **Test button**: Sends a green "✅ Test Alert" embed immediately.
 - **Save button**: Stores URL in `users.discord_webhook_url`.
-- When saved, all future alerts (SPC, faults, humidity) trigger a Discord embed with appliance name, value, threshold, and timestamp.
+- When saved, **fault alerts only** trigger a Discord embed with appliance name, value, threshold, and timestamp.
+- **What goes to Discord:** 7 actionable fault types only (`fault_dryer_incomplete_drying`, `fault_dryer_roller_wear`, `fault_dryer_belt_snapped`, `fault_dryer_lint_blockage`, `fault_hvac_dirty_filter`, `fault_hvac_low_refrigerant`, `fault_hvac_compressor_fault`).
+- **What stays in DB/dashboard only:** SPC breaches (`spc_ucl_breach`, `spc_lcl_breach`) and legacy `dryer_humidity_high`.
 - Fire-and-forget: Discord failures are logged but never block alert DB inserts.
 
 ## Firmware Note
@@ -181,8 +183,27 @@ If you have existing v1 data you want to preserve:
 - **HVAC threshold UI**: Removed. HVAC alerts now use the SPC baseline UCL/LCL limits configured under each chart. No separate threshold setup is needed.
 - **BME280**: Sensor was replaced and is now working correctly. Historical note: previous module failed (no I2C response) — replaced with 3.3V-native module.
 
-## Bug Fixes & Hardening (2026-05-04)
+## Bug Fixes & Hardening
 
+### 2026-05-05 — HVAC Calibration Progress Fix, BME280 Hardening, Motor Current Fix, Ignition Count Fix
+- **Firmware (Calibration):** Fixed HVAC calibration progress dashboard sync. During calibration, normal sampling was skipped so no telemetry reached the backend. `start_tcoil` came from stale DB data and the progress bar was frozen.
+  - **Fix:** Firmware publishes `calibration_progress` events every ~2.2 s with `t3`, `base_t3`, `delta`. Backend handles these events to update `CALIBRATION_TRACKER` in real time. `api_calibration_progress` reads from tracker instead of `hvac_readings`.
+- **Firmware (BME280):** Removed false stuck-detection logic (`bmeStuckCounter`) that triggered after only 3 identical samples (~6 s) during normal operation. Removed `recoverI2C()` from the main loop — bit-banging SCL/SDA was corrupting the active I2C bus by leaving SDA in push-pull OUTPUT mode after `Wire.begin()`.
+- **Firmware (BME280):** Simplified BME280 configuration to match the proven `gas_dryer_test` pattern: `MODE_NORMAL, SAMPLING_X2, SAMPLING_X16, SAMPLING_X1, FILTER_X16, STANDBY_MS_62_5`. Removed `Wire.setClock(50000L)` (untested edge case on ESP32-C3).
+- **Firmware (BME280):** Added **10 ms delay between BME register reads** to prevent I2C transaction collision under FreeRTOS task switching / WiFi ISR preemption.
+- **Firmware (BME280):** Added **3-attempt retry loop** for NaN readings with 50 ms backoff. Auto-soft-reset (write `0xB6` to reset register + re-init) on 5 consecutive NaN samples.
+- **Firmware (BME280):** Invalid readings now emit **`null`** in JSON instead of `0.0`. Dashboard shows "—" for missing BME data. Added `bmeValidSamples` counter for accurate averaging.
+- **Firmware (Setup):** Moved `setupWifi()` before sensor initialization. DHT warm-up loop (up to 20 s) now runs **only for HVAC**; skipped for dryers. BME init simplified to single `bme.begin(0x76, &Wire)`.
+- **Backend (Motor current):** Fixed `_motor_readings` only appending when `_peak_state == "IDLE"`. The peak state machine could get stuck in "RISING" because the fallback drop threshold (0.1 A) exceeded actual gas dryer motor fluctuation (±0.03 A). Now collects **ALL readings** into `_motor_readings` and filters ignition spikes at runtime with `filter_threshold = average * 1.15`. Motor baseline median is now stable (~3.1 A) across all time ranges.
+- **Backend (Ignition count):** Added hysteresis (`_peak_max - 0.1`) and hard floor (`_peak_max > mean_current + 0.15`) to peak detection. Verified against `Dryer_Test_20260505_111710.xlsx` — correctly reports 4 ignitions instead of 5.
+
+### 2026-05-05 — Discord Alert System Revision
+- **Discord — Fault-Only Alerts:** Raw SPC breach alerts (`spc_ucl_breach`, `spc_lcl_breach`) are **removed from Discord**. They still insert into the `alerts` table and appear on the dashboard, but they no longer spam the Discord channel.
+- **Discord — `dryer_humidity_high` Removed:** The legacy end-of-cycle humidity alert (`dryer_humidity_high`) is also **removed from Discord**. The more precise `fault_dryer_incomplete_drying` (SPC-based) remains active and is sent to Discord instead.
+- **Discord — Maintenance-Ticket Embeds:** `send_discord_alert()` rewritten with `FAULT_DISCORD_MAP`. Each fault alert now sends a rich embed containing: severity icon + human-readable title, fault description, root cause, and recommended action — formatted like a maintenance work order.
+- **Fault Triggering — Immediate:** Removed the 3-consecutive-cycle confirmation delay from `fault_dryer_roller_wear` and `fault_hvac_dirty_filter`. Both now fire **immediately on first detection** at cycle end. The existing 10-minute cooldown per fault type (`_insert_fault_alert()`) prevents spam without delaying actionable maintenance advice.
+
+### 2026-05-04 — Security & Backend Hardening
 - **Credential Hardening:** Removed all hardcoded password defaults from `app.py`. Added `python-dotenv` loading. App now fails fast with a clear `RuntimeError` if `FLASK_SECRET_KEY`, `MQTT_PASS`, or `DB_PASSWORD` is missing. Create a `.env` file in `iot_thesis_v2/` (gitignored) with your credentials.
 - **Direction-Aware SPC Cooldown:** `SPC_ALERT_COOLDOWN` key changed from `(appliance_id, metric_name)` to `(appliance_id, metric_name, alert_type)`. UCL and LCL breaches on the same metric are now rate-limited independently (5 min each).
 - **In-Memory Tracker Cleanup:** `forget_device()` now purges `appliance_id` from all in-memory dicts (`DRYER_CYCLE_STATS`, `HVAC_CYCLE_TRACKER`, `FAULT_ALERT_TRACKER`, `FAULT_ALERT_COOLDOWN`, `SPC_ALERT_COOLDOWN`, `CYCLE_TRACKER`, `CALIBRATION_TRACKER`) to prevent memory leaks.

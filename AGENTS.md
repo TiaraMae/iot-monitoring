@@ -405,15 +405,21 @@ For each appliance type, baseline statistics establish control limits:
 
 `dryer_analytics()` uses gap-based cycle detection on `dryer_readings`:
 
-1. **Cycle start threshold:** `baseline_current_mean × 0.8` (or fallback `0.4 A`)
+1. **Cycle start threshold:** Fixed at **0.4 A** (matching firmware running gate). Decoupled from `threshold_current_min` so new cycles can start after gaps.
 2. **Cycle end threshold:** `baseline_current_mean × 0.3` (or fallback `0.15 A`)
-3. **Gap end:** >600 seconds between consecutive readings forces cycle finalization
-4. **Noise filter:** Cycles shorter than 3 minutes are discarded
-5. **Per-cycle stats:** min/max temp, start/end RH, ignition count, current consumption, spike average
+3. **Gap end:** >**60 seconds** between consecutive readings forces cycle finalization
+4. **Noise filter:** Cycles shorter than **1 minute** are discarded
+5. **Per-cycle stats:** min/max temp, start/end RH, ignition count, current consumption, spike average, motor baseline median
 
-> **Hysteresis explained:** Cycle starts when current rises above ~64% of baseline mean, ends when it drops below ~24%. This handles gas-dryer ignition gaps without splitting a single cycle.
+> **Hysteresis explained:** Cycle starts when current rises above the 0.4 A firmware gate, ends when it drops below ~24% of baseline mean. This handles gas-dryer ignition gaps without splitting a single cycle.
 
 > **Ignition peak detection:** Uses a dynamic state machine (`IDLE → RISING → FALLING`) with a **prominence threshold** of `max(0.5 A, baseline_current_mean × 0.25)`. Small noise fluctuations (e.g., ±0.03 A) are rejected. Real ignition peaks (typically +0.8–1.2 A above motor baseline) are confirmed. The drop length is dynamic — can be 2, 4, 10+ points.
+>
+> **Hysteresis & hard floor (2026-05-05 fix):** To prevent over-counting, a peak is only confirmed when:
+> - `imotor < _peak_max - 0.1` (hysteresis — must drop 0.1 A from peak)
+> - `_peak_max > mean_current + 0.15` (hard floor — peak must exceed mean by at least 0.15 A)
+>
+> Verified against test data: correctly reports 4 ignitions instead of 5.
 
 ### 5.7 Alert System
 
@@ -559,6 +565,26 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 - **Frontend:** `updateMiniCards()` rewritten to use `is_offline`/`has_data` flags instead of `.catch()`.
 - **Frontend:** Added offline badge (`detail-offline-status`) to detail modal header.
 
+### 2026-05-05 — HVAC Calibration Progress Fix, BME280 Hardening, Motor Current Fix, Ignition Count Fix
+- **Firmware (Calibration):** Fixed HVAC calibration progress dashboard sync. Root cause: during calibration (`CALIBBASELINEWAIT` / `CALIBRUNNING`), normal sensor sampling was skipped, so **no MQTT telemetry was published at all**. Backend had no live data and fell back to stale `hvac_readings` (showing wrong `start_tcoil` like 25.9°C instead of actual 20.00°C) with a frozen progress bar.
+  - **Fix:** Firmware now publishes lightweight `calibration_progress` events every ~2.2 s on the existing events topic. Events contain `t3`, `base_t3`, and `delta`.
+  - **Backend:** New `calibration_progress` event handler updates `CALIBRATION_TRACKER` with live `start_tcoil` and `current_tcoil`. `api_calibration_progress` reads from tracker first, with `hvac_readings` as fallback for old firmware.
+- **Firmware (BME280):** Removed false stuck-detection logic (`bmeStuckCounter`) that triggered after only 3 identical samples (~6 s) during normal operation. Removed `recoverI2C()` from the main loop — bit-banging SCL/SDA was corrupting the active I2C bus by leaving SDA in push-pull OUTPUT mode after `Wire.begin()`.
+- **Firmware (BME280):** Simplified BME280 configuration to match the proven `gas_dryer_test` pattern: `MODE_NORMAL, SAMPLING_X2, SAMPLING_X16, SAMPLING_X1, FILTER_X16, STANDBY_MS_62_5`. Removed `Wire.setClock(50000L)` (untested edge case on ESP32-C3).
+- **Firmware (BME280):** Added **10 ms delay between BME register reads** (`readTemperature()` → `delay(10)` → `readHumidity()` → `delay(10)` → `readPressure()`) to prevent I2C transaction collision under FreeRTOS task switching / WiFi ISR preemption.
+- **Firmware (BME280):** Added **3-attempt retry loop** for NaN readings with 50 ms backoff between attempts. Auto-soft-reset (write `0xB6` to reset register + re-init) triggered on 5 consecutive NaN samples.
+- **Firmware (BME280):** Invalid readings now emit **`null`** in JSON instead of `0.0`. Dashboard shows "—" for missing BME data. Added `bmeValidSamples` counter for accurate averaging.
+- **Firmware (Setup):** Moved `setupWifi()` before sensor initialization. DHT warm-up loop (up to 20 s) now runs **only for HVAC**; skipped for dryers. BME init simplified to single `bme.begin(0x76, &Wire)`.
+- **Backend (Motor current):** Fixed `_motor_readings` only appending when `_peak_state == "IDLE"`. The peak state machine could get stuck in "RISING" because the fallback drop threshold (0.1 A) exceeded actual gas dryer motor fluctuation (±0.03 A). Now collects **ALL readings** into `_motor_readings` and filters ignition spikes at runtime with `filter_threshold = average * 1.15`. Motor baseline median is now stable (~3.1 A) across all time ranges.
+- **Backend (Ignition count):** Added hysteresis (`_peak_max - 0.1`) and hard floor (`_peak_max > mean_current + 0.15`) to peak detection. Applied to both v1 (`iot_thesis/app.py`) and v2 (`iot_thesis_v2/app.py`). Verified against `Dryer_Test_20260505_111710.xlsx` — correctly reports 4 ignitions instead of 5.
+
+### 2026-05-05 — Discord Alert System Revision
+- **Discord — Fault-Only Alerts:** Raw SPC breach alerts (`spc_ucl_breach`, `spc_lcl_breach`) are **removed from Discord**. They still insert into the `alerts` table and appear on the dashboard, but they no longer spam the Discord channel.
+- **Discord — `dryer_humidity_high` Removed:** The legacy end-of-cycle humidity alert (`dryer_humidity_high`) is also **removed from Discord**. The more precise `fault_dryer_incomplete_drying` (SPC-based) remains active and is sent to Discord instead.
+- **Discord — Maintenance-Ticket Embeds:** `send_discord_alert()` rewritten with `FAULT_DISCORD_MAP`. Each fault alert now sends a rich embed containing: severity icon + human-readable title, fault description, root cause, and recommended action — formatted like a maintenance work order.
+- **Fault Triggering — Immediate:** Removed the 3-consecutive-cycle confirmation delay from `fault_dryer_roller_wear` and `fault_hvac_dirty_filter`. Both now fire **immediately on first detection** at cycle end. The existing 10-minute cooldown per fault type (`_insert_fault_alert()`) prevents spam without delaying actionable maintenance advice.
+- **Faults Going to Discord (7 types):** `fault_dryer_incomplete_drying`, `fault_dryer_roller_wear`, `fault_dryer_belt_snapped`, `fault_dryer_lint_blockage`, `fault_hvac_dirty_filter`, `fault_hvac_low_refrigerant`, `fault_hvac_compressor_fault`.
+
 ### 2026-05-01 — Dryer Cycle Detection Fix
 - **Backend:** Gap threshold lowered from **600s → 60s** to correctly split separate dryer runs.
 - **Backend:** `cycle_start` decoupled from `threshold_current_min`. Now fixed at **0.4A** (matching firmware running gate) to ensure new cycles can start after gaps.
@@ -625,8 +651,12 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 | Issue | Status | Notes |
 |-------|--------|-------|
 | BME280 completely dead / not detected | **Fixed** | Original sensor failed (no I2C response). Replaced with new 3.3V-native module; sensor now working correctly. |
+| BME280 intermittent NaN during operation | **Mitigated** | Occasionally returns NaN under FreeRTOS task switching / WiFi ISR preemption. Mitigated by 10 ms spacing between register reads, 3-attempt retry, and auto-soft-reset on 5 consecutive NaN. Root cause suspected to be ISR contention with I2C driver. |
 | BME280 reads constant values / abnormal pressure | **Hardware** | Sensor returns identical T/H/P across 10s intervals (e.g., 24.3°C / 67.3% / 707.5 hPa). Early warning sign of sensor failure. Caused by undervoltage, missing pull-ups, or defective sensor. |
 | BME280 reads 182°C / 100% RH / −204 hPa | **Hardware** | Sensor fault — check I2C wiring or replace BME280 |
+| Dryer analytics motor current inconsistent across time ranges | **Fixed** | `_motor_readings` was gated by `_peak_state == "IDLE"`, causing state-machine starvation. Now collects all readings and filters spikes at runtime. |
+| Dryer ignition over-counting | **Fixed** | Added hysteresis (`_peak_max - 0.1`) and hard floor (`_peak_max > mean_current + 0.15`) to peak detection in both v1 and v2. |
+| HVAC calibration progress frozen / wrong start T3 | **Fixed** | Firmware now publishes `calibration_progress` events during calibration. Backend reads from `CALIBRATION_TRACKER` instead of stale `hvac_readings`. |
 | `TESTING_GUIDE.md` untracked | **Git** | Exists in working tree but not committed |
 | Excel export empty data error | **Fixed** | Returns valid `.xlsx` with "No data available" message |
 | Rebaseline button visible before baseline | **Fixed** | Only shown after `baseline_analysis` confirms stats exist |
