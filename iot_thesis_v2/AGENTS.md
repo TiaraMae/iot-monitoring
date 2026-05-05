@@ -82,7 +82,7 @@ Pattern-based fault detection gated behind `baseline_configured = TRUE`. All fau
 **Dryer Faults:**
 | Fault | Trigger | Severity |
 |-------|---------|----------|
-| `fault_dryer_roller_wear` | Per-cycle motor baseline median > UCL at cycle end | Warning |
+| `fault_dryer_roller_wear` | Per-cycle motor baseline median > UCL at cycle end (fires immediately) | Warning |
 | `fault_dryer_belt_snapped` | Per-cycle motor baseline median < LCL at cycle end **OR** cycle aborts via >60s gap with `min_current < LCL` | Critical |
 | `fault_dryer_lint_blockage` | End-of-cycle RH > UCL AND max exhaust temp > UCL | Critical |
 | `fault_dryer_incomplete_drying` | End-of-cycle RH > UCL | Info |
@@ -90,7 +90,7 @@ Pattern-based fault detection gated behind `baseline_configured = TRUE`. All fau
 **HVAC Faults:**
 | Fault | Trigger | Severity |
 |-------|---------|----------|
-| `fault_hvac_dirty_filter` | Min coil temp < LCL during STABLE_ON at cycle end | Warning |
+| `fault_hvac_dirty_filter` | Min coil temp < LCL during STABLE_ON at cycle end (fires immediately) | Warning |
 | `fault_hvac_low_refrigerant` | Min coil temp > UCL (primary) OR peak ΔT < ((UCL + mean) / 2) (confirmatory) during STABLE_ON at cycle end | Critical |
 | `fault_hvac_compressor_fault` | Avg current > UCL during STABLE_ON at cycle end | Critical |
 
@@ -115,20 +115,38 @@ Pattern-based fault detection gated behind `baseline_configured = TRUE`. All fau
 6. If a Discord webhook URL is configured for the user, `send_discord_alert()` fires a rich embed (fire-and-forget).
 
 ### Discord Webhook Alerts (NEW)
-Each user can configure a personal Discord webhook URL. When any alert fires, a rich color-coded embed is sent to that user's Discord channel instantly.
+Each user can configure a personal Discord webhook URL. When a **fault alert** fires, a rich color-coded embed is sent to that user's Discord channel instantly.
 
-**Alert types that trigger Discord:**
-- SPC breaches (`spc_ucl_breach`, `spc_lcl_breach`)
-- Fault alerts (`fault_dryer_*`, `fault_hvac_*`)
-- Dryer humidity alerts (`dryer_humidity_high`)
+**Alert types that trigger Discord (7 fault types only):**
+- `fault_dryer_incomplete_drying`
+- `fault_dryer_roller_wear`
+- `fault_dryer_belt_snapped`
+- `fault_dryer_lint_blockage`
+- `fault_hvac_dirty_filter`
+- `fault_hvac_low_refrigerant`
+- `fault_hvac_compressor_fault`
+
+**Alert types that do NOT trigger Discord (DB/dashboard only):**
+- SPC breaches (`spc_ucl_breach`, `spc_lcl_breach`) — raw data point spam, not actionable
+- Legacy humidity alert (`dryer_humidity_high`) — superseded by `fault_dryer_incomplete_drying`
+
+**Embed format — Maintenance-ticket style:**
+Each Discord embed includes a severity icon + human-readable title, fault description, root cause, and recommended action. Example:
+```
+🔴 Belt Snapped
+Belt snapped — motor baseline 1.20A below LCL 1.60A
+━━━━━━━━━━━━━━━━━━━━
+📍 Appliance: Dryer Test
+🔍 Cause: Age, overloading, or misalignment.
+🔧 Recommended Action: Replace drive belt immediately.
+```
 
 **Embed colors by severity:**
 | Severity | Color | Hex | Alert Types |
 |----------|-------|-----|-------------|
-| Critical | 🔴 Red | `#EF4444` | Belt snapped, lint blockage, low refrigerant, compressor fault, SPC breach |
+| Critical | 🔴 Red | `#EF4444` | Belt snapped, lint blockage, low refrigerant, compressor fault |
 | Warning | 🟠 Orange | `#F59E0B` | Roller wear, dirty filter |
 | Info | 🔵 Blue | `#3B82F6` | Incomplete drying |
-| Humidity | 🟡 Yellow | `#EAB308` | Dryer humidity high |
 
 **Implementation:** `send_discord_alert()` is fire-and-forget. It fetches the user's webhook URL via `get_user_webhook(appliance_id)`, builds the embed, and POSTs via `requests`. Discord failures are logged but never block the DB alert insert.
 
@@ -283,6 +301,26 @@ id | email | password_hash | name | created_at | discord_webhook_url
 ---
 
 ## 8. Changelog
+
+### 2026-05-05 — HVAC Calibration Progress Fix, BME280 Hardening, Motor Current Fix, Ignition Count Fix
+- **Firmware (Calibration):** Fixed HVAC calibration progress dashboard sync. During calibration (`CALIBBASELINEWAIT` / `CALIBRUNNING`), normal sampling was skipped so no telemetry was published. Backend had no live data and used stale DB readings, causing frozen progress and wrong `start_tcoil`.
+  - **Fix:** Firmware publishes `calibration_progress` events every ~2.2 s containing `t3`, `base_t3`, and `delta`.
+  - **Backend:** New event handler updates `CALIBRATION_TRACKER` with live values. `api_calibration_progress` reads from tracker first.
+- **Firmware (BME280):** Removed false stuck-detection logic (`bmeStuckCounter`) that triggered after only 3 identical samples (~6 s) during normal operation. Removed `recoverI2C()` from the main loop — bit-banging SCL/SDA was corrupting the active I2C bus by leaving SDA in push-pull OUTPUT mode after `Wire.begin()`.
+- **Firmware (BME280):** Simplified BME280 configuration to match the proven `gas_dryer_test` pattern: `MODE_NORMAL, SAMPLING_X2, SAMPLING_X16, SAMPLING_X1, FILTER_X16, STANDBY_MS_62_5`. Removed `Wire.setClock(50000L)` (untested edge case on ESP32-C3).
+- **Firmware (BME280):** Added **10 ms delay between BME register reads** to prevent I2C transaction collision under FreeRTOS task switching / WiFi ISR preemption.
+- **Firmware (BME280):** Added **3-attempt retry loop** for NaN readings with 50 ms backoff. Auto-soft-reset (write `0xB6` to reset register + re-init) on 5 consecutive NaN samples.
+- **Firmware (BME280):** Invalid readings now emit **`null`** in JSON instead of `0.0`. Dashboard shows "—" for missing BME data. Added `bmeValidSamples` counter for accurate averaging.
+- **Firmware (Setup):** Moved `setupWifi()` before sensor initialization. DHT warm-up loop (up to 20 s) now runs **only for HVAC**; skipped for dryers. BME init simplified to single `bme.begin(0x76, &Wire)`.
+- **Backend (Motor current):** Fixed `_motor_readings` only appending when `_peak_state == "IDLE"`. The peak state machine could get stuck in "RISING" because the fallback drop threshold (0.1 A) exceeded actual gas dryer motor fluctuation (±0.03 A). Now collects **ALL readings** into `_motor_readings` and filters ignition spikes at runtime with `filter_threshold = average * 1.15`. Motor baseline median is now stable (~3.1 A) across all time ranges.
+- **Backend (Ignition count):** Added hysteresis (`_peak_max - 0.1`) and hard floor (`_peak_max > mean_current + 0.15`) to peak detection. Verified against `Dryer_Test_20260505_111710.xlsx` — correctly reports 4 ignitions instead of 5.
+
+### 2026-05-05 — Discord Alert System Revision
+- **Discord — Fault-Only Alerts:** Raw SPC breach alerts (`spc_ucl_breach`, `spc_lcl_breach`) are **removed from Discord**. They still insert into the `alerts` table and appear on the dashboard, but they no longer spam the Discord channel.
+- **Discord — `dryer_humidity_high` Removed:** The legacy end-of-cycle humidity alert (`dryer_humidity_high`) is also **removed from Discord**. The more precise `fault_dryer_incomplete_drying` (SPC-based) remains active and is sent to Discord instead.
+- **Discord — Maintenance-Ticket Embeds:** `send_discord_alert()` rewritten with `FAULT_DISCORD_MAP`. Each fault alert now sends a rich embed containing: severity icon + human-readable title, fault description, root cause, and recommended action — formatted like a maintenance work order.
+- **Fault Triggering — Immediate:** Removed the 3-consecutive-cycle confirmation delay from `fault_dryer_roller_wear` and `fault_hvac_dirty_filter`. Both now fire **immediately on first detection** at cycle end. The existing 10-minute cooldown per fault type (`_insert_fault_alert()`) prevents spam without delaying actionable maintenance advice.
+- **Faults Going to Discord (7 types):** `fault_dryer_incomplete_drying`, `fault_dryer_roller_wear`, `fault_dryer_belt_snapped`, `fault_dryer_lint_blockage`, `fault_hvac_dirty_filter`, `fault_hvac_low_refrigerant`, `fault_hvac_compressor_fault`.
 
 ### 2026-05-04 — Bug Fixes & Security Hardening
 - **Security:** Removed hardcoded credential defaults from `app.py`. Added `python-dotenv` loading. App raises `RuntimeError` on startup if `FLASK_SECRET_KEY`, `MQTT_PASS`, or `DB_PASSWORD` is missing. Local `.env` file (gitignored) is now required.
