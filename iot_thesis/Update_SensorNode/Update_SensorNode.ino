@@ -752,6 +752,16 @@ void handleCalibrationState() {
     Serial.print(calibBaseT2, 2);
     Serial.print(" T3=");
     Serial.println(calibBaseT3, 2);
+
+    String calibEv =
+      "{"
+        "\"mac\":\"" + deviceMac + "\","
+        "\"event\":\"calibration_progress\","
+        "\"t3\":" + jnum(calibBaseT3, 2) + ","
+        "\"base_t3\":" + jnum(calibBaseT3, 2) + ","
+        "\"delta\":0.00"
+      "}";
+    publishEventJson(calibEv);
     return;
   }
 
@@ -763,6 +773,16 @@ void handleCalibrationState() {
   Serial.print(calibDeltaT, 2);
   Serial.print(" need=");
   Serial.println(CALIB_REQUIRED_DELTA_T, 2);
+
+  String calibEv =
+    "{"
+      "\"mac\":\"" + deviceMac + "\","
+      "\"event\":\"calibration_progress\","
+      "\"t3\":" + jnum(p.t3, 2) + ","
+      "\"base_t3\":" + jnum(calibBaseT3, 2) + ","
+      "\"delta\":" + jnum(calibDeltaT, 2) +
+    "}";
+  publishEventJson(calibEv);
 
   if (calibDeltaT >= CALIB_REQUIRED_DELTA_T) {
     calibFinalT1 = p.t1;

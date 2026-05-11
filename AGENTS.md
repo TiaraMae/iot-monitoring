@@ -245,19 +245,22 @@ LED shows the **highest-priority** active state:
 | `baselinesuccessack` | 3 short beeps |
 | `baselinefailack` | 2 long beeps (900 ms) |
 | `calibrationsuccessack` | 3 short beeps |
+| `startcalibration` | 1 short beep |
 | `maintenancedenied` | 1 long beep (1500 ms) |
 | Pairing success | 1 short beep |
 | Pairing cleared | 1 long beep |
 
+> **Note:** Button 2 5s hold (HVAC calibration request) is **silent** — no local beep. The only audible feedback is the `startcalibration` ack from the backend (1 short beep).
+
 ### 4.8 Data Gating & Running Status
-- Firmware **always** includes `"status":"running"` or `"status":"idle"` in telemetry based on `avgCurrent >= 0.4 A`.
-- Telemetry is **only published** when `lastAvgCurrent >= 0.4 A` (running). Idle samples are discarded, not buffered.
+- Firmware **always** includes `"status":"running"` or `"status":"idle"` in telemetry based on `avgCurrent >= 0.25 A`.
+- Telemetry is **only published** when `lastAvgCurrent >= 0.25 A` (running). Idle samples are discarded, not buffered.
 - Idle periods update `last_seen` via periodic `checkin` events (see §4.9).
 
 ### 4.9 Checkin / Offline Indicator System
 To distinguish "device offline" from "device alive but idle":
 
-- **Checkin event:** Node publishes `{"mac":"...","event":"checkin"}` every **10 minutes** when idle (`lastAvgCurrent < 0.4 A`).
+- **Checkin event:** Node publishes `{"mac":"...","event":"checkin"}` every **10 minutes** when idle (`lastAvgCurrent < 0.25 A`).
 - **Immediate checkin:** Node also sends a checkin immediately upon receiving `restore:normal` from the backend (after power-cycle reconnect).
 - **Backend logic:** `api_device_latest` returns `is_offline = true` if `last_seen` is older than 10 minutes. Returns `has_data = false` if no telemetry readings exist yet.
 - **Frontend display:**
@@ -531,7 +534,7 @@ The following can be set in a `.env` file (see `.env.example`):
 
 11. **The ESP32-C3 has limited RAM.** The offline queue (`MAX_QUEUE_SIZE = 200`) and string operations must not be increased without checking heap availability.
 
-12. **Firmware only sends running telemetry.** Idle samples (`current < 0.4 A`) are discarded, not buffered. Do not expect idle data in the readings tables.
+12. **Firmware only sends running telemetry.** Idle samples (`current < 0.25 A`) are discarded, not buffered. Do not expect idle data in the readings tables.
 
 13. **`api_device_latest` must return HTTP 200 for all states.** Do not return 404 for missing data — the frontend relies on `is_offline` and `has_data` flags.
 
@@ -553,6 +556,72 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 
 ## 10. Recent Changes & Changelog
 
+### 2026-05-10 — Calendar Date Picker + Auto-Format Time Input (v2 Frontend)
+- **Change:** Replaced free-text date/time inputs in History Range and Export Modal with a 3-part picker: calendar `type="date"`, auto-format time text, and AM/PM dropdown.
+- **Time auto-format:** Typing digits automatically inserts colons (`092534` → `09:25:34`). Only digits accepted; max 8 chars (`HH:MM:SS`).
+- **AM/PM conversion:** Frontend converts 12-hour time + AM/PM selection to 24-hour ISO format (`YYYY-MM-DDTHH:MM:SS`) before sending to backend.
+- **Fields updated:** History Range start/end, Export Modal start/end — 4 datetime fields total.
+- **Removed:** `normalizeDateTimeInput()` (old free-text parser) and `formatLocalForInput()` (old `toLocaleString()` formatter).
+
+### 2026-05-10 — DHT NaN Corruption Fix + Infinite False Telemetry Fix (v2 Firmware)
+- **DHT NaN Problem:** DHT22 intermittently returns NaN (~40% failure rate observed for DHT2). The old code mapped NaN → 0 before adding to the running sum, then divided by `MAX_SAMPLES` regardless of validity. When 2 of 5 samples were NaN, the average was corrupted (e.g., 14.7°C → 8.8°C).
+- **DHT Fix:** Added per-metric valid counters (`validDHT1T`, `validDHT2T`, etc.) decoupled from `sampleCount` timing. Averages are computed as `sum / validCount`. If `validCount == 0`, the metric falls back to its last-known-good value (previous window's average). This skips bad samples without corrupting averages or changing publish cadence.
+- **Infinite Telemetry Problem:** When the compressor turned off and `currentVal == 0.0` for a full window, `validCurrentA` became 0. The `lastGoodCurrentA` fallback (stale 3.1A from last running window) was used for the average. Since `lastGoodCurrentA` was never updated when `validCurrentA == 0`, this produced false running telemetry **every 10 seconds indefinitely** while the LED showed idle.
+- **Telemetry Fix:** Removed `lastGoodCurrentA` fallback for current. Current is the most reliable sensor (ADC). If all 5 samples are 0.0, the true average is **0.0**. Also moved `lastAvgCurrent = currentVal` outside the `if` block so it updates unconditionally, ensuring the LED correctly reflects idle when current is 0.
+
+### 2026-05-10 — Interrupt WDT Timeout Fix + Current Threshold Lowered + Buzzer Hardening (v2 Firmware)
+- **Problem:** `Core 0 panic'ed (Interrupt wdt timeout on CPU0)` crash ~10 seconds after telemetry during normal running. Previous `yield()` fixes were insufficient on the single-core ESP32-C3.
+- **Root cause:** `loop()` blocked for too long during DS18B20 conversion (750 ms), DHT reads (~4–5 ms each, with disabled interrupts), and 200 ms ADC sampling. ISRs (WiFi, MQTT) were starved, triggering the Interrupt Watchdog (~300 ms timeout).
+- **Fix:**
+  - Replaced all `yield()` calls with `delay(1)` at critical blocking points. `delay(1)` forces FreeRTOS context switch, guaranteeing ISR servicing. `yield()` does not when the calling task is highest priority.
+  - Added `esp_task_wdt_reset()` at the start of `loop()` and inside the 200 ms ADC sampling loop (every 25 reads) and DS18B20 wait loop.
+  - DS18B20 changed to non-blocking: `setWaitForConversion(false)` in setup, replaced blocking `requestTemperatures()` with `requestTemperatures()` + yielding 750 ms wait loop.
+  - Buffer flush capped at **10 messages per loop** to prevent long blocking during MQTT publish of large offline queues.
+- **Current threshold lowered:** 0.4 A → **0.25 A** across all 6 usages in firmware (telemetry gating, LED, status, checkin, BME280 stuck detection).
+- **Buzzer UX:** Button 2 5s hold (HVAC calibration request) is now **silent** — no local beep. The only audible feedback is the `startcalibration` ack from the backend (1 short beep).
+
+### 2026-05-07 — Live vs Historical Ignition Count Unification (v2)
+- **Problem:** Live auto-update and historical analytics showed **different ignition spike counts** for the same dryer cycle. Live under-counted spikes (e.g., 3 vs 4) due to a stuck FALLING state in the real-time state machine.
+- **Root cause:** Two completely different spike detection algorithms. Live used `current - prev > prominence` for entry and `current <= mean + 0.15` for confirmation — the latter never fired when motor baseline (~3.05 A) stayed above the threshold. Historical used `current > prev` for entry and confirmed peaks at cycle end / next rise.
+- **Fix (v2 only):** Unified live spike state machine to match historical exactly — entry on any rise, confirm-before-new-rise in FALLING, cycle-end confirmation in `_finalize_dryer_cycle()`. First reading now skipped for spike detection (matching historical). Motor readings collection now gathers all cycle data and filters at cycle end.
+- **Result:** Live and historical ignition counts are now identical for all baseline configurations.
+
+### 2026-05-07 — Dryer Ignition Prominence Threshold Lowered to 0.4A (v2)
+- **Change:** Prominence threshold changed from dynamic `max(0.35, mean_current * 0.20)` to fixed **0.4A**.
+- **Why:** User visually identified 5 spikes but algorithm counted only 3–4. Dynamic formula produced 0.50–0.56A thresholds, filtering borderline bumps.
+- **Effect:** Cycle 2 now counts 4 spikes (3.62A bump included). 3.45A bump (0.39A prom) remains just below threshold.
+- **Risk:** Very low — motor noise is ±0.03A, 0.4A is >10× above noise floor.
+
+### 2026-05-07 — Cycle-End _confirm_peak() Ordering Bug Fix (v2)
+- **Problem:** Live Auto-Update showed **3 ignitions** while History Range showed **4 ignitions** for the same cycle. All algorithm unification and threshold fixes had been applied.
+- **Root cause:** In `dryer_analytics()`, the 3 cycle-finalization paths had inconsistent `_confirm_peak()` ordering. Gap and current-drop paths called `_confirm_peak()` **after** `ignition_count` was computed, so pending spikes were confirmed too late. End-of-data path called it **before** — correct.
+- **Fix:** Moved `_confirm_peak()` to before `current_spike_avg` and `ignition_count` in both gap and current-drop paths. All 3 paths now confirm pending spikes before computing stats.
+- **Result:** Live and history range counts are guaranteed identical.
+
+### 2026-05-07 — BME280 Infinite Reset Loop Fix + Hardening (v2 Firmware)
+- **Problem:** BME280 readings froze for ~70 seconds, then produced garbage spikes (e.g., 86.7°C). When a wire became loose, the firmware entered an **infinite reset loop** — out-of-range triggered a soft reset every 2 seconds, but the wire was still loose, so the next reading was also garbage, triggering another reset.
+- **Root cause analysis:**
+  1. **Initialization:** v2 firmware had no error check on `bme.begin()` and no stabilization delays between `begin()` and `setSampling()`. Sensor could initialize into undefined state.
+  2. **I2C bus instability:** Default 400kHz I2C clock + 10ms inter-register delays were marginal under WiFi interrupt load.
+  3. **No stuck-value recovery:** Old `bmeStuckCounter` was removed (false positives). But sensor DOES lock up — returning identical cached values for many samples. NaN-based soft reset never triggered because values were not NaN.
+  4. **Immediate reset on any bad reading:** Out-of-range and stuck detectors triggered a soft reset on the **first** bad reading, with no cooldown. A loose wire caused an infinite 2-second reset loop.
+- **Fix:**
+  - **Error check + delays:** Added `if (!bme.begin(...))` + `delay(100)` after begin + `delay(50)` after `setSampling()`.
+  - **I2C slowdown:** `Wire.setClock(100000L)` reduces clock from 400kHz → 100kHz for stability.
+  - **Inter-register delays:** Increased from 10ms → 50ms between `readTemperature()` / `readHumidity()` / `readPressure()`.
+  - **Stuck-value detection:** If temp+hum+pres are identical for 15 consecutive valid samples **while the dryer is running** (`lastAvgCurrent >= 0.25`) → soft reset (with 5s cooldown). Counter resets when idle to avoid false positives in stable ambient conditions.
+  - **Out-of-range detection:** If temp > 85°C or pressure < 800hPa → counts up (1/15, 2/15, ...). Requires **15 consecutive** bad readings before reset. Also added lower bounds: temp < -40°C or pressure > 1100 hPa.
+  - **Reset cooldown:** All three reset paths (NaN, stuck, out-of-range) now enforce a **minimum 5-second cooldown** between soft resets. This breaks the infinite loop.
+  - **Diagnostic logging:** All three paths now log the actual `T=%.1f H=%.1f P=%.1f` values that triggered the condition, making it easy to distinguish I2C timeout (`0.0/0.0/0.0`) from garbage (`86.7/100.0/722.1`) from stuck values.
+  - **Unified soft-reset helper:** Extracted reset logic into reusable lambda called by NaN, stuck, and out-of-range paths.
+- **Hardware note:** Software mitigations help but cannot fully compensate for missing I2C pull-up resistors (4.7kΩ) or missing decoupling capacitor (100nF). These hardware fixes are strongly recommended.
+
+### 2026-05-07 — LED TX Flash Removed (v2 Firmware)
+- **Problem:** When the appliance was running, the LED should be solid ON, but a small super-fast blink was visible every 10 seconds during MQTT telemetry transmission.
+- **Root cause:** `publishEventJson()` and `publishTelemetry()` both explicitly toggled the LED OFF → publish → `delay(30)` → LED ON, creating a "TX activity flash." This overrode the LED state machine, which already sets solid ON for running state.
+- **Fix:** Removed all `digitalWrite(PINLED, ...)` calls and `delay(30)` from both publish functions. The LED state machine is now the single source of truth for LED behavior.
+- **Result:** LED stays perfectly solid when running, with no flicker during transmissions.
+
 ### 2026-04-27 — Checkin / Offline Indicator Fix
 - **Firmware:** Moved checkin timer from `beepShort()` to `loop()` (critical bug fix).
 - **Firmware:** Added `publishCheckin()` helper; sends immediate checkin on `restore:normal`.
@@ -564,6 +633,36 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 - **Frontend:** Dryer cycle analytics Start/End columns now show full date+time (`toLocaleString`).
 - **Frontend:** `updateMiniCards()` rewritten to use `is_offline`/`has_data` flags instead of `.catch()`.
 - **Frontend:** Added offline badge (`detail-offline-status`) to detail modal header.
+
+### 2026-05-07 — Live Chart Buffered Data Refresh
+- **Problem:** When offline-buffered data arrived while the dashboard stayed open, the live chart showed gaps (e.g., 3:25:14 → 3:26:14) instead of the buffered points that should fill the gap. After a manual page refresh, the chart rendered correctly.
+- **Root cause:** `initCharts()` was called immediately on reconnect, before the backend had finished inserting all buffered MQTT messages. The buffered points that arrived after `initCharts()` completed were dropped by `pushToCharts()` because they were >5 seconds older than `latestChartTimeMs`.
+- **Fix:**
+  - On reconnect, `initCharts()` now runs after a **1.5-second delay** (`setTimeout`) to let the backend finish inserting buffered rows.
+  - Added gap/backward detection in `updateDetailData()`: if a live point is >10 seconds older than `latestChartTimeMs` (late-arriving buffered data) or the gap since the last point is >30 seconds (offline period), `initCharts()` is triggered to reload history.
+  - Widened `pushToCharts()` backward guard from 5 seconds → 30 seconds as secondary safety net.
+
+### 2026-05-06 — Idle Badge Delay Fix, Empty Charts Race Condition Fix
+- **Idle Badge Delay:** `updateDetailData()` was called before the modal overlay was active, causing its early-exit guard to fire silently. The badge only appeared when the global 5-second interval fired. Fixed by activating the modal **before** calling `updateDetailData()` in `openDeviceDetail()`.
+- **Empty Charts Race Condition:** After the badge fix, `updateDetailData()` ran concurrently with `initCharts()`'s async history fetch. Live data pushed to charts set `latestChartTimeMs` to the newest timestamp, causing all subsequent history data points to be skipped (they were older). Added `historyLoading` flag: set `true` when `initCharts()` starts, cleared when history fetch completes. `updateDetailData()` only pushes to charts when `!historyLoading`.
+
+### 2026-05-06 — Energy kWh Integration, HVAC Analytics Daily Report, Date Input Auto-Format, HVAC Fault Alert Refinement
+- **Energy kWh:** Replaced raw current sum with proper kWh calculation (`energy_ws = Σ(current × voltage × dt) / 3,600,000`). Added `appliances.voltage` column (default 220V for Indonesia). Added `get_appliance_voltage()` helper.
+- **Dryer Analytics:** Per-cycle `energy_kwh` computed using actual time deltas between readings. Table column renamed from `Consumption (A)` to `Energy (kWh)`.
+- **HVAC Analytics:** Added daily averages with integrated daily energy consumption. Backend detects cycles per day and sums energy across all cycles within that day. Returns `{"daily_averages": [...]}` only — per-cycle table removed from frontend per user request.
+- **Date/Time Inputs:** Changed 4 inputs from `datetime-local` → `text` with `formatDateTimeInput()` (digits-only typing, auto-inserts `-`, `:`, and spaces) and `normalizeDateTimeInput()` (parses `DD-MM-YYYY HH:MM:SS` → ISO).
+
+### 2026-05-07 — History Range Input Copy-Paste Friendly
+- **Problem:** Analytics tables display dates as `toLocaleString()` (e.g., `"5/7/2026, 4:26:35 PM"`), but history/export inputs forced `DD-MM-YYYY HH:MM:SS` via a digit-only formatter. Users could not copy-paste dates from the analytics table into the history range fields.
+- **Fix:**
+  - Removed `oninput="formatDateTimeInput(this)"` from history and export inputs — free-text paste is now allowed.
+  - Updated placeholders to `"M/D/YYYY, H:MM:SS AM/PM"`.
+  - Extended `normalizeDateTimeInput()` to parse `toLocaleString()` format (`M/D/YYYY, H:MM:SS AM/PM` → ISO) with correct AM/PM conversion (12 PM → 12, 12 AM → 0).
+  - Updated `formatLocalForInput()` to use `toLocaleString('en-US', { hour12: true })` so default export dates also match the format.
+  - Backward-compatible: existing `DD-MM-YYYY HH:MM:SS`, `DD-MM-YY HH:MM:SS`, and `YYYY-MM-DD HH:MM:SS` entries still work.
+- **HVAC Fault Alerts:** Changed from cycle-end evaluation to **3 consecutive readings** in `STABLE_ON` state. Reduced `STABLE_ON` gate from 10 min → **7 min** (`elapsed >= 420`). Added `HVAC_FAULT_COUNTERS` dict with per-reading `_evaluate_hvac_reading()`.
+- **Time-Range Query Fix:** Padded `end` parameter by +1 second in `hvac_analytics()` and `dryer_analytics()` to include milliseconds. Fixes issue where a cycle end time copied from the UI (seconds precision) would exclude the actual DB reading (microsecond precision).
+- **Frontend DOM Cleanup:** Removed stale `<div>` insertion before `<tbody>` that caused "Daily Averages" ghost header to leak into dryer view. Fixed empty-state checks for HVAC object response.
 
 ### 2026-05-05 — HVAC Calibration Progress Fix, BME280 Hardening, Motor Current Fix, Ignition Count Fix
 - **Firmware (Calibration):** Fixed HVAC calibration progress dashboard sync. Root cause: during calibration (`CALIBBASELINEWAIT` / `CALIBRUNNING`), normal sensor sampling was skipped, so **no MQTT telemetry was published at all**. Backend had no live data and fell back to stale `hvac_readings` (showing wrong `start_tcoil` like 25.9°C instead of actual 20.00°C) with a frozen progress bar.
@@ -584,6 +683,13 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 - **Discord — Maintenance-Ticket Embeds:** `send_discord_alert()` rewritten with `FAULT_DISCORD_MAP`. Each fault alert now sends a rich embed containing: severity icon + human-readable title, fault description, root cause, and recommended action — formatted like a maintenance work order.
 - **Fault Triggering — Immediate:** Removed the 3-consecutive-cycle confirmation delay from `fault_dryer_roller_wear` and `fault_hvac_dirty_filter`. Both now fire **immediately on first detection** at cycle end. The existing 10-minute cooldown per fault type (`_insert_fault_alert()`) prevents spam without delaying actionable maintenance advice.
 - **Faults Going to Discord (7 types):** `fault_dryer_incomplete_drying`, `fault_dryer_roller_wear`, `fault_dryer_belt_snapped`, `fault_dryer_lint_blockage`, `fault_hvac_dirty_filter`, `fault_hvac_low_refrigerant`, `fault_hvac_compressor_fault`.
+
+### 2026-05-07 — Offline/Online Status Fix, Debug Print Cleanup, BME280 Threshold Finalization
+- **Backend:** Added `ever_connected` flag to `api_device_latest` response. Frontend now distinguishes between a device that was **never connected** (yellow "Awaiting Sensor Data...") and a device that **went offline after previously connecting** (red "Device Offline").
+- **Backend:** Increased `offline_threshold_seconds` from **600s → 660s** (11 minutes). Checkin interval is 600s (10 min); the extra 60s prevents idle devices from flickering offline between checkins.
+- **Backend:** Removed 7 temporary `[DRYER_ANALYTICS]` debug print statements from `dryer_analytics()`.
+- **Firmware (BME280):** Raised stuck-value and out-of-range thresholds from 5 → **15 consecutive readings** before triggering soft reset. Prevents premature resets during normal transient conditions.
+- **Firmware (BME280):** Stuck-value detection now only active when running (`lastAvgCurrent >= 0.4`). Counter resets when idle to avoid false positives in stable exhaust duct conditions.
 
 ### 2026-05-01 — Dryer Cycle Detection Fix
 - **Backend:** Gap threshold lowered from **600s → 60s** to correctly split separate dryer runs.
@@ -652,7 +758,7 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 |-------|--------|-------|
 | BME280 completely dead / not detected | **Fixed** | Original sensor failed (no I2C response). Replaced with new 3.3V-native module; sensor now working correctly. |
 | BME280 intermittent NaN during operation | **Mitigated** | Occasionally returns NaN under FreeRTOS task switching / WiFi ISR preemption. Mitigated by 10 ms spacing between register reads, 3-attempt retry, and auto-soft-reset on 5 consecutive NaN. Root cause suspected to be ISR contention with I2C driver. |
-| BME280 reads constant values / abnormal pressure | **Hardware** | Sensor returns identical T/H/P across 10s intervals (e.g., 24.3°C / 67.3% / 707.5 hPa). Early warning sign of sensor failure. Caused by undervoltage, missing pull-ups, or defective sensor. |
+| BME280 reads constant values / abnormal pressure | **Mitigated** | Sensor lockup returning identical values or garbage spikes (86.7°C, <800 hPa). Mitigated by I2C slowdown (100kHz), stuck-value detection (5 identical → soft reset), out-of-range detection, and 50ms inter-register delays. Hardware pull-ups (4.7kΩ) + decoupling cap (100nF) still strongly recommended. |
 | BME280 reads 182°C / 100% RH / −204 hPa | **Hardware** | Sensor fault — check I2C wiring or replace BME280 |
 | Dryer analytics motor current inconsistent across time ranges | **Fixed** | `_motor_readings` was gated by `_peak_state == "IDLE"`, causing state-machine starvation. Now collects all readings and filters spikes at runtime. |
 | Dryer ignition over-counting | **Fixed** | Added hysteresis (`_peak_max - 0.1`) and hard floor (`_peak_max > mean_current + 0.15`) to peak detection in both v1 and v2. |

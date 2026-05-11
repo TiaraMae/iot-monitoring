@@ -381,7 +381,7 @@ Supports both HVAC and Dryer modes. Appliance type is set by the backend during 
 - Calibration state machine for HVAC units
 - Automatic Wi-Fi and MQTT reconnection with LED status indication
 - Buzzer feedback for user actions
-- **Telemetry gating:** Only transmits when appliance current ≥ 0.4 A (running). Idle samples are discarded, not buffered.
+- **Telemetry gating:** Only transmits when appliance current ≥ 0.25 A (running). Idle samples are discarded, not buffered.
 
 ### PCB Validation Test Node (`gas_dryer_test/esp32dryertest/`)
 
@@ -434,7 +434,7 @@ This section describes the complete end-to-end data flow from physical sensors t
 
 **Data Flow Summary:**
 1. **Sensor Node** reads sensors every 2 seconds. After 5 samples (10 seconds), it computes averages.
-2. If average current ≥ 0.4 A, the node builds a JSON telemetry payload including `"status":"running"` and publishes via MQTT. If current < 0.4 A, samples are discarded (idle state).
+2. If average current ≥ 0.25 A, the node builds a JSON telemetry payload including `"status":"running"` and publishes via MQTT. If current < 0.25 A, samples are discarded (idle state).
 3. If Wi-Fi or MQTT is down, running samples are queued in a 200-slot FIFO buffer and flushed on reconnect.
 4. **HiveMQ Cloud** relays the message to the Flask backend via TLS on port 8883.
 5. **Backend** (`on_mqtt_message`) parses the JSON, corrects timestamps via `ago_ms`, deduplicates rapid messages, and gates database inserts: only `"running"` data is inserted; idle data only updates `last_seen`.
@@ -471,7 +471,7 @@ This section describes the complete end-to-end data flow from physical sensors t
 
 ### Firmware Upload
 
-1. Open `iot_thesis/Update_SensorNode/Update_SensorNode.ino` in Arduino IDE.
+1. Open `iot_thesis_v2/Update_SensorNode/Update_SensorNode.ino` in Arduino IDE (active development version).
 2. Select **Board:** ESP32C3 Dev Module.
 3. Set `WIFI_SSID` and `WIFI_PASSWORD` in the firmware (or use a separate `secrets.h`).
 4. Set `MQTT_BROKER`, `MQTT_PORT` (8883), `MQTT_USER`, and `MQTT_PASS` for HiveMQ Cloud.
@@ -619,8 +619,8 @@ Every 2 seconds, `loop()` calls `readSensors()`:
 
 When `sampleCount >= MAX_SAMPLES` (5):
 - Computes `lastAvgCurrent = sumCurrentA / MAX_SAMPLES`.
-- **If `lastAvgCurrent >= 0.4 A`:** builds telemetry payload and publishes.
-- **If `lastAvgCurrent < 0.4 A`:** calls `resetAverages()` and discards all samples.
+- **If `lastAvgCurrent >= 0.25 A`:** builds telemetry payload and publishes.
+- **If `lastAvgCurrent < 0.25 A`:** calls `resetAverages()` and discards all samples.
 
 ### Current Measurement
 
@@ -638,7 +638,7 @@ float readCurrentIrms() {
 ```
 
 - **HVAC (ZHT103C):** `cf = 11.0`, `deductor = 0.033`
-- **Dryer (SCT-013):** `cf = 37.0`, `deductor = 0.111`
+- **Dryer (SCT-013):** `cf = 30.0`, `deductor = 0.111`
 
 ### Telemetry Payload Format
 
@@ -655,7 +655,7 @@ float readCurrentIrms() {
 }
 ```
 
-The `status` field is always included and is determined by `avgCurrent >= 0.4`.
+The `status` field is always included and is determined by `avgCurrent >= 0.25`.
 
 ### Offline Buffering
 
@@ -779,8 +779,8 @@ Collapsible panel with:
 | 2 | Baselining active | Alternating fast (200 ms) / slow (1000 ms) blink |
 | 3 | Wi-Fi disconnected | Fast blink, 200 ms period |
 | 4 | MQTT disconnected | Medium blink, 500 ms period |
-| 5 | Running (current ≥ 0.4 A) | Solid ON |
-| 6 | Idle (current < 0.4 A) | Brief blink every 10 seconds |
+| 5 | Running (current ≥ 0.25 A) | Solid ON |
+| 6 | Idle (current < 0.25 A) | Brief blink every 10 seconds |
 
 ### Buzzer Sounds
 
@@ -789,6 +789,7 @@ Collapsible panel with:
 | `baselinestartack` received | 2 short beeps |
 | `baselinesuccessack` received | 3 short beeps |
 | `baselinefailack` received | 2 long beeps |
+| `startcalibration` received | 1 short beep |
 | `calibrationsuccessack` received | 3 short beeps |
 | Connection down (Wi-Fi or MQTT) | 1 beep every 10 seconds |
 
@@ -836,7 +837,7 @@ Collapsible panel with:
 **Objective:** Verify baseline completes successfully.
 
 **HVAC Steps:**
-1. Start appliance. Confirm current ≥ 0.4 A.
+1. Start appliance. Confirm current ≥ 0.25 A.
 2. In dashboard, click **Start Baseline Recording**.
 3. Confirm node beeps twice and LED alternates fast/slow.
 4. Keep appliance running for 15 minutes.
@@ -968,8 +969,30 @@ Collapsible panel with:
 - ✅ **BME280 null telemetry** — Invalid readings emit `null` instead of `0.0`; dashboard shows "—" for missing data.
 - ✅ **Dryer analytics motor current fix** — Collects all readings regardless of peak state; filters spikes at runtime with `filter_threshold = average * 1.15`. Motor baseline median now stable (~3.1 A).
 - ✅ **Dryer ignition count fix** — Added hysteresis (`_peak_max - 0.1`) and hard floor (`_peak_max > mean_current + 0.15`) to prevent over-counting gas ignitions. Applied to v1 and v2.
+- ✅ **Live vs Historical Ignition Unification (v2)** — Live `_check_dryer_faults()` and historical `dryer_analytics()` used completely different spike detection algorithms, causing live to under-count. Unified to identical 3-state logic with cycle-end confirmation.
+- ✅ **Prominence Threshold Fixed to 0.4A (v2)** — Replaced dynamic `max(0.35, mean*0.20)` with fixed 0.4A threshold. Cycle 2 now counts 4 spikes (was 3).
+- ✅ **Frontend Cache Fix (v2)** — Added cache-busting (`_t=Date.now()`) to analytics fetch and `updateDataTable()` refresh on live mode switch. Prevents stale cached data from showing different counts.
+- ✅ **Cycle-End Ordering Bug Fix (v2)** — Fixed `dryer_analytics()` gap/current-drop paths where `_confirm_peak()` was called AFTER `ignition_count` was computed, causing pending spikes to be missed. All 3 finalization paths now confirm before counting.
+- ✅ **BME280 Infinite Reset Loop Fix + Hardening (v2 Firmware)** — Added error check on `bme.begin()` and stabilization delays. Reduced I2C clock to 100kHz. Increased inter-register delays to 50ms. Added stuck-value detection (15 identical readings **while running** → soft reset), out-of-range detection (15 consecutive impossible readings → soft reset), and 5-second reset cooldown across all paths. Diagnostic logging of actual T/H/P values. Prevents infinite reset loops when wires are loose.
+- ✅ **LED TX Flash Removed (v2 Firmware)** — Removed LED toggle from `publishEventJson()` and `publishTelemetry()`. LED state machine is now the single source of truth; LED stays perfectly solid ON during running state with no flicker during MQTT transmissions.
+- ✅ **Energy kWh Integration** — Proper kWh calculation using `current × voltage × dt` for both HVAC daily totals and dryer per-cycle consumption. Added `appliances.voltage` column (default 220V).
+- ✅ **HVAC Analytics Daily Report** — Daily averages with integrated daily energy consumption (kWh). Backend detects cycles per day and sums energy across all cycles within that day.
+- ✅ **Dryer Analytics Energy Column** — Per-cycle energy (kWh) replacing raw current sum, using actual time deltas between readings.
+- ✅ **Date/Time Input Auto-Format** — Custom text inputs with digits-only typing and automatic `-` / `:` insertion. Parses `DD-MM-YYYY HH:MM:SS` to ISO for backend queries.
+- ✅ **HVAC Fault Alert Refinement** — 3 consecutive reading confirmation in 7-minute STABLE_ON window for dirty filter, low refrigerant, and compressor fault.
+- ✅ **Idle Badge Delay Fix** — Modal now activates before `updateDetailData()` runs, so the status badge (Idle/Running) appears immediately instead of waiting 5 seconds for the global interval.
+- ✅ **Empty Charts Race Condition Fix** — Added `historyLoading` flag to prevent live data from being pushed to charts before `initCharts()` finishes loading history. Fixes empty charts on first open and reopen.
+- ✅ **Time-Range Query Fix** — Padded `end` parameter by +1 second to include milliseconds, fixing cycle end-time mismatch when copying timestamps from the UI.
+- ✅ **Frontend DOM Cleanup** — Fixed "Daily Averages" ghost header leaking into dryer view; removed invalid `<div>` insertion inside `<table>`.
 - ✅ **HVAC calibration progress fix** — Firmware now publishes `calibration_progress` events every ~2.2 s during calibration. Backend reads from `CALIBRATION_TRACKER` instead of stale `hvac_readings`. Fixes frozen progress bar and wrong `start_tcoil` (was showing 25.9°C instead of actual 20.00°C).
 - ✅ **Discord alert revision** — Raw SPC breaches (`spc_ucl_breach`, `spc_lcl_breach`) and legacy `dryer_humidity_high` removed from Discord. Only 7 actionable fault alerts go to Discord now, with maintenance-ticket style embeds (severity icon, title, cause, recommended action). `fault_dryer_roller_wear` and `fault_hvac_dirty_filter` fire immediately (removed 3-cycle delay).
+- ✅ **Offline/awaiting status distinction** — Added `ever_connected` flag. Devices that were never paired show yellow "Awaiting Sensor Data..."; devices that went offline after previously connecting show red "Device Offline".
+- ✅ **Offline threshold relaxed** — Increased from 600s → **660s** (11 min) to prevent idle devices from flickering offline between 10-minute checkins.
+- ✅ **Dryer analytics debug cleanup** — Removed 7 temporary `[DRYER_ANALYTICS]` print statements.
+- ✅ **BME280 threshold finalization** — Stuck-value and out-of-range now require **15 consecutive readings** (was 5). Stuck detection only active while running (`lastAvgCurrent >= 0.4`) to avoid false positives in stable exhaust conditions.
+- ✅ **DHT NaN corruption fix (v2 Firmware)** — Per-metric valid counters + last-known-good fallbacks. NaN samples are skipped from averages instead of added as 0. Fixes ~8°C temperature drop artifacts caused by DHT22 intermittent failures.
+- ✅ **Infinite false telemetry fix (v2 Firmware)** — Removed `lastGoodCurrentA` fallback. When compressor is off and current reads 0.0 for a full window, average is now 0.0 instead of stale 3.1A. Eliminates sustained false "running" telemetry when LED shows idle.
+- ✅ **Calendar date picker + auto-format time (v2 Frontend)** — Replaced free-text date/time inputs with calendar `type="date"` picker, auto-colon time input (`092534` → `09:25:34`), and AM/PM dropdown. Applies to History Range and Export Modal.
 
 ---
 

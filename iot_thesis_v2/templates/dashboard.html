@@ -587,9 +587,23 @@
                             <option value="history">History Range</option>
                         </select>
                         <div id="history-range-inputs" style="display: none; align-items: center; gap: 0.5rem; flex-wrap: wrap;">
-                            <input type="datetime-local" id="history-start" step="1" style="padding: 0.35rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem;" />
+                            <div style="display:flex; gap:0.3rem; align-items:center;">
+                                <input type="date" id="history-start-date" style="padding: 0.35rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem;" />
+                                <input type="text" id="history-start-time" maxlength="8" placeholder="HH:MM:SS" oninput="autoFormatTime(this)" style="padding: 0.35rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem; width: 80px; text-align: center;" />
+                                <select id="history-start-ampm" style="padding: 0.35rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem;">
+                                    <option value="AM">AM</option>
+                                    <option value="PM">PM</option>
+                                </select>
+                            </div>
                             <span style="color: var(--text-muted);">to</span>
-                            <input type="datetime-local" id="history-end" step="1" style="padding: 0.35rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem;" />
+                            <div style="display:flex; gap:0.3rem; align-items:center;">
+                                <input type="date" id="history-end-date" style="padding: 0.35rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem;" />
+                                <input type="text" id="history-end-time" maxlength="8" placeholder="HH:MM:SS" oninput="autoFormatTime(this)" style="padding: 0.35rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem; width: 80px; text-align: center;" />
+                                <select id="history-end-ampm" style="padding: 0.35rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem;">
+                                    <option value="AM">AM</option>
+                                    <option value="PM">PM</option>
+                                </select>
+                            </div>
                             <button class="btn btn-primary" onclick="applyHistoryRange()" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">Apply</button>
                         </div>
                     </div>
@@ -752,11 +766,25 @@
                 <div id="custom-date-inputs" style="display:none;">
                     <div class="form-group">
                         <label class="form-label">Start Date</label>
-                        <input type="datetime-local" id="export-start" class="form-control">
+                        <div style="display:flex; gap:0.4rem; align-items:center;">
+                            <input type="date" id="export-start-date" class="form-control" style="flex:2;">
+                            <input type="text" id="export-start-time" maxlength="8" placeholder="HH:MM:SS" oninput="autoFormatTime(this)" class="form-control" style="flex:1; text-align:center;">
+                            <select id="export-start-ampm" class="form-control" style="flex:0.5;">
+                                <option value="AM">AM</option>
+                                <option value="PM">PM</option>
+                            </select>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label class="form-label">End Date</label>
-                        <input type="datetime-local" id="export-end" class="form-control">
+                        <div style="display:flex; gap:0.4rem; align-items:center;">
+                            <input type="date" id="export-end-date" class="form-control" style="flex:2;">
+                            <input type="text" id="export-end-time" maxlength="8" placeholder="HH:MM:SS" oninput="autoFormatTime(this)" class="form-control" style="flex:1; text-align:center;">
+                            <select id="export-end-ampm" class="form-control" style="flex:0.5;">
+                                <option value="AM">AM</option>
+                                <option value="PM">PM</option>
+                            </select>
+                        </div>
                     </div>
                 </div>
                 <button class="btn btn-primary" onclick="downloadExcel()" style="width:100%; justify-content:center; margin-top:1rem;">
@@ -772,9 +800,11 @@
         let spcLimits = {};
         let statusPollInterval = null;
         let latestChartTimeMs = Date.now();
+        let historyLoading = false;
         let baselineTimerInterval = null;
         let calibrationPollInterval = null;
         let currentDeviceHasBaseline = false;
+        let wasOffline = false;  // track offline→online transitions for history refresh
 
         /* --- NAVIGATION --- */
         function toggleSidebar() {
@@ -933,8 +963,8 @@
                         console.error("Chart init failed", e);
                     }
                 }
-                updateDetailData();
                 document.getElementById('detail-overlay').classList.add('active');
+                updateDetailData();
             } catch(e) {
                 console.error("openDeviceDetail error", e);
                 alert("UI error, press F12 and check Console.");
@@ -1306,6 +1336,13 @@
             headers.innerHTML = '';
             tbody.innerHTML = '';
 
+            // Remove any stale header divs from previous HVAC renders
+            const table = tbody.parentElement;
+            if (table) {
+                const staleDivs = table.querySelectorAll(':scope > div');
+                staleDivs.forEach(d => d.remove());
+            }
+
             if (status !== 'normal') {
                 title.innerText = 'Analytics Data';
                 tbody.innerHTML = `<tr><td colspan="8" style="text-align:center; padding:2rem; color:var(--text-muted);">Data table will appear after baseline training is complete.</td></tr>`;
@@ -1317,54 +1354,62 @@
                 endpoint += `?start=${encodeURIComponent(historyStart)}&end=${encodeURIComponent(historyEnd)}`;
             }
 
-            fetch(endpoint)
+            fetch(endpoint + (endpoint.includes('?') ? '&' : '?') + '_t=' + Date.now())
                 .then(r => r.json())
                 .then(data => {
                     if (data.error) {
                         title.innerText = 'Analytics Data';
-                        tbody.innerHTML = `<tr><td colspan="11" style="text-align:center; padding:2rem; color:red;">Error: ${data.error}</td></tr>`;
+                        tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:2rem; color:red;">Error: ${data.error}</td></tr>`;
                         return;
                     }
 
-                    if (!data || data.length === 0) {
-                        title.innerText = 'Analytics Data';
-                        tbody.innerHTML = `<tr><td colspan="11" style="text-align:center; padding:2rem; color:var(--text-muted);">No data available yet.</td></tr>`;
-                        return;
-                    }
-
-                    // Rebuild Headers
                     if (isHVAC) {
-                        title.innerText = "HVAC Daily Averages (Compressor Running)";
-                        ['Date', 'Avg Intake (°C)', 'Avg Exit (°C)', 'Avg Coil (°C)'].forEach(h => {
+                        const daily = data.daily_averages || [];
+                        if (!daily.length) {
+                            title.innerText = 'Analytics Data';
+                            tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:2rem; color:var(--text-muted);">No data available yet.</td></tr>`;
+                            return;
+                        }
+
+                        // Daily averages table
+                        title.innerText = "HVAC Daily Averages";
+
+                        ['Date', 'Avg Intake (°C)', 'Avg Exit (°C)', 'Avg Coil (°C)', 'Energy (kWh)'].forEach(h => {
                             const th = document.createElement('th');
                             th.innerText = h;
                             th.style.cssText = "padding: 0.75rem 1rem; text-align: left; font-weight: 600; white-space: nowrap;";
                             headers.appendChild(th);
                         });
-                    } else {
-                        title.innerText = "Dryer Cycle Analytics";
-                        ['#', 'Start', 'End', 'Duration', 'Ignitions', 'Min Temp', 'Max Temp', 'Begin RH', 'End RH', 'Spike Avg (A)', 'Motor Current (A)', 'Consumption (A)'].forEach(h => {
-                            const th = document.createElement('th');
-                            th.innerText = h;
-                            th.style.cssText = "padding: 0.75rem 1rem; text-align: left; font-weight: 600; white-space: nowrap; font-size:0.8rem;";
-                            headers.appendChild(th);
-                        });
-                    }
-
-                    // Rebuild Rows
-                    data.forEach((row, idx) => {
-                        const tr = document.createElement('tr');
-                        tr.style.cssText = idx % 2 === 0 ? "background: var(--bg);" : "";
-
-                        if (isHVAC) {
+                        daily.forEach((row, idx) => {
+                            const tr = document.createElement('tr');
+                            tr.style.cssText = idx % 2 === 0 ? "background: var(--bg);" : "";
                             const dateObj = new Date(row.date).toLocaleDateString();
                             tr.innerHTML = `
                                 <td style="padding: 0.5rem 1rem; white-space: nowrap;">${dateObj}</td>
                                 <td style="padding: 0.5rem 1rem;">${row.avg_intake} °C</td>
                                 <td style="padding: 0.5rem 1rem;">${row.avg_exit} °C</td>
                                 <td style="padding: 0.5rem 1rem;">${row.avg_coil} °C</td>
+                                <td style="padding: 0.5rem 1rem;">${row.daily_energy_kwh} kWh</td>
                             `;
-                        } else {
+                            tbody.appendChild(tr);
+                        });
+                    } else {
+                        // Dryer
+                        if (!Array.isArray(data) || data.length === 0) {
+                            title.innerText = 'Analytics Data';
+                            tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:2rem; color:var(--text-muted);">No data available yet.</td></tr>`;
+                            return;
+                        }
+                        title.innerText = "Dryer Cycle Analytics";
+                        ['#', 'Start', 'End', 'Duration', 'Ignitions', 'Min Temp', 'Max Temp', 'Begin RH', 'End RH', 'Spike Avg (A)', 'Motor Current (A)', 'Energy (kWh)'].forEach(h => {
+                            const th = document.createElement('th');
+                            th.innerText = h;
+                            th.style.cssText = "padding: 0.75rem 1rem; text-align: left; font-weight: 600; white-space: nowrap; font-size:0.8rem;";
+                            headers.appendChild(th);
+                        });
+                        data.forEach((row, idx) => {
+                            const tr = document.createElement('tr');
+                            tr.style.cssText = idx % 2 === 0 ? "background: var(--bg);" : "";
                             const startObj = new Date(row.start_time).toLocaleString();
                             const endObj = new Date(row.end_time).toLocaleString();
                             tr.innerHTML = `
@@ -1379,11 +1424,11 @@
                                 <td style="padding: 0.5rem 1rem;">${row.end_rh_avg}%</td>
                                 <td style="padding: 0.5rem 1rem;">${row.current_spike_avg} A</td>
                                 <td style="padding: 0.5rem 1rem;">${row.motor_baseline_median || '-'} A</td>
-                                <td style="padding: 0.5rem 1rem;">${row.current_consumption} A</td>
+                                <td style="padding: 0.5rem 1rem;">${row.energy_kwh} kWh</td>
                             `;
-                        }
-                        tbody.appendChild(tr);
-                    });
+                            tbody.appendChild(tr);
+                        });
+                    }
                 })
                 .catch(e => console.error("Table fetch error:", e));
         }
@@ -1457,14 +1502,74 @@
             });
         }
 
+        /* --- DATE/TIME INPUT FORMATTING --- */
+        function formatDateTimeInput(el) {
+            let digits = el.value.replace(/\D/g, '');
+            if (digits.length > 14) digits = digits.slice(0, 14);
+            let formatted = '';
+            if (digits.length >= 2) formatted += digits.slice(0, 2) + '-';
+            else formatted += digits;
+            if (digits.length >= 4) formatted += digits.slice(2, 4) + '-';
+            else if (digits.length > 2) formatted += digits.slice(2);
+            if (digits.length >= 8) formatted += digits.slice(4, 8) + ' ';
+            else if (digits.length > 4) formatted += digits.slice(4);
+            if (digits.length >= 10) formatted += digits.slice(8, 10) + ':';
+            else if (digits.length > 8) formatted += digits.slice(8);
+            if (digits.length >= 12) formatted += digits.slice(10, 12) + ':';
+            else if (digits.length > 10) formatted += digits.slice(10);
+            if (digits.length > 12) formatted += digits.slice(12);
+            el.value = formatted;
+        }
+
+        /* --- DATE/TIME NORMALIZATION --- */
+        function autoFormatTime(input) {
+            let val = input.value.replace(/\D/g, '');
+            if (val.length >= 2) val = val.slice(0, 2) + ':' + val.slice(2);
+            if (val.length >= 5) val = val.slice(0, 5) + ':' + val.slice(5);
+            if (val.length > 8) val = val.slice(0, 8);
+            input.value = val;
+        }
+
+        function combineDateTime(dateId, timeId, ampmId) {
+            const dateVal = document.getElementById(dateId).value;
+            const timeVal = document.getElementById(timeId).value;
+            const ampmVal = document.getElementById(ampmId).value;
+            if (!dateVal || !timeVal || timeVal.length < 8) return null;
+
+            const tp = timeVal.match(/^(\d{2}):(\d{2}):(\d{2})$/);
+            if (!tp) return null;
+
+            let H = parseInt(tp[1], 10);
+            const M = tp[2];
+            const S = tp[3];
+
+            if (ampmVal === 'PM' && H !== 12) H += 12;
+            if (ampmVal === 'AM' && H === 12) H = 0;
+
+            return `${dateVal}T${String(H).padStart(2, '0')}:${M}:${S}`;
+        }
+
+        function setDateTimeGroup(dateId, timeId, ampmId, d) {
+            const iso = d.toISOString();
+            document.getElementById(dateId).value = iso.slice(0, 10);
+
+            let H = d.getHours();
+            const ampm = H >= 12 ? 'PM' : 'AM';
+            H = H % 12;
+            if (H === 0) H = 12;
+
+            const timeStr = `${String(H).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+            document.getElementById(timeId).value = timeStr;
+            document.getElementById(ampmId).value = ampm;
+        }
+
         /* --- EXPORT --- */
         function showExportModal() {
             document.getElementById('export-overlay').classList.add('active');
             const now = new Date();
             const weekAgo = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
-            const formatLocal = (d) => new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString().slice(0, 16);
-            document.getElementById('export-end').value = formatLocal(now);
-            document.getElementById('export-start').value = formatLocal(weekAgo);
+            setDateTimeGroup('export-end-date', 'export-end-time', 'export-end-ampm', now);
+            setDateTimeGroup('export-start-date', 'export-start-time', 'export-start-ampm', weekAgo);
         }
         function closeExportModal() {
             document.getElementById('export-overlay').classList.remove('active');
@@ -1478,9 +1583,9 @@
             const range = document.getElementById('export-range').value;
             let url = '/api/device/' + currentDetailId + '/export_excel';
             if (range === 'custom') {
-                const start = document.getElementById('export-start').value;
-                const end = document.getElementById('export-end').value;
-                if (!start || !end) { alert("Please select both start and end dates."); return; }
+                const start = combineDateTime('export-start-date', 'export-start-time', 'export-start-ampm');
+                const end = combineDateTime('export-end-date', 'export-end-time', 'export-end-ampm');
+                if (!start || !end) { alert("Please fill in date, time, and AM/PM for both export fields."); return; }
                 url += `?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}`;
             }
             window.location.href = url;
@@ -1524,6 +1629,7 @@
 
         function initCharts(id, isHVAC) {
             const reqId = ++initChartsRequestId;
+            historyLoading = true;  // block live pushes until history is loaded
             [chart1, chart2, chart3, chart4].forEach(c => { if(c) c.destroy(); });
             chart1 = chart2 = chart3 = chart4 = null;
             latestChartTimeMs = 0;  // Reset dedup tracker before loading history
@@ -1676,6 +1782,7 @@
             fetch(url)
                 .then(r => r.json())
                 .then(hist => {
+                    historyLoading = false;  // allow live pushes
                     if (reqId !== initChartsRequestId) return; // ignore stale callback
                     if (!hist || hist.error || hist.length === 0) return;
                     
@@ -1693,7 +1800,10 @@
                         if (c) c.update('none');
                     });
                 })
-                .catch(e => console.error("History fetch error:", e));
+                .catch(e => {
+                    historyLoading = false;  // allow live pushes even on error
+                    console.error("History fetch error:", e);
+                });
         }
 
         function applySPCLines() {
@@ -1729,8 +1839,9 @@
 
         function pushToCharts(time, val1, val2, val3, val4, doUpdate=true, isHVAC=true) {
             const timeMs = time instanceof Date ? time.getTime() : time;
-            if (timeMs <= latestChartTimeMs) return; // skip duplicates / out-of-order
-            latestChartTimeMs = timeMs;
+            // Allow backward time (up to 30s) so buffered messages arriving after a reconnect are not dropped
+            if (timeMs <= latestChartTimeMs - 30000) return; // skip duplicates / out-of-order
+            if (timeMs > latestChartTimeMs) latestChartTimeMs = timeMs;
             const label = time instanceof Date ? fmtTimeLabel(time) : fmtTimeLabel(new Date(time));
             const timeLabel = time instanceof Date
                 ? time.toLocaleDateString() + ' ' + time.toLocaleTimeString()
@@ -1774,13 +1885,14 @@
             if (mode === 'live' && currentDetailId) {
                 const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
                 if (card) initCharts(currentDetailId, card.dataset.type.includes('HVAC'));
+                updateDataTable();
             }
         }
 
         function applyHistoryRange() {
-            const start = document.getElementById('history-start').value;
-            const end = document.getElementById('history-end').value;
-            if (!start || !end) { alert("Please select both start and end times."); return; }
+            const start = combineDateTime('history-start-date', 'history-start-time', 'history-start-ampm');
+            const end = combineDateTime('history-end-date', 'history-end-time', 'history-end-ampm');
+            if (!start || !end) { alert("Please fill in date, time, and AM/PM for both fields."); return; }
             historyStart = start;
             historyEnd = end;
             chartMode = 'history';
@@ -1804,9 +1916,15 @@
                 const runBadge = document.getElementById(`mini-run-status-${id}`);
                 
                 if (!data.has_data) {
-                    // Node is alive but has never sent telemetry
-                    offlineBanner.innerText = 'Awaiting Sensor Data...';
-                    offlineBanner.style.background = 'var(--warning)';
+                    if (data.is_offline && data.ever_connected) {
+                        // Device HAS sent messages before, but now silent >11 min
+                        offlineBanner.innerText = 'Device Offline';
+                        offlineBanner.style.background = 'var(--danger)';
+                    } else {
+                        // Never connected, or connected but checkins still arriving
+                        offlineBanner.innerText = 'Awaiting Sensor Data...';
+                        offlineBanner.style.background = 'var(--warning)';
+                    }
                     offlineBanner.style.display = 'block';
                     if (runBadge) runBadge.style.display = 'none';
                     return;
@@ -1874,8 +1992,13 @@
             if (!data.has_data) {
                 if (offlineBadge) {
                     offlineBadge.style.display = 'inline-block';
-                    offlineBadge.innerText = 'Awaiting Data';
-                    offlineBadge.className = 'status-badge status-warning';
+                    if (data.is_offline && data.ever_connected) {
+                        offlineBadge.innerText = 'Offline';
+                        offlineBadge.className = 'status-badge status-danger';
+                    } else {
+                        offlineBadge.innerText = 'Awaiting Data';
+                        offlineBadge.className = 'status-badge status-warning';
+                    }
                 }
                 if (runBadge) runBadge.style.display = 'none';
                 document.getElementById('detail-t1').innerText = '-- °C';
@@ -1901,8 +2024,15 @@
                     offlineBadge.innerText = 'Offline';
                     offlineBadge.className = 'status-badge status-danger';
                 }
+                wasOffline = true;
             } else {
                 if (offlineBadge) offlineBadge.style.display = 'none';
+                // If we just came back online, refresh chart history to pull buffered data
+                if (wasOffline && chartMode === 'live') {
+                    wasOffline = false;
+                    console.log('[RECONNECT] Device back online — refreshing chart history in 1.5s');
+                    setTimeout(() => initCharts(currentDetailId, isHVAC), 1500);
+                }
             }
             
             // Handle uncalibrated HVAC
@@ -1943,7 +2073,23 @@
                 }
             }
             const timeMs = now.getTime();
-            const shouldPush = (chartMode === 'live') && (timeMs > latestChartTimeMs);
+            const timeGap = timeMs - latestChartTimeMs;
+
+            // Detect late-arriving buffered data or large offline gaps and refresh history
+            if (chartMode === 'live' && !historyLoading && latestChartTimeMs > 0) {
+                if (timeMs < latestChartTimeMs - 10000) {
+                    console.log('[LATE DATA] Buffered point older than chart — refreshing history');
+                    initCharts(currentDetailId, isHVAC);
+                    return;
+                }
+                if (timeGap > 30000) {
+                    console.log('[GAP DETECTED] ' + timeGap + 'ms gap — refreshing history');
+                    initCharts(currentDetailId, isHVAC);
+                    return;
+                }
+            }
+
+            const shouldPush = (chartMode === 'live') && (timeMs > latestChartTimeMs) && !historyLoading;
             
             if (isHVAC) {
                 const delta = Math.abs(data.Treturn - data.Tsupply);

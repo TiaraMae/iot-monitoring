@@ -623,6 +623,19 @@ def handle_node_events(mac, payload):
                     send_node_command(mac, "calibrationfailack")
                     print(f"Node {mac} Calibration already done or not needed.")
 
+        elif event_type == "calibration_progress":
+            if status == 'calibrating':
+                try:
+                    t3 = float(data.get("t3", 0))
+                    base_t3 = float(data.get("base_t3", 0))
+                    tracker = CALIBRATION_TRACKER.get(appliance_id, {})
+                    if tracker.get('start_tcoil') is None or base_t3 != 0:
+                        tracker['start_tcoil'] = base_t3 if base_t3 != 0 else t3
+                    tracker['current_tcoil'] = t3
+                    CALIBRATION_TRACKER[appliance_id] = tracker
+                except (ValueError, TypeError):
+                    pass
+
         elif event_type == "calibration_success_request":
             if status == 'calibrating':
                 if appliance_id in CALIBRATION_TRACKER:
@@ -1358,26 +1371,37 @@ def api_calibration_progress(appliance_id):
         return jsonify({'error': 'Not calibrating'}), 400
     
     tracker = CALIBRATION_TRACKER.get(appliance_id, {})
-    start_tcoil = tracker.get('start_tcoil', 25.0)
-    
-    # Fetch latest DS18B20 temp
-    conn = get_conn()
-    if not conn: return jsonify({'start_tcoil': start_tcoil, 'current_tcoil': None}), 200
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT sr.tcoil FROM hvac_readings sr
-        JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
-        JOIN appliances a ON a.id = sn.appliance_id
-        WHERE sn.appliance_id = %s AND sr.time >= a.created_at
-        ORDER BY sr.time DESC LIMIT 1
-    """, (appliance_id,))
-    tcoil_row = cur.fetchone()
-    cur.close()
-    release_conn(conn)
-    
-    current_tcoil = float(tcoil_row[0]) if tcoil_row and tcoil_row[0] is not None else start_tcoil
+    start_tcoil = tracker.get('start_tcoil')
+    current_tcoil = tracker.get('current_tcoil')
+
+    # Fallback to DB if tracker hasn't been populated yet (old firmware or edge case)
+    if start_tcoil is None or current_tcoil is None:
+        conn = get_conn()
+        if conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT sr.tcoil FROM hvac_readings sr
+                JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
+                JOIN appliances a ON a.id = sn.appliance_id
+                WHERE sn.appliance_id = %s AND sr.time >= a.created_at
+                ORDER BY sr.time DESC LIMIT 1
+            """, (appliance_id,))
+            tcoil_row = cur.fetchone()
+            cur.close()
+            release_conn(conn)
+            db_tcoil = float(tcoil_row[0]) if tcoil_row and tcoil_row[0] is not None else None
+            if start_tcoil is None:
+                start_tcoil = db_tcoil if db_tcoil is not None else 25.0
+            if current_tcoil is None:
+                current_tcoil = db_tcoil if db_tcoil is not None else start_tcoil
+        else:
+            if start_tcoil is None:
+                start_tcoil = 25.0
+            if current_tcoil is None:
+                current_tcoil = start_tcoil
+
     drop = start_tcoil - current_tcoil
-    
+
     return jsonify({
         'start_tcoil': round(start_tcoil, 2),
         'current_tcoil': round(current_tcoil, 2),
@@ -1726,7 +1750,8 @@ def dryer_analytics(appliance_id):
             nonlocal _peak_state, _peak_max, _peak_valley
             if _peak_state in ("RISING", "FALLING") and _peak_max > 0:
                 prominence = _peak_max - _peak_valley
-                if prominence >= prominence_threshold:
+                min_peak_floor = (float(baseline_current_mean) + 0.15) if baseline_current_mean else None
+                if prominence >= prominence_threshold and (min_peak_floor is None or _peak_max > min_peak_floor):
                     _peak_values.append(_peak_max)
             _peak_state = "IDLE"
             _peak_max = 0.0
@@ -1806,7 +1831,7 @@ def dryer_analytics(appliance_id):
                     if imotor > _peak_max:
                         _peak_max = imotor
                 elif imotor < _prev_current:
-                    if _peak_state == "RISING":
+                    if _peak_state == "RISING" and (_peak_max <= 0.1 or imotor < _peak_max - 0.1):
                         _peak_state = "FALLING"
                 
                 _prev_current = imotor
