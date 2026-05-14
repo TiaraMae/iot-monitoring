@@ -12,7 +12,7 @@ This is the **second-generation** backend and frontend for the IoT-Based Monitor
 - **Delta RH for HVAC**: The dashboard now displays humidity differential (Return RH − Supply RH) alongside temperature delta.
 - **Real-Time SPC Alerts**: New alert types `spc_ucl_breach` and `spc_lcl_breach` fire immediately when any running reading exceeds control limits.
 - **Fault Alert System** (see `FAULTALERT.md`): Research-backed pattern detection for 7 common appliance faults — 4 dryer faults (roller wear, belt snapped, lint blockage, incomplete drying) and 3 HVAC faults (dirty filter, low refrigerant, compressor fault). Uses per-cycle median for dryer mechanical faults and STABLE_ON state tracking for HVAC thermal faults. Only active after SPC baseline is configured.
-- **Dryer SCT-013 CF = 30.0**: Calibrated for the new current sensor with 0.111 deductor.
+- **Dryer SCT-013 CF = 33.0**: Calibrated for the new current sensor with 0.111 deductor.
 - **Pressure Precision**: BME280 pressure now reports 2 decimal places for finer exhaust duct monitoring.
 - **Instant SPC Line Rendering**: SPC bands appear immediately when opening a device card, not after a 4-second polling delay.
 - **Discord Webhook Alerts**: Users can configure a personal Discord webhook URL to receive instant rich embed notifications for every alert (SPC breaches, fault alerts, dryer humidity). Multi-tenant — each user's alerts go to their own Discord channel.

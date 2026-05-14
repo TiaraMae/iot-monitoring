@@ -1163,8 +1163,9 @@ void loop() {
 
   if (sampleCount >= MAX_SAMPLES) {
     float avgCurrent = validCurrentA > 0 ? sumCurrentA / validCurrentA : 0.0;
-    // Only send telemetry when appliance is running AND calibration is done (use true average, not last sample)
-    if (calibrationAcked && avgCurrent >= 0.25) {
+    // Data Auto: send telemetry continuously once calibration/pairing is complete
+    bool shouldSend = calibrationAcked;
+    if (shouldSend) {
       String basePayload = buildTelemetryPayload();
       resetAverages();
 

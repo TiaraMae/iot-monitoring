@@ -39,7 +39,7 @@ iot_thesis_v2/
 Identical to v1. See root `AGENTS.md` for full pin map and sensor specs.
 
 ### v2-Specific Hardware Notes
-- **Dryer SCT-013 Calibration Factor:** Updated to **30.0** (was 37.0 in v1). Deductor remains **0.111**.
+- **Dryer SCT-013 Calibration Factor:** Updated to **33.0** (was 37.0 in v1). Deductor remains **0.111**.
 - **Pressure Precision:** BME280 pressure readings now report **2 decimal places** (was 1 decimal) for finer exhaust duct monitoring.
 
 ### Key Firmware Changes

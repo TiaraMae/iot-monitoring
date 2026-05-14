@@ -46,6 +46,7 @@ iot-monitoring/
     │   ├── login.html
     │   └── signup.html
     ├── Update_SensorNode/   # Cleaned firmware (baseline:set only)
+    ├── Update_SensorNode_Data_Auto/  # Continuous telemetry variant (no idle discard)
     ├── AGENTS.md
     ├── FAULTALERT.md
     └── README.md
@@ -111,7 +112,7 @@ iot-monitoring/
 | **SCT-013** | GPIO 0 | Motor live wire current |
 
 - **Current sensor:** SCT-013
-- **Calibration factor:** 30.0
+- **Calibration factor:** 33.0
 - **RMS deductor:** 0.111
 
 ### 3.4 Current Sensing Math
@@ -126,7 +127,7 @@ Both firmwares use the same signal chain:
 
 In `Update_SensorNode.ino`:
 ```cpp
-float cf = (applianceType == "Dryer") ? 30.0 : 11.0;
+float cf = (applianceType == "Dryer") ? 33.0 : 11.0;
 return (trueVoltageMv / 1000.0) * cf;
 ```
 
@@ -254,7 +255,8 @@ LED shows the **highest-priority** active state:
 
 ### 4.8 Data Gating & Running Status
 - Firmware **always** includes `"status":"running"` or `"status":"idle"` in telemetry based on `avgCurrent >= 0.25 A`.
-- Telemetry is **only published** when `lastAvgCurrent >= 0.25 A` (running). Idle samples are discarded, not buffered.
+- **Standard v2 firmware (`Update_SensorNode.ino`):** Telemetry is **only published** when `calibrationAcked == true` AND `avgCurrent >= 0.25 A` (running). Idle samples are discarded, not buffered. This prevents unpaired or calibration-needed nodes from leaking data.
+- **Data Auto variant (`Update_SensorNode_Data_Auto.ino`):** Once `calibrationAcked == true`, telemetry is **always** published regardless of current. Idle windows are sent with `"status":"idle"`. The backend only inserts `"running"` data into readings tables.
 - Idle periods update `last_seen` via periodic `checkin` events (see §4.9).
 
 ### 4.9 Checkin / Offline Indicator System
@@ -518,7 +520,7 @@ The following can be set in a `.env` file (see `.env.example`):
 
 5. **Calibration factors are appliance-type dependent:**
    - HVAC (ZHT103C): factor = 11.0
-   - Dryer (SCT-013): factor = 30.0
+   - Dryer (SCT-013): factor = 33.0
 
 6. **Baseline timers are appliance-specific:**
    - **HVAC:** `threading.Timer(900)` — 15-minute fixed window.
@@ -534,7 +536,7 @@ The following can be set in a `.env` file (see `.env.example`):
 
 11. **The ESP32-C3 has limited RAM.** The offline queue (`MAX_QUEUE_SIZE = 200`) and string operations must not be increased without checking heap availability.
 
-12. **Firmware only sends running telemetry.** Idle samples (`current < 0.25 A`) are discarded, not buffered. Do not expect idle data in the readings tables.
+12. **Standard firmware only sends running telemetry.** Idle samples (`current < 0.25 A`) are discarded, not buffered. The Data Auto variant sends both running and idle telemetry once calibrated. The backend gates inserts by `"status"` either way.
 
 13. **`api_device_latest` must return HTTP 200 for all states.** Do not return 404 for missing data — the frontend relies on `is_offline` and `has_data` flags.
 
@@ -568,6 +570,12 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 - **DHT Fix:** Added per-metric valid counters (`validDHT1T`, `validDHT2T`, etc.) decoupled from `sampleCount` timing. Averages are computed as `sum / validCount`. If `validCount == 0`, the metric falls back to its last-known-good value (previous window's average). This skips bad samples without corrupting averages or changing publish cadence.
 - **Infinite Telemetry Problem:** When the compressor turned off and `currentVal == 0.0` for a full window, `validCurrentA` became 0. The `lastGoodCurrentA` fallback (stale 3.1A from last running window) was used for the average. Since `lastGoodCurrentA` was never updated when `validCurrentA == 0`, this produced false running telemetry **every 10 seconds indefinitely** while the LED showed idle.
 - **Telemetry Fix:** Removed `lastGoodCurrentA` fallback for current. Current is the most reliable sensor (ADC). If all 5 samples are 0.0, the true average is **0.0**. Also moved `lastAvgCurrent = currentVal` outside the `if` block so it updates unconditionally, ensuring the LED correctly reflects idle when current is 0.
+
+### 2026-05-12 — HVAC Calibration-Needed Telemetry Leak Fix + Data Auto Variant (v2 Firmware)
+- **Problem:** In v2, an HVAC node in `calibration_needed` state could still send telemetry if `avgCurrent >= 0.25 A`. This leaked uncalibrated data to the backend.
+- **Fix:** Telemetry gate changed from `if (avgCurrent >= 0.25)` to `if (calibrationAcked && avgCurrent >= 0.25)`. Unpaired and calibration-needed nodes now send **no data at all**.
+- **Data Auto variant:** Created `Update_SensorNode_Data_Auto.ino` — a new firmware variant that sends telemetry **continuously** (both running and idle windows) once `calibrationAcked == true`. The `current >= 0.25` gate is removed entirely. The backend's existing `status == "running"` insert gate prevents idle data from flooding the database.
+- **Dryer SCT-013 CF:** Corrected from **30.0** → **33.0** across all v2 documentation and the Data Auto firmware.
 
 ### 2026-05-10 — Interrupt WDT Timeout Fix + Current Threshold Lowered + Buzzer Hardening (v2 Firmware)
 - **Problem:** `Core 0 panic'ed (Interrupt wdt timeout on CPU0)` crash ~10 seconds after telemetry during normal running. Previous `yield()` fixes were insufficient on the single-core ESP32-C3.

@@ -126,6 +126,7 @@ iot-monitoring/
     │   ├── login.html
     │   └── signup.html
     ├── Update_SensorNode/    # Cleaned firmware (baseline:set only)
+    ├── Update_SensorNode_Data_Auto/  # Continuous telemetry variant (no idle discard)
     ├── AGENTS.md
     ├── FAULTALERT.md
     └── README.md
@@ -434,8 +435,9 @@ This section describes the complete end-to-end data flow from physical sensors t
 
 **Data Flow Summary:**
 1. **Sensor Node** reads sensors every 2 seconds. After 5 samples (10 seconds), it computes averages.
-2. If average current ≥ 0.25 A, the node builds a JSON telemetry payload including `"status":"running"` and publishes via MQTT. If current < 0.25 A, samples are discarded (idle state).
-3. If Wi-Fi or MQTT is down, running samples are queued in a 200-slot FIFO buffer and flushed on reconnect.
+2. **Standard firmware:** If `calibrationAcked == true` AND average current ≥ 0.25 A, the node builds a JSON telemetry payload including `"status":"running"` and publishes via MQTT. If current < 0.25 A or calibration is not done, samples are discarded (idle state).
+   **Data Auto variant:** Once `calibrationAcked == true`, telemetry is always published regardless of current. Idle windows are sent with `"status":"idle"`.
+3. If Wi-Fi or MQTT is down, samples are queued in a 200-slot FIFO buffer and flushed on reconnect.
 4. **HiveMQ Cloud** relays the message to the Flask backend via TLS on port 8883.
 5. **Backend** (`on_mqtt_message`) parses the JSON, corrects timestamps via `ago_ms`, deduplicates rapid messages, and gates database inserts: only `"running"` data is inserted; idle data only updates `last_seen`.
 6. **Database** stores running readings in `hvac_readings` or `dryer_readings`.
@@ -638,7 +640,7 @@ float readCurrentIrms() {
 ```
 
 - **HVAC (ZHT103C):** `cf = 11.0`, `deductor = 0.033`
-- **Dryer (SCT-013):** `cf = 30.0`, `deductor = 0.111`
+- **Dryer (SCT-013):** `cf = 33.0`, `deductor = 0.111`
 
 ### Telemetry Payload Format
 
@@ -992,6 +994,9 @@ Collapsible panel with:
 - ✅ **BME280 threshold finalization** — Stuck-value and out-of-range now require **15 consecutive readings** (was 5). Stuck detection only active while running (`lastAvgCurrent >= 0.4`) to avoid false positives in stable exhaust conditions.
 - ✅ **DHT NaN corruption fix (v2 Firmware)** — Per-metric valid counters + last-known-good fallbacks. NaN samples are skipped from averages instead of added as 0. Fixes ~8°C temperature drop artifacts caused by DHT22 intermittent failures.
 - ✅ **Infinite false telemetry fix (v2 Firmware)** — Removed `lastGoodCurrentA` fallback. When compressor is off and current reads 0.0 for a full window, average is now 0.0 instead of stale 3.1A. Eliminates sustained false "running" telemetry when LED shows idle.
+- ✅ **HVAC calibration-needed telemetry leak fix (v2 Firmware)** — Telemetry gate now requires `calibrationAcked && avgCurrent >= 0.25`. Prevents unpaired or calibration-needed HVAC nodes from sending data even when current exceeds threshold.
+- ✅ **Data Auto firmware variant** — New `Update_SensorNode_Data_Auto.ino` sends telemetry continuously (both running and idle windows) once `calibrationAcked == true`. No `current >= 0.25` gate. Backend still filters inserts by `status`.
+- ✅ **Dryer SCT-013 CF corrected to 33.0** — Calibration factor updated from 30.0 → 33.0 across all v2 docs and the Data Auto firmware.
 - ✅ **Calendar date picker + auto-format time (v2 Frontend)** — Replaced free-text date/time inputs with calendar `type="date"` picker, auto-colon time input (`092534` → `09:25:34`), and AM/PM dropdown. Applies to History Range and Export Modal.
 
 ---
