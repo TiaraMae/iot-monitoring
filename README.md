@@ -4,11 +4,12 @@
 > **Author:** Tiara Mae Muljana  
 > **Institution:** Swiss German University
 
-This repository contains three distinct systems developed for an IoT-based predictive maintenance thesis:
+This repository contains four distinct systems developed for an IoT-based predictive maintenance thesis:
 
 1. **`iot_thesis/`** — The **original production system** (v1) for residential split-type HVAC units and commercial gas dryers. Uses automatic 15-minute (HVAC) or cycle-based (dryer) baseline recording.
-2. **`iot_thesis_v2/`** — The **active development branch** (v2). Replaces automatic baseline recording with manual UCL/LCL input, adds real-time SPC breach alerts, fault pattern detection, and Discord webhook integration.
-3. **`gas_dryer_test/`** — A **standalone PCB validation testbed** used to verify that the custom sensor node PCB can successfully read BME280 and SCT-013 data, transmit via MQTT, and display it on a local Flask dashboard. This is a simplified prototype and is **not** part of the main production architecture.
+2. **`iot_thesis_v2/`** — The **second generation** (v2). Replaces automatic baseline recording with manual UCL/LCL input, adds real-time SPC breach alerts, fault pattern detection, and Discord webhook integration.
+3. **`iot_thesis_v3/`** — The **active development branch** (v3). Backend owns calibration factor (CF) and deductor per appliance; sensor node computes current locally. Stores **all** telemetry (running + idle) with a filtered/unfiltered dashboard toggle.
+4. **`gas_dryer_test/`** — A **standalone PCB validation testbed** used to verify that the custom sensor node PCB can successfully read BME280 and SCT-013 data, transmit via MQTT, and display it on a local Flask dashboard. This is a simplified prototype and is **not** part of the main production architecture.
 
 ---
 
@@ -945,6 +946,10 @@ Collapsible panel with:
 | 14 | **CI/CD** | 🟢 Low | GitHub Actions for linting and basic tests |
 
 ### Completed Recently
+- ✅ **v3 Backend-Driven CF/Deductor** — Backend stores CF and deductor per appliance; node receives them via MQTT and computes `CurrentA` locally. Eliminates hardcoded sensor constants in firmware.
+- ✅ **v3 Continuous Telemetry** — All 10-second windows (running + idle) are stored in PostgreSQL. Filtered/unfiltered toggle lets users view idle gaps as gray dots on charts.
+- ✅ **v3 Delta RH Chart** — New 6th chart for HVAC showing `abs(RHreturn - RHsupply)` with SPC bands.
+- ✅ **v3 Dashboard Fixes** — chart6 destroy on filter toggle, cache-busting on history fetch, Delta RH section visibility when switching dryer→HVAC, dryer pushToCharts argument mapping fix.
 - ✅ Web-triggered baseline only (removed physical button baseline)
 - ✅ Data gating: only running data inserted; idle updates `last_seen` only
 - ✅ Dryer end-of-cycle humidity alert system with configurable thresholds

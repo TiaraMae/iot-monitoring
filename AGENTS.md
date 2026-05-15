@@ -39,14 +39,20 @@ iot-monitoring/
 │   └── Update_SensorNode/   # Production ESP32 firmware
 │       └── Update_SensorNode.ino
 │
-└── iot_thesis_v2/           # ACTIVE DEVELOPMENT v2 (manual SPC + fault alerts)
-    ├── app.py               # Flask backend (manual baseline, fault detection, Discord)
+├── iot_thesis_v2/           # v2 (manual SPC + fault alerts + Discord)
+│   ├── app.py               # Flask backend (manual baseline, fault detection, Discord)
+│   ├── templates/
+│   ├── Update_SensorNode/   # Cleaned firmware (baseline:set only)
+│   ├── Update_SensorNode_Data_Auto/  # Continuous telemetry variant
+│   ├── AGENTS.md
+│   ├── FAULTALERT.md
+│   └── README.md
+│
+└── iot_thesis_v3/           # ACTIVE DEVELOPMENT v3 (backend-driven CF, continuous telemetry)
+    ├── app.py               # Flask backend (CF/deductor per appliance, all data stored)
     ├── templates/
-    │   ├── dashboard.html   # Inline baseline config, 4-chart layout
-    │   ├── login.html
-    │   └── signup.html
-    ├── Update_SensorNode/   # Cleaned firmware (baseline:set only)
-    ├── Update_SensorNode_Data_Auto/  # Continuous telemetry variant (no idle discard)
+    │   └── dashboard.html   # 6-chart HVAC, filtered/unfiltered toggle, idle styling
+    ├── Update_SensorNode/   # Firmware receives CF/deductor via MQTT, computes CurrentA
     ├── AGENTS.md
     ├── FAULTALERT.md
     └── README.md
@@ -557,6 +563,19 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 ---
 
 ## 10. Recent Changes & Changelog
+
+### 2026-05-14 — v3 Dashboard Fixes (chart6, filter toggle, Delta RH visibility)
+- **Chart6 destroy fix:** `initCharts` was destroying charts 1–5 but **not chart6** (Delta RH). On filter toggle, Chart.js threw "Canvas is already in use" because the old chart6 instance was still attached. This aborted `initCharts`, leaving all charts empty. Fixed by adding `chart6` to the destroy and null-reset arrays.
+- **Filter toggle cache-busting:** Added `&_cb=${Date.now()}` to history fetch URL to prevent browsers from returning stale cached responses on rapid filtered/unfiltered toggles.
+- **setTimeout delay in `onFilterChange`:** Added 50ms async delay before calling `initCharts` to give Chart.js animation frames time to clean up after `destroy()`.
+- **Delta RH section visibility:** HVAC `initCharts` restored visibility for `section-chart-5` but not `section-chart-6`. After viewing a dryer (which hides section-chart-6), switching back to HVAC left Delta RH invisible. Added `section-chart-6.style.display = 'block'` in HVAC's `initCharts`.
+- **Dryer `pushToCharts` mapping fix:** When `pushToCharts` was expanded from 5 to 6 values, the dryer calls were not updated. They passed `undefined, false/true` which landed in `val6` and `doUpdate` positions, breaking dryer live updates. Fixed by passing explicit `null, null` for val5/val6.
+- **Radio button sync on modal open:** `openDeviceDetail` now resets filter radio buttons to "Filtered" to match the `showIdle = false` default, preventing UI/JS state mismatch when reopening the modal.
+
+### 2026-05-12 — Delta RH Chart Added for HVAC (v3 Frontend)
+- **New chart6:** Displays `abs(RHreturn - RHsupply)` with pink `#EC4899` line, placed between T_return and T_coil in the 6-chart HVAC layout.
+- **Backend:** `api_device_latest` and `api_device_latest_n` return `DeltaRH` field.
+- **Frontend:** `pushToCharts` expanded to 6 positional values; history callback recomputes `Math.abs(d.RHreturn - d.RHsupply)`.
 
 ### 2026-05-10 — Calendar Date Picker + Auto-Format Time Input (v2 Frontend)
 - **Change:** Replaced free-text date/time inputs in History Range and Export Modal with a 3-part picker: calendar `type="date"`, auto-format time text, and AM/PM dropdown.

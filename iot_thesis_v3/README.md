@@ -1,0 +1,76 @@
+# IoT Monitoring System v3 — Backend-Driven CF/Deductor
+
+This is the **third-generation** backend and frontend for the IoT-Based Monitoring and Alert System for Split HVAC and Gas Dryers.
+
+## What's New in v3
+
+- **Backend Owns CF/Deductor:** The backend stores calibration factor (CF) and deductor per appliance in the `appliances` table. When a sensor node boots or reconnects, the backend sends `setcf:*` and `setdeductor:*` via MQTT control topic.
+- **Sensor Node Computes Current:** The ESP32-C3 receives CF and deductor from the backend, persists them in NVS flash memory, and computes `CurrentA = max(0, (rawMv/1000)*cf - deductor)` locally. This eliminates hardcoded sensor constants in firmware — new appliance types can be added in the backend without reflashing.
+- **All Telemetry Stored:** Every 10-second telemetry window (running or idle) is stored in PostgreSQL. The old "running-only insert gate" is removed.
+- **Filtered/Unfiltered Data Toggle:** A radio toggle in the dashboard lets users switch between filtered (running only, default) and unfiltered (all data including idle gaps). Idle points are styled as small gray dots on charts.
+- **Export with Idle Option:** The Excel export modal has an "Include idle data" checkbox.
+- **Threshold Standardization:** All current thresholds across backend and firmware are consistently **0.25 A**.
+- **Removed Data Auto Variant:** The separate `Update_SensorNode_Data_Auto.ino` firmware is no longer needed; the standard firmware sends continuous data natively.
+
+## Architecture
+
+```
+iot_thesis_v3/
+├── app.py                  # Flask backend (MQTT, DB, auth, SPC, API)
+├── templates/
+│   ├── dashboard.html      # Main SPA frontend (filtered toggle, idle styling)
+│   ├── login.html          # User login
+│   └── signup.html         # User registration
+└── Update_SensorNode/
+    └── Update_SensorNode.ino  # Firmware: receives CF/deductor, computes CurrentA
+```
+
+## Database
+
+v3 uses the **same PostgreSQL schema** as v2 with two added columns:
+
+```sql
+ALTER TABLE appliances ADD COLUMN IF NOT EXISTS cf REAL;
+ALTER TABLE appliances ADD COLUMN IF NOT EXISTS deductor REAL;
+```
+
+**Default values:**
+- HVAC: `cf = 11.0`, `deductor = 0.033`
+- Dryer: `cf = 33.0`, `deductor = 0.111`
+
+Existing rows must be backfilled with a one-time migration before deploying.
+
+## SPC Metrics
+
+Unchanged from v2. See v2 `README.md` or `AGENTS.md` for the full metric tables.
+
+## Workflow
+
+1. **Pair Device** — backend inserts appliance with default CF/deductor based on type.
+2. **Node Receives Config** — on `event_request_config`, backend sends `settype:*` + `setcf:*` + `setdeductor:*` + `restore:*`.
+3. **Node Computes Current** — using received CF/deductor, persists in NVS.
+4. **Calibrate HVAC** (same as v2 — ice-bath method)
+5. **Configure Baseline** (same as v2 — manual UCL/LCL input)
+6. **Monitor** — real-time charts with optional unfiltered view.
+7. **Export** — choose whether to include idle data.
+
+## Data Retention Note
+
+Because v3 stores **all** telemetry (not just running), database size will grow approximately **3–5×** faster than v2. Consider implementing a retention policy for long-term production use.
+
+## Recent Fixes
+
+### 2026-05-14
+- **Chart6 destroy fix:** `initCharts` now destroys and nulls `chart6` alongside charts 1–5. Prevents "Canvas is already in use" error on filter toggle that was leaving all charts empty.
+- **History fetch cache-busting:** `&_cb=${Date.now()}` appended to fetch URL to bypass browser cache on rapid toggles.
+- **setTimeout in onFilterChange:** 50ms delay before `initCharts` lets Chart.js finish cleanup.
+- **Delta RH section visibility:** HVAC `initCharts` now shows `section-chart-6` (was hidden by dryer view and never restored).
+- **Dryer pushToCharts fix:** Explicit `null, null` for val5/val6 prevents argument misalignment.
+- **Radio button sync:** Filter radio buttons reset to "Filtered" on modal open to match `showIdle = false` default.
+
+### 2026-05-12
+- **Delta RH chart (chart6)** added for HVAC — shows `abs(RHreturn - RHsupply)` with pink `#EC4899` line.
+
+### 2026-05-10
+- **DHT22 stuck detection** in firmware — per-window (10s) stuck-value detection with `dht.begin()` re-init after 3 consecutive stuck windows.
+- **Idle data visualization** — gray dots (`#94a3b8`, radius 1) for idle points in unfiltered mode.
