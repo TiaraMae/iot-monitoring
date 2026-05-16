@@ -1,8 +1,8 @@
-# Fault Alert System — IoT Monitoring v2 (Revised)
+# Fault Alert System — IoT Monitoring v3
 
 > **Document Purpose:** Define the fault detection logic, SPC rule framework, and alert generation strategy for the IoT-Based Monitoring and Alert System. All fault alerts are **gated behind manual SPC baseline configuration** — if UCL/LCL lines are not set, no fault alerts are generated.
 >
-> **Revision Notes (2026-05-03):** This revision addresses real-world cyclic data patterns observed in production telemetry. The original zone-based SPC rules (Western Electric Zones A/B/C) are **removed** because they generate false positives on naturally cyclic signals (HVAC compressor cycling, gas dryer ignition spikes). Replaced with **state-aware, cycle-aggregated evaluation**.
+> **Revision Notes (2026-05-14):** HVAC fault detection redesigned around **peak-performance snapshot evaluation** using T_supply + current, replacing the previous ΔT + T_coil + 10-minute STABLE_ON window approach. The new design evaluates a single worst-case reading per compressor cycle (non-inverter) or high-effort window (inverter), eliminating false positives from transient thermal lag. Delta-T and T_return remain on charts for visual context only. Dryer fault logic is unchanged from v2.
 
 ---
 
@@ -75,23 +75,29 @@ Applying "8 consecutive points in Zone C" or "6 consecutive points monotonically
 
 ### 2.2 State-Aware Evaluation Windows
 
-**HVAC Compressor State Machine:**
+**HVAC Compressor Snapshot Tracker:**
+Instead of a multi-state machine with a 10-minute STABLE_ON window, v3 uses a **single-reading snapshot** captured during the worst-performing moment of each cycle/window:
+
 ```
-IDLE: current < 0.4 A for >60 s
-  ↓ current rises above 0.4 A
-STARTING: current > 0.4 A, <10 min elapsed
-  ↓ 10 min continuous ON
-STABLE_ON: current > 0.4 A, ≥10 min continuous ← evaluate faults here only
-  ↓ current drops below 0.4 A
-STOPPING: current < 0.4 A, <60 s
-  ↓ 60 s elapsed
-IDLE
+IDLE: current < 0.25 A
+  ↓ current rises above 0.25 A
+RUNNING (non-inverter): track reading with minimum T_supply
+  ↓ current drops below 0.25 A
+EVALUATE snapshot → return to IDLE
+
+IDLE: current < 0.25 A or T_return ≤ 26.5°C
+  ↓ current > 0.25 A AND T_return > 26.5°C
+HIGH-EFFORT (inverter): track reading with maximum current
+  ↓ current < 70% of peak for > 2 min  OR  compressor turns off
+EVALUATE snapshot → return to IDLE
 ```
 
-Why 10 minutes? HVAC compressors have long thermal time constants. From production data, compressor ON periods are ~10–15 minutes. After 10 minutes:
-- Evaporator coil is fully chilled and stable.
-- ΔT has reached its maximum and plateaued.
-- Current has stabilized (inverter) or is at steady state (non-inverter).
+**Why snapshot evaluation?**
+- A single worst-case reading is sufficient to discriminate faults because the T_supply vs. current matrix (see §4) produces mutually exclusive diagnostic regions.
+- No need to wait 10 minutes for thermal equilibrium — the snapshot captures the critical reading as soon as it occurs.
+- Eliminates false positives from startup transients and thermal lag.
+- **Non-inverter:** The coldest supply air (minimum T_supply) occurs when the evaporator is working hardest. If the minimum T_supply is still too warm, the system has a fault.
+- **Inverter:** The highest current during a high-effort window (hot room, T_return > 26.5°C) represents peak load. If T_supply is warm even at peak load, the system has a fault.
 
 **Dryer Cycle State Machine:**
 ```
@@ -327,122 +333,132 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 
 ## 4. Monitored Faults — Split HVAC
 
-### 4.1 Dirty Indoor Filter
+### 4.1 Fault Evaluation Matrix
+
+All HVAC faults are diagnosed from a **single peak-performance snapshot** using two metrics:
+- **Delta-T** — temperature split (Return − Supply), larger is better
+- **Current** — compressor electrical draw
+
+| Delta-T vs. LCL | Current vs. Limits | Result |
+|-----------------|-------------------|--------|
+| ≥ LCL | any | ✅ Good condition |
+| < LCL | < LCL | 🔴 Low refrigerant |
+| < LCL | LCL–UCL | 🟠 Dirty air filter |
+| < LCL | > UCL | 🔴 Outdoor problem (capacitor/condenser) |
+
+**Why this matrix works:**
+- **Low refrigerant:** Less refrigerant mass → evaporator cannot absorb enough heat → temperature split shrinks (Delta-T drops). The compressor senses reduced suction pressure and draws **less** current (offloads).
+- **Dirty filter:** Restricted airflow → less total heat transfer across the coil → temperature split shrinks (Delta-T drops). The compressor still tries to pump against the restriction, so current stays **normal**.
+- **Outdoor problem (capacitor/condenser):** Condenser cannot reject heat effectively → high-side pressure rises → compressor works harder → less indoor cooling → Delta-T drops **AND** current rises.
+
+**Research Base:** Sun et al. (2013) identified temperature differential (ΔT) as the strongest discriminator for refrigerant charge and airflow faults. Bonvini et al. (2014) validated that **current draw anomalies combined with normal thermal readings** indicate condenser-side faults, while **thermal anomalies with normal current** indicate refrigerant-side faults. The Delta-T + current matrix directly implements this finding.
+
+---
+
+### 4.2 Dirty Indoor Filter
 | Attribute | Detail |
 |-----------|--------|
 | **Description** | Air filter is clogged, restricting airflow across the evaporator coil. |
 | **Root Cause** | Neglected filter replacement; high dust environments. |
-| **Primary Trigger** | Minimum coil temp during STABLE_ON < `tcoil_LCL` at **STABLE_ON cycle end**. |
+| **Primary Trigger** | Snapshot T_supply > `tsupply_UCL` **AND** snapshot current within LCL–UCL. |
 | **Confirmatory** | None. |
-| **Evaluation Point** | STABLE_ON only (≥10 min continuous compressor ON). |
+| **Evaluation Point** | Non-inverter: cycle end. Inverter: high-effort window end. |
 | **Severity** | Warning |
 | **Alert Type** | `fault_hvac_dirty_filter` |
 
-**Physics:** A clogged indoor filter restricts airflow across the evaporator coil. With less warm air passing over the coil, the refrigerant cannot absorb its design heat load. The evaporating temperature drops below specification, causing the coil surface to **supercool** (get colder than normal). This is the same mechanism that causes evaporator icing in severely blocked systems.
+**Physics:** A clogged indoor filter restricts airflow across the evaporator coil. With less warm air passing over the coil, the refrigerant cannot absorb its design heat load. The supply air temperature rises because the coil cannot chill it sufficiently. The compressor continues to draw normal current because the mechanical load hasn't changed — only the heat exchange has degraded.
 
-**Research Base:** Sun et al. (2013) identified coil temperature and ΔT as the strongest discriminators for airflow restriction faults. Bonvini et al. (2014) validated that restricted airflow primarily manifests as a **current draw anomaly with normal thermal parameters** — the compressor works against reduced suction pressure.
+**Why This Check:** Restricted airflow reduces total heat transfer → smaller temperature split (Delta-T drops). The compressor electrical load is unchanged because the mechanical resistance hasn't changed. This is the only cell in the matrix where Delta-T is low but current is normal.
 
-**Why This Check:** During normal compressor-ON operation, the coil reaches its coldest point near LCL. Supercooling from restricted airflow pushes it **below** this bound. We check `min_tcoil < LCL` because the coil gets colder, not warmer.
+**Trigger Condition:** `deltat < deltat_lcl` **AND** `current_lcl ≤ current ≤ current_ucl` at snapshot evaluation.
 
-**Trigger Condition:** `min_tcoil < tcoil_LCL` at **STABLE_ON cycle end** (fires immediately).
-
-**Code (`_evaluate_hvac_cycle()`):**
+**Code (`_evaluate_hvac_snapshot()`):**
 ```python
-    # --- Dirty Filter (Warning) - min coil temp < LCL (fires immediately) ---
-    # Physics: restricted airflow -> less heat load -> refrigerant supercools -> coil colder
-    tcoil_lcl = baselines.get('tcoil', {}).get('lcl')
-    if tcoil_lcl is not None and min_tcoil < tcoil_lcl:
+    deltat = snapshot.get('deltat', 0.0)
+    current = snapshot.get('current', 0.0)
+    deltat_lcl = baselines.get('deltat', {}).get('lcl')
+    current_lcl = baselines.get('current', {}).get('lcl')
+    current_ucl = baselines.get('current', {}).get('ucl')
+
+    if deltat >= deltat_lcl:
+        return  # Good condition
+
+    if current < current_lcl:
+        # Low refrigerant (see §4.3)
+        ...
+    elif current > current_ucl:
+        # Outdoor problem (see §4.4)
+        ...
+    else:
+        # Dirty filter — Delta-T low, current normal
         _insert_fault_alert(
             appliance_id, 'fault_hvac_dirty_filter',
-            f"Dirty indoor filter - min coil temp {min_tcoil:.2f}C below LCL {tcoil_lcl:.2f}C",
-            min_tcoil, tcoil_lcl, now, cur, conn)
+            f"Dirty indoor filter - Delta-T {deltat:.1f}C below LCL {deltat_lcl:.1f}C with normal current {current:.2f}A",
+            deltat, deltat_lcl, now, cur, conn)
 ```
 
 ---
 
-### 4.2 Low Refrigerant
+### 4.3 Low Refrigerant
 | Attribute | Detail |
 |-----------|--------|
 | **Description** | Refrigerant charge is below specification due to leak or improper installation. |
 | **Root Cause** | Micro-leaks in coil or lines; improper initial charge; Schrader valve leaks. |
-| **Primary Trigger** | Minimum coil temp during STABLE_ON > `tcoil_UCL` (coil warmer than normal). |
-| **Confirmatory** | Peak ΔT during STABLE_ON < `((deltat_UCL + deltat_mean) / 2)`. |
-| **Evaluation Point** | STABLE_ON only. |
+| **Primary Trigger** | Snapshot T_supply > `tsupply_UCL` **AND** snapshot current < `current_LCL`. |
+| **Confirmatory** | None. |
+| **Evaluation Point** | Non-inverter: cycle end. Inverter: high-effort window end. |
 | **Severity** | Critical |
 | **Alert Type** | `fault_hvac_low_refrigerant` |
 
 **Physics:** Low refrigerant charge means less refrigerant mass in the evaporator coil. The refrigerant evaporates too early in the coil path. By the time it reaches the end of the coil, it's all vapor and absorbing little heat. Result:
-- **ΔT drops**: The coil cannot chill the air enough → supply air is warmer → temperature split (return − supply) shrinks.
-- **Coil warms up**: The coil surface temperature rises because there's not enough liquid refrigerant left to absorb heat.
+- **Delta-T drops**: The coil cannot chill the air enough → temperature split shrinks.
+- **Current drops**: The compressor senses reduced suction pressure (less refrigerant to compress) and draws less current. The motor offloads because there is simply less mass to pump.
 
-**Research Base:** Sun et al. (2013) demonstrated that deviations in temperature differential (ΔT) and coil temperature are the strongest discriminators for refrigerant charge faults. Bonvini et al. (2014) validated that **thermal anomalies with normal current** indicate refrigerant-side faults (undercharge, leak).
+**Research Base:** Sun et al. (2013) demonstrated that deviations in temperature differential (ΔT) are the strongest discriminators for refrigerant charge faults. Bonvini et al. (2014) validated that **thermal anomalies with normal current** indicate refrigerant-side faults. In the snapshot matrix, "normal current" is replaced by "low current" because reduced refrigerant mass directly reduces compressor load.
 
-**Why This Check:** During normal stable operation, the evaporator coil should be cold. With low refrigerant, there's not enough liquid refrigerant to absorb heat, so the coil surface temperature rises (`min_tcoil > UCL`). The confirmatory `peak_deltat < ((UCL + mean) / 2)` catches the reduced temperature split caused by insufficient cooling capacity.
+**Why This Check:** Low refrigerant is the only condition that produces **both** small temperature split **and** low compressor current. The compressor has less work to do because there is less refrigerant to pump, while the reduced cooling capacity shrinks the Delta-T.
 
-**Trigger Condition:** `min_tcoil > tcoil_UCL` **OR** `peak_deltat < ((deltat_UCL + deltat_mean) / 2)` at **STABLE_ON cycle end**. Alert fires immediately on first detection.
+**Trigger Condition:** `deltat < deltat_lcl` **AND** `current < current_lcl` at snapshot evaluation.
 
-**Code (`_evaluate_hvac_cycle()`):**
+**Code (`_evaluate_hvac_snapshot()`):**
 ```python
-    # --- Low Refrigerant (Critical) ---
-    # Primary: min coil temp > UCL (coil warmer than normal)
-    # Confirmatory: peak dT fails to reach upper half of envelope (< (UCL + mean) / 2)
-    deltat_ucl = baselines.get('deltat', {}).get('ucl')
-    deltat_mean = baselines.get('deltat', {}).get('mean')
-    deltat_threshold = (deltat_ucl + deltat_mean) / 2.0 if deltat_ucl is not None and deltat_mean is not None else None
-    tcoil_ucl = baselines.get('tcoil', {}).get('ucl')
-
-    low_ref_triggered = False
-    if tcoil_ucl is not None and min_tcoil > tcoil_ucl:
-        low_ref_triggered = True
-    if deltat_threshold is not None and peak_deltat < deltat_threshold:
-        low_ref_triggered = True
-
-    if low_ref_triggered:
-        if tcoil_ucl is not None and min_tcoil > tcoil_ucl:
-            msg = f"Low refrigerant - min coil temp {min_tcoil:.2f}C above UCL {tcoil_ucl:.2f}C"
-            val, thresh = min_tcoil, tcoil_ucl
-        else:
-            msg = f"Low refrigerant - peak dT {peak_deltat:.2f}C below threshold {deltat_threshold:.2f}C"
-            val, thresh = peak_deltat, deltat_threshold
+    if current < current_lcl:
         _insert_fault_alert(
-            appliance_id, 'fault_hvac_low_refrigerant', msg,
-            val, thresh, now, cur, conn)
+            appliance_id, 'fault_hvac_low_refrigerant',
+            f"Low refrigerant - Delta-T {deltat:.1f}C below LCL {deltat_lcl:.1f}C with low current {current:.2f}A",
+            deltat, deltat_lcl, now, cur, conn)
 ```
 
 ---
 
-### 4.3 Compressor Electrical Fault / Hard Start
+### 4.4 Outdoor Problem (Capacitor / Condenser)
 | Attribute | Detail |
 |-----------|--------|
-| **Description** | Compressor draws excessive current due to mechanical strain or electrical fault. |
-| **Root Cause** | Failing compressor bearings, refrigerant overcharge, condenser blockage, starter relay failure. |
-| **Primary Trigger** | Average current during STABLE_ON > `current_UCL` at **STABLE_ON cycle end**. |
-| **Confirmatory** | Coil temp and ΔT may be normal or abnormal depending on root cause. |
-| **Evaluation Point** | STABLE_ON only. |
+| **Description** | Compressor or condenser is struggling due to electrical or mechanical fault. |
+| **Root Cause** | Failing run capacitor, dirty condenser, refrigerant overcharge, failing compressor bearings. |
+| **Primary Trigger** | Snapshot T_supply > `tsupply_UCL` **AND** snapshot current > `current_UCL`. |
+| **Confirmatory** | None. |
+| **Evaluation Point** | Non-inverter: cycle end. Inverter: high-effort window end. |
 | **Severity** | Critical |
 | **Alert Type** | `fault_hvac_compressor_fault` |
 
-**Physics:** During stable operation, compressor current should be relatively constant. Sustained elevation above UCL indicates the compressor is working harder than normal — failing bearings, refrigerant overcharge, condenser blockage, or starter relay failure.
+**Physics:** When the condenser cannot reject heat effectively (dirty coils, failing fan, bad capacitor), or when the compressor has internal mechanical friction (worn bearings), the high-side pressure rises. The compressor must work harder to push refrigerant against this elevated pressure. Result:
+- **Delta-T drops**: Less heat is rejected outdoors, so the system cannot absorb as much heat indoors → smaller temperature split.
+- **Current rises**: The compressor motor draws more power to overcome the increased mechanical load.
 
-**Research Base:** Sun et al. (2013) found that current draw deviations with normal thermal readings indicate condenser-side faults. Bonvini et al. (2014) validated that current anomalies combined with normal thermal parameters point to mechanical or electrical compressor issues.
+**Research Base:** Sun et al. (2013) found that current draw deviations with normal thermal readings indicate condenser-side faults. Bonvini et al. (2014) validated that current anomalies combined with normal thermal parameters point to mechanical or electrical compressor issues. In the snapshot matrix, "normal thermal" is replaced by "low Delta-T" because both thermal and electrical performance degrade simultaneously.
 
-**Why This Check:** Current is the most direct measure of compressor electrical load. Evaluating at STABLE_ON cycle end filters out brief startup surges. Unlike refrigerant or airflow faults which primarily affect thermal parameters, compressor electrical faults directly elevate current draw.
+**Why This Check:** An outdoor problem is the only condition that produces **both** small temperature split **and** high compressor current. The compressor is working harder but achieving less cooling — the hallmark of a condenser-side or compressor-side fault.
 
-**Trigger Condition:** `avg_current > current_UCL` at **STABLE_ON cycle end**. Alert fires immediately on first detection.
+**Trigger Condition:** `deltat < deltat_lcl` **AND** `current > current_ucl` at snapshot evaluation.
 
-**Code (`_evaluate_hvac_cycle()`):**
+**Code (`_evaluate_hvac_snapshot()`):**
 ```python
-    # --- Compressor Fault (Critical) - avg current > UCL ---
-    current_ucl = baselines.get('current', {}).get('ucl')
-    if current_ucl is not None and avg_current > current_ucl:
+    elif current > current_ucl:
         _insert_fault_alert(
             appliance_id, 'fault_hvac_compressor_fault',
-            f"Compressor electrical fault - avg current {avg_current:.2f}A exceeds UCL {current_ucl:.2f}A",
-                avg_current, current_ucl, now, cur, conn)
-            cf['cycle_count'] = 0
-    elif current_ucl is not None:
-        if 'fault_hvac_compressor_fault' in fat:
-            fat['fault_hvac_compressor_fault']['cycle_count'] = 0
+            f"Outdoor problem - Delta-T {deltat:.1f}C below LCL {deltat_lcl:.1f}C with high current {current:.2f}A",
+            current, current_ucl, now, cur, conn)
 ```
 
 ---
@@ -465,9 +481,11 @@ The original Zone A/B/C framework is **not applicable** to cyclic appliance data
 | **Dryer** | Motor current | Per-cycle median (spike-excluded) | Median ignores ignition spikes and cool-down phases; captures true motor load |
 | **Dryer** | Exhaust RH | End-of-cycle value (last 2 min average) | ORNL finding: end-RH is definitive dryness indicator |
 | **Dryer** | Exhaust temp | End-of-cycle value (last 2 min average) | Trapped heat at cycle end indicates blockage |
-| **HVAC** | ΔT | Per-STABLE_ON-cycle **peak** | Peak occurs after thermal equilibrium; compares like-with-like across cycles |
-| **HVAC** | Coil temp | Per-STABLE_ON-cycle **minimum** | Minimum coil temp indicates maximum cooling capacity |
-| **HVAC** | Current | Per-STABLE_ON-cycle **average** | Average filters out brief startup transients |
+| **HVAC** | ΔT | Snapshot reading with **maximum** Delta-T (both non-inverter and inverter) | Maximum Delta-T = best cooling performance; low maximum = fault |
+| **HVAC** | Current | Same snapshot as Delta-T | Used together with Delta-T in the fault matrix |
+| **HVAC** | T_supply | Kept on chart for **visual context only** | No longer used for fault detection |
+| **HVAC** | T_return | Kept on chart for **visual context only** | No longer used for fault detection |
+| **HVAC** | T_coil | Kept on chart for **visual context only** | No longer used for fault detection |
 
 ### 5.3 Cooldown & Resolution
 - **Alert Cooldown:** 10 minutes per fault type per appliance. Prevents alert spam.
@@ -487,9 +505,9 @@ If the user has not manually configured SPC baselines, fault detection is **comp
 | Barrel Roller Worn Out | `current` |
 | Belt Snapped | `current` |
 | Lint Blockage | `texhaust`, `rhexhaust` |
-| Dirty Indoor Filter | `tcoil` |
-| Low Refrigerant | `deltat`, `tcoil` |
-| Compressor Electrical Fault | `current` |
+| Dirty Indoor Filter | `deltat`, `current` |
+| Low Refrigerant | `deltat`, `current` |
+| Outdoor Problem (Capacitor/Condenser) | `deltat`, `current` |
 
 ---
 
@@ -507,9 +525,8 @@ When the user configures SPC baselines in the dashboard, display these instructi
 ### Split HVAC
 | Parameter | Instruction |
 |-----------|-------------|
-| **ΔT (Return − Supply)** | *"Set UCL to the highest ΔT and LCL to the lowest ΔT observed during stable inverter modulation. The system auto-derives the low-refrigerant threshold from these bounds."* |
-| **Coil Temperature** | *"Set UCL to the highest coil temp and LCL to the lowest coil temp observed during stable inverter modulation."* |
-| **Compressor Current** | *"Set UCL to the highest current and LCL to the lowest current observed during stable inverter modulation."* |
+| **ΔT (Return − Supply)** | *"Set UCL to the highest and LCL to the lowest temperature split observed during normal cooling. Delta-T LCL is the critical threshold — any cycle with maximum Delta-T below this value triggers fault evaluation."* |
+| **Compressor Current** | *"Set UCL to the highest current and LCL to the lowest current observed during normal operation. Used together with Delta-T in the fault matrix: low current + low Delta-T = low refrigerant; high current + low Delta-T = outdoor problem."* |
 
 ---
 
@@ -521,7 +538,11 @@ When the user configures SPC baselines in the dashboard, display these instructi
 3. If `baseline_configured` is false or required metrics are missing, return immediately.
 4. Maintain in-memory trackers:
    - `FAULT_ALERT_TRACKER = {appliance_id: {fault_type: {cycle_count, last_trigger, active}}}`
-   - `HVAC_CYCLE_TRACKER = {appliance_id: {state, stable_on_start, peak_deltat, min_tcoil, avg_current}}`
+   - `HVAC_CYCLE_TRACKER = {appliance_id: {state, start_time, best_reading, peak_current, maintain_start}}`
+     - `state`: `IDLE` or `RUNNING`
+     - `best_reading`: the snapshot reading (dict with `deltat`, `current`, etc.)
+     - `peak_current`: highest current seen during inverter high-effort window (retained for maintain-phase detection)
+     - `maintain_start`: timestamp when current first dropped below 70% of peak
    - `DRYER_CYCLE_STATS = {appliance_id: {cycle_start, spike_peaks[], motor_readings[]}}` (accumulates per-cycle data)
 5. On trigger, insert into `alerts` table with `alert_type = 'fault_*'` and 10-minute cooldown.
 

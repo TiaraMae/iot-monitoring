@@ -39,12 +39,17 @@ iot_thesis_v2/
 Identical to v1. See root `AGENTS.md` for full pin map and sensor specs.
 
 ### v2-Specific Hardware Notes
-- **Dryer SCT-013 Calibration Factor:** Updated to **30.0** (was 37.0 in v1). Deductor remains **0.111**.
+- **Dryer SCT-013 Calibration Factor:** Updated to **33.0** (was 37.0 in v1). Deductor remains **0.111**.
 - **Pressure Precision:** BME280 pressure readings now report **2 decimal places** (was 1 decimal) for finer exhaust duct monitoring.
 
 ### Key Firmware Changes
 - `baselinestartack`, `baselinesuccessack`, `baselinefailack` commands are **removed**.
 - **New command:** `baseline:set` → node beeps 3 short beeps to confirm baseline configuration.
+- **Current threshold lowered:** 0.4 A → **0.25 A** across all firmware usages (telemetry gating, LED, status, checkin, BME280 stuck detection).
+- **Watchdog hardening:** `esp_task_wdt_reset()` + `delay(1)` at critical blocking points (ADC sampling loop, DHT reads, DS18B20 conversion wait). Replaces `yield()` which did not guarantee ISR servicing on single-core ESP32-C3.
+- **DS18B20 non-blocking:** `setWaitForConversion(false)` in setup + yielding 750 ms wait loop instead of blocking `requestTemperatures()`.
+- **Buffer flush cap:** Maximum **10** offline messages published per `loop()` iteration to prevent long MQTT blocking.
+- **Buzzer UX:** Button 2 5s hold (HVAC calibration request) is now **silent** — no local beep. `startcalibration` backend ack = 1 short beep.
 
 ---
 
@@ -82,7 +87,7 @@ Pattern-based fault detection gated behind `baseline_configured = TRUE`. All fau
 **Dryer Faults:**
 | Fault | Trigger | Severity |
 |-------|---------|----------|
-| `fault_dryer_roller_wear` | Per-cycle motor baseline median > UCL at cycle end | Warning |
+| `fault_dryer_roller_wear` | Per-cycle motor baseline median > UCL at cycle end (fires immediately) | Warning |
 | `fault_dryer_belt_snapped` | Per-cycle motor baseline median < LCL at cycle end **OR** cycle aborts via >60s gap with `min_current < LCL` | Critical |
 | `fault_dryer_lint_blockage` | End-of-cycle RH > UCL AND max exhaust temp > UCL | Critical |
 | `fault_dryer_incomplete_drying` | End-of-cycle RH > UCL | Info |
@@ -90,7 +95,7 @@ Pattern-based fault detection gated behind `baseline_configured = TRUE`. All fau
 **HVAC Faults:**
 | Fault | Trigger | Severity |
 |-------|---------|----------|
-| `fault_hvac_dirty_filter` | Min coil temp < LCL during STABLE_ON at cycle end | Warning |
+| `fault_hvac_dirty_filter` | Min coil temp < LCL during STABLE_ON at cycle end (fires immediately) | Warning |
 | `fault_hvac_low_refrigerant` | Min coil temp > UCL (primary) OR peak ΔT < ((UCL + mean) / 2) (confirmatory) during STABLE_ON at cycle end | Critical |
 | `fault_hvac_compressor_fault` | Avg current > UCL during STABLE_ON at cycle end | Critical |
 
@@ -115,20 +120,38 @@ Pattern-based fault detection gated behind `baseline_configured = TRUE`. All fau
 6. If a Discord webhook URL is configured for the user, `send_discord_alert()` fires a rich embed (fire-and-forget).
 
 ### Discord Webhook Alerts (NEW)
-Each user can configure a personal Discord webhook URL. When any alert fires, a rich color-coded embed is sent to that user's Discord channel instantly.
+Each user can configure a personal Discord webhook URL. When a **fault alert** fires, a rich color-coded embed is sent to that user's Discord channel instantly.
 
-**Alert types that trigger Discord:**
-- SPC breaches (`spc_ucl_breach`, `spc_lcl_breach`)
-- Fault alerts (`fault_dryer_*`, `fault_hvac_*`)
-- Dryer humidity alerts (`dryer_humidity_high`)
+**Alert types that trigger Discord (7 fault types only):**
+- `fault_dryer_incomplete_drying`
+- `fault_dryer_roller_wear`
+- `fault_dryer_belt_snapped`
+- `fault_dryer_lint_blockage`
+- `fault_hvac_dirty_filter`
+- `fault_hvac_low_refrigerant`
+- `fault_hvac_compressor_fault`
+
+**Alert types that do NOT trigger Discord (DB/dashboard only):**
+- SPC breaches (`spc_ucl_breach`, `spc_lcl_breach`) — raw data point spam, not actionable
+- Legacy humidity alert (`dryer_humidity_high`) — superseded by `fault_dryer_incomplete_drying`
+
+**Embed format — Maintenance-ticket style:**
+Each Discord embed includes a severity icon + human-readable title, fault description, root cause, and recommended action. Example:
+```
+🔴 Belt Snapped
+Belt snapped — motor baseline 1.20A below LCL 1.60A
+━━━━━━━━━━━━━━━━━━━━
+📍 Appliance: Dryer Test
+🔍 Cause: Age, overloading, or misalignment.
+🔧 Recommended Action: Replace drive belt immediately.
+```
 
 **Embed colors by severity:**
 | Severity | Color | Hex | Alert Types |
 |----------|-------|-----|-------------|
-| Critical | 🔴 Red | `#EF4444` | Belt snapped, lint blockage, low refrigerant, compressor fault, SPC breach |
+| Critical | 🔴 Red | `#EF4444` | Belt snapped, lint blockage, low refrigerant, compressor fault |
 | Warning | 🟠 Orange | `#F59E0B` | Roller wear, dirty filter |
 | Info | 🔵 Blue | `#3B82F6` | Incomplete drying |
-| Humidity | 🟡 Yellow | `#EAB308` | Dryer humidity high |
 
 **Implementation:** `send_discord_alert()` is fire-and-forget. It fetches the user's webhook URL via `get_user_webhook(appliance_id)`, builds the embed, and POSTs via `requests`. Discord failures are logged but never block the DB alert insert.
 
@@ -152,8 +175,8 @@ Each user can configure a personal Discord webhook URL. When any alert fires, a 
 | `GET/POST` | `/api/device/<id>/baseline_config` | Get/save manual SPC baselines |
 | `GET/POST` | `/api/device/<id>/thresholds` | Get/set `alert_rhexhaust_threshold` and `alert_enabled` |
 | `GET` | `/api/device/<id>/alerts` | List alerts (resolved/unresolved) — read-only |
-| `GET` | `/api/device/<id>/hvac_analytics` | Daily averages (last 30 days, compressor running) |
-| `GET` | `/api/device/<id>/dryer_analytics` | Cycle detection + ignition peak stats |
+| `GET` | `/api/device/<id>/hvac_analytics` | Daily averages + daily energy kWh (last 30 days, compressor running). Optional `?start=&end=` time-range filter. |
+| `GET` | `/api/device/<id>/dryer_analytics` | Cycle detection + ignition peak stats + per-cycle energy kWh. Optional `?start=&end=` time-range filter. |
 | `GET` | `/api/user/discord_webhook` | Fetch current Discord webhook URL (masked) |
 | `POST` | `/api/user/discord_webhook` | Save/update Discord webhook URL |
 | `POST` | `/api/user/discord_webhook/test` | Send test embed to verify webhook |
@@ -201,9 +224,11 @@ Each chart has 4 datasets: value line + UCL dashed + Mean dashed + LCL dashed.
 | `pushToCharts(time, v1, v2, v3, v4, doUpdate, isHVAC)` | Deduplicates by `timeMs`; pushes to each chart's `data.labels`/`timeLabels`; trims to `MAX_CHART_POINTS = 1080` in live mode. |
 | `applySPCLines()` | Mutates SPC datasets **in-place** (`push`/`pop`/`assign`) to match data label count — avoids Chart.js metadata invalidation. |
 | `saveBaselineConfig()` | Collects UCL/LCL inputs, validates, POSTs to `/baseline_config`. On success: hides inputs, calls `checkBaselineResults()`, fetches fresh `/spc_limits`, redraws lines. |
+| `formatDateTimeInput(el)` | Auto-formats digits-only input to `DD-MM-YYYY HH:MM:SS` as the user types. Used on all 4 date/time inputs. |
+| `normalizeDateTimeInput(raw)` | Parses `DD-MM-YYYY HH:MM:SS` (or 2-digit year / ISO-like variants) into `YYYY-MM-DDTHH:MM:SS` for backend queries. |
 | `checkBaselineResults()` | Fetches `/baseline_analysis`; toggles Configure/Edit buttons; shows `baseline-timestamp` from `MAX(updated_at)`. |
 | `buildStatusPolling(id, type)` | Polls `/spc_limits` every 4s. **Fires immediately on card click** (not after delay). Updates card badge, modal action bar, and SPC lines. |
-| `updateDataTable()` | Fetches `/hvac_analytics` or `/dryer_analytics`; rebuilds `<thead>` and `<tbody>`. Only populates when `status === 'normal'`. |
+| `updateDataTable()` | Fetches `/hvac_analytics` or `/dryer_analytics`; rebuilds `<thead>` and `<tbody>`. Only populates when `status === 'normal'`. Includes DOM cleanup for stale header divs when switching between HVAC and dryer. |
 
 ### Readings Grid Visibility
 
@@ -283,6 +308,146 @@ id | email | password_hash | name | created_at | discord_webhook_url
 ---
 
 ## 8. Changelog
+
+### 2026-05-10 — Calendar Date Picker + Auto-Format Time Input (v2 Frontend)
+- **Change:** Replaced free-text date/time inputs with 3-part picker: calendar `type="date"`, auto-format time, AM/PM dropdown.
+- **Time auto-format:** Typing digits auto-inserts colons (`092534` → `09:25:34`).
+- **AM/PM conversion:** Frontend converts 12h + AM/PM to 24h ISO before backend send.
+- **Fields:** History Range and Export Modal start/end (4 fields).
+
+### 2026-05-10 — DHT NaN Corruption Fix + Infinite False Telemetry Fix (v2 Firmware)
+- **DHT NaN Problem:** DHT22 intermittently returns NaN (~40% failure rate observed for DHT2). Old code mapped NaN → 0 before adding to the running sum, then divided by `MAX_SAMPLES` (5) regardless of validity. When 2 of 5 samples were NaN, the average was corrupted (e.g., 14.7°C → 8.8°C).
+- **DHT Fix:** Added per-metric valid counters decoupled from `sampleCount` timing. Averages are `sum / validCount`. If `validCount == 0`, metric falls back to last-known-good value (previous window's average). Skips bad samples without corrupting averages or changing publish cadence.
+- **Infinite Telemetry Problem:** When compressor turned off and `currentVal == 0.0` for a full window, `validCurrentA` became 0. The `lastGoodCurrentA` fallback (stale 3.1A) was used for the average. Since `lastGoodCurrentA` was never updated when `validCurrentA == 0`, this produced false running telemetry **every 10 seconds indefinitely** while LED showed idle.
+- **Telemetry Fix:** Removed `lastGoodCurrentA` fallback for current. If all 5 samples are 0.0, average is **0.0**. Moved `lastAvgCurrent = currentVal` outside the `if` block so it updates unconditionally.
+
+### 2026-05-10 — Interrupt WDT Timeout Fix + Current Threshold Lowered + Buzzer Hardening (v2 Firmware)
+- **Problem:** `Core 0 panic'ed (Interrupt wdt timeout on CPU0)` crash ~10 seconds after telemetry during normal running. Previous `yield()` fixes were insufficient on the single-core ESP32-C3.
+- **Root cause:** `loop()` blocked for too long during DS18B20 conversion (750 ms), DHT reads (~4–5 ms each, with disabled interrupts), and 200 ms ADC sampling. ISRs (WiFi, MQTT) were starved, triggering the Interrupt Watchdog (~300 ms timeout).
+- **Fix:**
+  - Replaced all `yield()` calls with `delay(1)` at critical blocking points. `delay(1)` forces FreeRTOS context switch, guaranteeing ISR servicing. `yield()` does not when the calling task is highest priority.
+  - Added `esp_task_wdt_reset()` at the start of `loop()` and inside the 200 ms ADC sampling loop (every 25 reads) and DS18B20 wait loop.
+  - DS18B20 changed to non-blocking: `setWaitForConversion(false)` in setup, replaced blocking `requestTemperatures()` with `requestTemperatures()` + yielding 750 ms wait loop.
+  - Buffer flush capped at **10 messages per loop** to prevent long blocking during MQTT publish of large offline queues.
+- **Current threshold lowered:** 0.4 A → **0.25 A** across all 6 usages in firmware (telemetry gating, LED, status, checkin, BME280 stuck detection).
+- **Buzzer UX:** Button 2 5s hold (HVAC calibration request) is now **silent** — no local beep. The only audible feedback is the `startcalibration` ack from the backend (1 short beep).
+
+### 2026-05-07 — Live vs Historical Ignition Count Unification
+- **Problem:** Live auto-update and historical analytics showed **different ignition spike counts** for the same dryer cycle. Live under-counted spikes (e.g., 3 vs 4), and historical over-counted borderline bumps in some cases.
+- **Root cause:** Two completely different spike detection algorithms existed:
+  - **Historical (`dryer_analytics()`):** Entry on any `current > prev` rise; confirms pending peak when next rise starts while in FALLING state; confirms at cycle end.
+  - **Live (`_check_dryer_faults()`):** Entry only when `current - prev > prominence`; no FALLING→RISING transition handler; confirmation gated by broken `current <= mean + 0.15` check. When motor baseline (~3.05 A) never dropped below `mean + 0.15` (e.g., 2.65 A), the state machine got stuck in FALLING and lost all subsequent spikes.
+- **Fix:**
+  - **Unified state machine:** Live now uses the exact same 3-state logic as historical — entry on any `current > prev`, confirm previous peak before starting new rise when in FALLING, fall on `current < peak_max - 0.1`.
+  - **Removed broken confirmation gate:** Replaced `current <= mean + 0.15` with cycle-end confirmation in `_finalize_dryer_cycle()` (same `_confirm_peak()` logic as historical).
+  - **First-reading skip:** Live cycle start now sets `prev_current = current` and skips spike processing for the first reading, matching historical behavior.
+  - **Motor readings collection:** Live now collects **all** cycle readings into `motor_readings` and applies the same `filter_threshold = average × 1.15` at cycle end, matching historical.
+- **Result:** Live and historical ignition counts are now **identical** for all mean values (verified against exported `Gas_Test_Lab_20260508_111231_10907e.xlsx`).
+
+### 2026-05-07 — Dryer Ignition Prominence Threshold Lowered to 0.4A
+- **Change:** Prominence threshold changed from dynamic `max(0.35, mean_current * 0.20)` to fixed **0.4A** in both live (`_check_dryer_faults`) and historical (`dryer_analytics`) algorithms.
+- **Why:** User visually identified 5 spikes in the current chart but the algorithm only counted 3–4. The dynamic formula produced thresholds of 0.50–0.56A (with mean 2.5–2.8A), filtering out the 3.45A bump (prominence 0.39A) and sometimes the 3.62A bump (prominence 0.55A).
+- **Effect with 0.4A:** Cycle 2 now counts **4 spikes** (4.26A, 3.87A, 3.62A, 4.30A). The 3.45A bump (0.39A prominence) remains just below threshold.
+- **Risk:** Very low — motor baseline fluctuation is only ±0.03A, so 0.4A is >10× above noise floor.
+
+### 2026-05-07 — Live vs History Range Analytics Cache Fix
+- **Problem:** After backend restart, Live Auto-Update showed **3 ignitions** while History Range showed **4 ignitions** for the same cycle. Both should use the same `dryer_analytics()` backend code.
+- **Root cause (frontend):** Two bugs in `dashboard.html`:
+  1. **Browser caching:** `fetch(endpoint)` had no cache-busting. The old `dryer_analytics` response (pre-restart) was cached for the URL without query params. History Range used a different URL (`?start=...&end=...`), bypassing the cache.
+  2. **Stale table on mode switch:** `onChartModeChange()` called `initCharts()` when switching to Live mode but **never called `updateDataTable()`**. The analytics table stayed on whatever was last rendered (History Range data).
+- **Fix:**
+  - Added cache-busting timestamp: `fetch(endpoint + (endpoint.includes('?') ? '&' : '?') + '_t=' + Date.now())`
+  - Added `updateDataTable()` call in `onChartModeChange()` when switching to Live mode.
+
+### 2026-05-07 — Cycle-End _confirm_peak() Ordering Bug Fix
+- **Problem:** After all previous fixes, Live Auto-Update still showed **3 ignitions** while History Range showed **4 ignitions** for the same cycle 2. Debug logs showed the 4.299A spike was present in `end_of_data` path but missing in `gap` path.
+- **Root cause:** In `dryer_analytics()`, the 3 cycle-finalization paths had inconsistent `_confirm_peak()` ordering:
+  - **Gap path** (used by live full query): `_confirm_peak()` was called **after** `ignition_count` and `current_spike_avg` were computed. The pending spike was confirmed too late — added to `_peak_values` after the count was already saved to the cycle object.
+  - **Current-drop path** (same bug): `_confirm_peak()` also called after cycle stats computation.
+  - **End-of-data path** (used by history range): `_confirm_peak()` called **before** cycle stats — correct.
+- **Fix:** Moved `_confirm_peak()` to **before** `current_spike_avg` and `ignition_count` in both gap and current-drop paths. All 3 paths now confirm pending spikes before computing stats.
+- **Result:** Live and history range counts are now guaranteed identical regardless of how a cycle ends (gap, current drop, or end of data).
+
+### 2026-05-07 — BME280 Infinite Reset Loop Fix + Hardening (v2 Firmware)
+- **Problem:** BME280 readings froze for ~70 seconds, then produced garbage spikes (e.g., 86.7°C). When a wire became loose, the firmware entered an **infinite reset loop** — out-of-range triggered a soft reset every 2 seconds, but the wire was still loose, so the next reading was also garbage, triggering another reset.
+- **Root cause analysis:**
+  1. **Initialization:** v2 firmware had no error check on `bme.begin()` and no stabilization delays between `begin()` and `setSampling()`. Sensor could initialize into undefined state.
+  2. **I2C bus instability:** Default 400kHz I2C clock + 10ms inter-register delays were marginal under WiFi interrupt load.
+  3. **No stuck-value recovery:** Old `bmeStuckCounter` was removed (false positives). But sensor DOES lock up — returning identical cached values for many samples. NaN-based soft reset never triggered because values were not NaN.
+  4. **Immediate reset on any bad reading:** Out-of-range and stuck detectors triggered a soft reset on the **first** bad reading, with no cooldown. A loose wire caused an infinite 2-second reset loop.
+- **Fix:**
+  - **Error check + delays:** Added `if (!bme.begin(...))` + `delay(100)` after begin + `delay(50)` after `setSampling()`.
+  - **I2C slowdown:** `Wire.setClock(100000L)` reduces clock from 400kHz → 100kHz for stability.
+  - **Inter-register delays:** Increased from 10ms → 50ms between `readTemperature()` / `readHumidity()` / `readPressure()`.
+  - **Stuck-value detection:** If temp+hum+pres are identical for 15 consecutive valid samples **while the dryer is running** (`lastAvgCurrent >= 0.25`) → soft reset (with 5s cooldown). Counter resets when idle to avoid false positives in stable ambient conditions.
+  - **Out-of-range detection:** If temp > 85°C or pressure < 800hPa → counts up (1/15, 2/15, ...). Requires **15 consecutive** bad readings before reset. Also added lower bounds: temp < -40°C or pressure > 1100 hPa.
+  - **Reset cooldown:** All three reset paths (NaN, stuck, out-of-range) now enforce a **minimum 5-second cooldown** between soft resets. This breaks the infinite loop.
+  - **Diagnostic logging:** All three paths now log the actual `T=%.1f H=%.1f P=%.1f` values that triggered the condition, making it easy to distinguish I2C timeout (`0.0/0.0/0.0`) from garbage (`86.7/100.0/722.1`) from stuck values.
+  - **Unified soft-reset helper:** Extracted reset logic into reusable lambda called by NaN, stuck, and out-of-range paths.
+- **Hardware note:** Software mitigations help but cannot fully compensate for missing I2C pull-up resistors (4.7kΩ) or missing decoupling capacitor (100nF). These hardware fixes are strongly recommended.
+
+### 2026-05-07 — LED TX Flash Removed (v2 Firmware)
+- **Problem:** When the appliance was running, the LED should be solid ON, but a small super-fast blink was visible every 10 seconds during MQTT telemetry transmission.
+- **Root cause:** `publishEventJson()` and `publishTelemetry()` both explicitly toggled the LED OFF → publish → `delay(30)` → LED ON, creating a "TX activity flash." This overrode the LED state machine, which already sets solid ON for running state.
+- **Fix:** Removed all `digitalWrite(PINLED, ...)` calls and `delay(30)` from both publish functions. The LED state machine is now the single source of truth for LED behavior.
+- **Result:** LED stays perfectly solid when running, with no flicker during transmissions.
+
+### 2026-05-07 — Live Chart Buffered Data Refresh
+- **Problem:** When offline-buffered data arrived while the dashboard stayed open, the live chart showed gaps instead of the buffered points that should fill the gap. After a manual page refresh, the chart rendered correctly.
+- **Root cause:** `initCharts()` was called immediately on reconnect, before the backend had finished inserting all buffered MQTT messages. Buffered points that arrived after `initCharts()` completed were dropped by `pushToCharts()` because they were >5 seconds older than `latestChartTimeMs`.
+- **Fix:**
+  - On reconnect, `initCharts()` now runs after a **1.5-second delay** (`setTimeout`) to let the backend finish inserting buffered rows.
+  - Added gap/backward detection in `updateDetailData()`: if a live point is >10 seconds older than `latestChartTimeMs` (late-arriving buffered data) or the gap since the last point is >30 seconds (offline period), `initCharts()` is triggered to reload history.
+  - Widened `pushToCharts()` backward guard from 5 seconds → 30 seconds as secondary safety net.
+
+### 2026-05-06 — Idle Badge Delay Fix, Empty Charts Race Condition Fix
+- **Idle Badge Delay:** `updateDetailData()` was called before the modal overlay was active, causing its early-exit guard to fire silently. The badge only appeared when the global 5-second interval fired. Fixed by activating the modal **before** calling `updateDetailData()` in `openDeviceDetail()`.
+- **Empty Charts Race Condition:** After the badge fix, `updateDetailData()` ran concurrently with `initCharts()`'s async history fetch. Live data pushed to charts set `latestChartTimeMs` to the newest timestamp, causing all subsequent history data points to be skipped (they were older). Added `historyLoading` flag: set `true` when `initCharts()` starts, cleared when history fetch completes. `updateDetailData()` only pushes to charts when `!historyLoading`.
+
+### 2026-05-06 — Energy kWh Integration, HVAC Analytics Daily Report, Date Input Auto-Format, HVAC Fault Alert Refinement
+- **Energy kWh:** Replaced raw current sum with proper kWh calculation (`energy_ws = Σ(current × voltage × dt) / 3,600,000`). Added `appliances.voltage` column (default 220V). Added `get_appliance_voltage()` helper.
+- **Dryer Analytics:** Per-cycle `energy_kwh` computed using actual time deltas between readings. Table column renamed from `Consumption (A)` to `Energy (kWh)`.
+- **HVAC Analytics:** Added daily averages with integrated daily energy consumption. Backend detects cycles per day and sums energy across all cycles within that day. Returns `{"daily_averages": [...]}` only — per-cycle table removed from frontend.
+- **Date/Time Inputs:** Changed 4 inputs from `datetime-local` → `text` with `formatDateTimeInput()` (digits-only typing, auto-inserts `-`, `:`, and spaces) and `normalizeDateTimeInput()` (parses `DD-MM-YYYY HH:MM:SS` → ISO).
+
+### 2026-05-07 — Offline/Online Status Fix, Debug Print Cleanup, BME280 Threshold Finalization
+- **Backend:** Added `ever_connected` flag to `api_device_latest` response. Frontend now distinguishes between a device that was **never connected** (yellow "Awaiting Sensor Data...") and a device that **went offline after previously connecting** (red "Device Offline").
+- **Backend:** Increased `offline_threshold_seconds` from **600s → 660s** (11 minutes). Checkin interval is 600s (10 min); the extra 60s prevents idle devices from flickering offline between checkins.
+- **Backend:** Removed 7 temporary `[DRYER_ANALYTICS]` debug print statements from `dryer_analytics()`.
+- **Firmware (BME280):** Raised stuck-value and out-of-range thresholds from 5 → **15 consecutive readings** before triggering soft reset. Prevents premature resets during normal transient conditions.
+- **Firmware (BME280):** Stuck-value detection now only active when running (`lastAvgCurrent >= 0.4`). Counter resets when idle to avoid false positives in stable exhaust duct conditions.
+
+### 2026-05-07 — History Range Input Copy-Paste Friendly
+- **Problem:** Analytics tables display dates as `toLocaleString()` (e.g., `"5/7/2026, 4:26:35 PM"`), but history/export inputs forced `DD-MM-YYYY HH:MM:SS` via a digit-only formatter. Users could not copy-paste dates from the analytics table into the history range fields.
+- **Fix:**
+  - Removed `oninput="formatDateTimeInput(this)"` from history and export inputs — free-text paste is now allowed.
+  - Updated placeholders to `"M/D/YYYY, H:MM:SS AM/PM"`.
+  - Extended `normalizeDateTimeInput()` to parse `toLocaleString()` format (`M/D/YYYY, H:MM:SS AM/PM` → ISO) with correct AM/PM conversion.
+  - Updated `formatLocalForInput()` to use `toLocaleString('en-US', { hour12: true })` so default export dates also match the format.
+  - Backward-compatible: existing `DD-MM-YYYY HH:MM:SS`, `DD-MM-YY HH:MM:SS`, and `YYYY-MM-DD HH:MM:SS` entries still work.
+- **HVAC Fault Alerts:** Changed from cycle-end evaluation to **3 consecutive readings** in `STABLE_ON` state. Reduced `STABLE_ON` gate from 10 min → **7 min** (`elapsed >= 420`). Added `HVAC_FAULT_COUNTERS` dict with per-reading `_evaluate_hvac_reading()`.
+- **Time-Range Query Fix:** Padded `end` parameter by +1 second in `hvac_analytics()` and `dryer_analytics()` to include milliseconds. Fixes issue where a cycle end time copied from the UI (seconds precision) would exclude the actual DB reading (microsecond precision).
+- **Frontend DOM Cleanup:** Removed stale `<div>` insertion before `<tbody>` that caused "Daily Averages" ghost header to leak into dryer view. Fixed empty-state checks for HVAC object response.
+
+### 2026-05-05 — HVAC Calibration Progress Fix, BME280 Hardening, Motor Current Fix, Ignition Count Fix
+- **Firmware (Calibration):** Fixed HVAC calibration progress dashboard sync. During calibration (`CALIBBASELINEWAIT` / `CALIBRUNNING`), normal sampling was skipped so no telemetry was published. Backend had no live data and used stale DB readings, causing frozen progress and wrong `start_tcoil`.
+  - **Fix:** Firmware publishes `calibration_progress` events every ~2.2 s containing `t3`, `base_t3`, and `delta`.
+  - **Backend:** New event handler updates `CALIBRATION_TRACKER` with live values. `api_calibration_progress` reads from tracker first.
+- **Firmware (BME280):** Removed false stuck-detection logic (`bmeStuckCounter`) that triggered after only 3 identical samples (~6 s) during normal operation. Removed `recoverI2C()` from the main loop — bit-banging SCL/SDA was corrupting the active I2C bus by leaving SDA in push-pull OUTPUT mode after `Wire.begin()`.
+- **Firmware (BME280):** Simplified BME280 configuration to match the proven `gas_dryer_test` pattern: `MODE_NORMAL, SAMPLING_X2, SAMPLING_X16, SAMPLING_X1, FILTER_X16, STANDBY_MS_62_5`. Removed `Wire.setClock(50000L)` (untested edge case on ESP32-C3).
+- **Firmware (BME280):** Added **10 ms delay between BME register reads** to prevent I2C transaction collision under FreeRTOS task switching / WiFi ISR preemption.
+- **Firmware (BME280):** Added **3-attempt retry loop** for NaN readings with 50 ms backoff. Auto-soft-reset (write `0xB6` to reset register + re-init) on 5 consecutive NaN samples.
+- **Firmware (BME280):** Invalid readings now emit **`null`** in JSON instead of `0.0`. Dashboard shows "—" for missing BME data. Added `bmeValidSamples` counter for accurate averaging.
+- **Firmware (Setup):** Moved `setupWifi()` before sensor initialization. DHT warm-up loop (up to 20 s) now runs **only for HVAC**; skipped for dryers. BME init simplified to single `bme.begin(0x76, &Wire)`.
+- **Backend (Motor current):** Fixed `_motor_readings` only appending when `_peak_state == "IDLE"`. The peak state machine could get stuck in "RISING" because the fallback drop threshold (0.1 A) exceeded actual gas dryer motor fluctuation (±0.03 A). Now collects **ALL readings** into `_motor_readings` and filters ignition spikes at runtime with `filter_threshold = average * 1.15`. Motor baseline median is now stable (~3.1 A) across all time ranges.
+- **Backend (Ignition count):** Added hysteresis (`_peak_max - 0.1`) and hard floor (`_peak_max > mean_current + 0.15`) to peak detection. Verified against `Dryer_Test_20260505_111710.xlsx` — correctly reports 4 ignitions instead of 5.
+
+### 2026-05-05 — Discord Alert System Revision
+- **Discord — Fault-Only Alerts:** Raw SPC breach alerts (`spc_ucl_breach`, `spc_lcl_breach`) are **removed from Discord**. They still insert into the `alerts` table and appear on the dashboard, but they no longer spam the Discord channel.
+- **Discord — `dryer_humidity_high` Removed:** The legacy end-of-cycle humidity alert (`dryer_humidity_high`) is also **removed from Discord**. The more precise `fault_dryer_incomplete_drying` (SPC-based) remains active and is sent to Discord instead.
+- **Discord — Maintenance-Ticket Embeds:** `send_discord_alert()` rewritten with `FAULT_DISCORD_MAP`. Each fault alert now sends a rich embed containing: severity icon + human-readable title, fault description, root cause, and recommended action — formatted like a maintenance work order.
+- **Fault Triggering — Immediate:** Removed the 3-consecutive-cycle confirmation delay from `fault_dryer_roller_wear` and `fault_hvac_dirty_filter`. Both now fire **immediately on first detection** at cycle end. The existing 10-minute cooldown per fault type (`_insert_fault_alert()`) prevents spam without delaying actionable maintenance advice.
+- **Faults Going to Discord (7 types):** `fault_dryer_incomplete_drying`, `fault_dryer_roller_wear`, `fault_dryer_belt_snapped`, `fault_dryer_lint_blockage`, `fault_hvac_dirty_filter`, `fault_hvac_low_refrigerant`, `fault_hvac_compressor_fault`.
 
 ### 2026-05-04 — Bug Fixes & Security Hardening
 - **Security:** Removed hardcoded credential defaults from `app.py`. Added `python-dotenv` loading. App raises `RuntimeError` on startup if `FLASK_SECRET_KEY`, `MQTT_PASS`, or `DB_PASSWORD` is missing. Local `.env` file (gitignored) is now required.

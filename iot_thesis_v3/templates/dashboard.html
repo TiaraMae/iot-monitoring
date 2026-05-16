@@ -392,7 +392,77 @@
         /* Countdown */
         .countdown-timer { font-size: 1.1rem; font-weight: 700; color: var(--primary); margin-top: 0.5rem; display: inline-block;}
 
-        /* --- MOBILE RESPONSIVE --- */
+        /* --- ENERGY SUMMARY SECTION --- */
+        .energy-summary-section {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            box-shadow: var(--shadow-sm);
+        }
+        .energy-summary-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+        .energy-summary-title { font-size: 1.25rem; font-weight: 600; }
+        .energy-summary-controls { display: flex; gap: 0.75rem; align-items: center; }
+        .energy-summary-body {
+            display: flex;
+            gap: 2rem;
+            align-items: flex-start;
+        }
+        .energy-chart-wrapper {
+            flex: 0 0 320px;
+            height: 320px;
+            position: relative;
+        }
+        .energy-summary-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            min-width: 0;
+        }
+        .energy-total-box {
+            background: var(--bg);
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
+        }
+        .energy-total-label { display: block; color: var(--text-muted); font-size: 0.875rem; }
+        .energy-total-value { display: block; font-size: 1.75rem; font-weight: 700; color: var(--primary); margin-top: 0.25rem; }
+        .energy-type-breakdown { display: flex; gap: 1rem; }
+        .energy-type-item {
+            flex: 1;
+            background: var(--bg);
+            border-radius: 8px;
+            padding: 0.75rem;
+            text-align: center;
+        }
+        .energy-type-item.hvac { border-left: 4px solid #2563EB; }
+        .energy-type-item.dryer { border-left: 4px solid #F59E0B; }
+        .energy-type-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; }
+        .energy-type-value { font-size: 1.1rem; font-weight: 600; margin-top: 0.25rem; }
+        .energy-appliance-list { max-height: 160px; overflow-y: auto; }
+        .energy-appliance-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.4rem 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.875rem;
+        }
+        .energy-appliance-name { display: flex; align-items: center; gap: 0.5rem; }
+        .energy-dot {
+            width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0;
+        }
+
+        /* --- MOBILE RESPONSIVE ---
         .sidebar-overlay {
             display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(0,0,0,0.5); z-index: 95;
@@ -406,6 +476,9 @@
             .dashboard-grid { grid-template-columns: 1fr; }
             .detail-panel { height: 100%; max-height: 100vh; border-radius: 0; transform: translateY(100%); }
             .detail-overlay { padding: 0; }
+            .energy-summary-body { flex-direction: column; align-items: center; }
+            .energy-chart-wrapper { flex: 0 0 auto; width: 280px; height: 280px; }
+            .energy-summary-header { flex-direction: column; align-items: flex-start; }
         }
     </style>
 </head>
@@ -456,13 +529,35 @@
                 <div class="page-header"><h1 class="page-title">Device Dashboard</h1></div>
 
                 {% if appliances %}
+                <div class="energy-summary-section" id="energy-summary-section">
+                    <div class="energy-summary-header">
+                        <h2 class="energy-summary-title">Monthly Energy Consumption</h2>
+                        <div class="energy-summary-controls">
+                            <select id="energy-month-select" class="form-control"></select>
+                            <button class="btn btn-primary" onclick="exportEnergySummary()">📥 Export Excel</button>
+                        </div>
+                    </div>
+                    <div class="energy-summary-body">
+                        <div class="energy-chart-wrapper">
+                            <canvas id="energyPieChart"></canvas>
+                        </div>
+                        <div class="energy-summary-panel">
+                            <div class="energy-total-box">
+                                <span class="energy-total-label">Total Consumption</span>
+                                <span class="energy-total-value" id="energy-total-kwh">-- kWh</span>
+                            </div>
+                            <div class="energy-type-breakdown" id="energy-type-breakdown"></div>
+                            <div class="energy-appliance-list" id="energy-appliance-list"></div>
+                        </div>
+                    </div>
+                </div>
                 <div class="dashboard-grid">
                     {% for a in appliances %}
                     <div class="card" id="card-{{ a.id }}" data-id="{{ a.id }}" data-name="{{ a.name|replace('"', '&quot;') }}" data-type="{{ a.type }}" data-status="{{ a.status }}" onclick="openDeviceDetail(this)">
                         <div class="card-header">
                             <div>
                                 <h3 class="card-title">{{ a.name }}</h3>
-                                <div class="card-subtitle">{{ a.type }} {% if a.subtype %}({{ a.subtype|title }}){% endif %}</div>
+                                <div class="card-subtitle">{{ a.type }} {% if a.sub_type and 'HVAC' in a.type %}({{ a.sub_type|title }}){% endif %}</div>
                             </div>
                             <div>
                                 {% if a.status == 'calibration_needed' %}
@@ -542,8 +637,8 @@
                         <div id="dynamic-details" style="display:none;">
                             <div class="form-group" id="ac-subtype" style="display:none;">
                                 <label class="form-label">HVAC Technology</label>
-                                <select name="subtype" class="form-control">
-                                    <option value="non_inverter">Non-Inverter (Fixed Speed)</option>
+                                <select name="sub_type" class="form-control">
+                                    <option value="noninverter">Non-Inverter (Fixed Speed)</option>
                                     <option value="inverter">Inverter (Variable Speed)</option>
                                 </select>
                             </div>
@@ -606,6 +701,15 @@
                             </div>
                             <button class="btn btn-primary" onclick="applyHistoryRange()" style="padding: 0.35rem 0.75rem; font-size: 0.8rem;">Apply</button>
                         </div>
+                        <div style="display: flex; align-items: center; gap: 0.5rem; margin-left: auto; flex-wrap: wrap;">
+                            <label style="font-size: 0.85rem; font-weight: 600; color: var(--text);">Data:</label>
+                            <label style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.8rem; cursor: pointer; color: var(--text);">
+                                <input type="radio" name="data-filter" value="filtered" checked onchange="onFilterChange(this)"> Filtered
+                            </label>
+                            <label style="display: flex; align-items: center; gap: 0.3rem; font-size: 0.8rem; cursor: pointer; color: var(--text);">
+                                <input type="radio" name="data-filter" value="unfiltered" onchange="onFilterChange(this)"> Unfiltered
+                            </label>
+                        </div>
                     </div>
                 </div>
 
@@ -629,11 +733,22 @@
                         <div class="spc-legend" id="legend-chart-3"></div>
                         <div id="baseline-inputs-chart-3" class="baseline-inputs-row" style="display:none; margin-top:0.5rem; padding:0.75rem; background:var(--bg); border-radius:8px; border:1px solid var(--border);"></div>
                     </div>
+                    <div class="spc-chart-section" id="section-chart-6">
+                        <div class="spc-chart-title" id="title-chart-6">Delta Humidity (ΔRH)</div>
+                        <div class="spc-chart-wrapper"><canvas id="chart6"></canvas></div>
+                        <div class="spc-legend" id="legend-chart-6"></div>
+                    </div>
                     <div class="spc-chart-section" id="section-chart-4">
                         <div class="spc-chart-title" id="title-chart-4">Chart 4</div>
                         <div class="spc-chart-wrapper"><canvas id="chart4"></canvas></div>
                         <div class="spc-legend" id="legend-chart-4"></div>
                         <div id="baseline-inputs-chart-4" class="baseline-inputs-row" style="display:none; margin-top:0.5rem; padding:0.75rem; background:var(--bg); border-radius:8px; border:1px solid var(--border);"></div>
+                    </div>
+                    <div class="spc-chart-section" id="section-chart-5">
+                        <div class="spc-chart-title" id="title-chart-5">Chart 5</div>
+                        <div class="spc-chart-wrapper"><canvas id="chart5"></canvas></div>
+                        <div class="spc-legend" id="legend-chart-5"></div>
+                        <div id="baseline-inputs-chart-5" class="baseline-inputs-row" style="display:none; margin-top:0.5rem; padding:0.75rem; background:var(--bg); border-radius:8px; border:1px solid var(--border);"></div>
                     </div>
                 </div>
 
@@ -787,7 +902,13 @@
                         </div>
                     </div>
                 </div>
-                <button class="btn btn-primary" onclick="downloadExcel()" style="width:100%; justify-content:center; margin-top:1rem;">
+                <div class="form-group" style="margin-top: 0.75rem;">
+                    <label style="display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: var(--text); cursor: pointer;">
+                        <input type="checkbox" id="export-include-idle" style="cursor: pointer;">
+                        Include idle data
+                    </label>
+                </div>
+                <button class="btn btn-primary" onclick="downloadExcel()" style="width:100%; justify-content:center; margin-top:0.5rem;">
                     Download Excel File
                 </button>
             </div>
@@ -796,7 +917,7 @@
 
     <script>
         let currentDetailId = null;
-        let chart1 = null, chart2 = null, chart3 = null, chart4 = null;
+        let chart1 = null, chart2 = null, chart3 = null, chart4 = null, chart5 = null, chart6 = null;
         let spcLimits = {};
         let statusPollInterval = null;
         let latestChartTimeMs = Date.now();
@@ -928,6 +1049,9 @@
                 document.getElementById('history-range-inputs').style.display = 'none';
                 historyStart = null;
                 historyEnd = null;
+                // Reset filter toggle to 'Filtered' so UI matches JS default
+                showIdle = false;
+                document.querySelectorAll('input[name="data-filter"]').forEach(r => r.checked = (r.value === 'filtered'));
 
                 // Fetch baseline status BEFORE building action bar
                 try {
@@ -983,15 +1107,15 @@
             // Hide baseline inputs
             hideBaselineInputs();
 
-            [chart1, chart2, chart3, chart4].forEach(c => { if(c) c.destroy(); });
-            chart1 = chart2 = chart3 = chart4 = null;
+            [chart1, chart2, chart3, chart4, chart5, chart6].forEach(c => { if(c) c.destroy(); });
+            chart1 = chart2 = chart3 = chart4 = chart5 = chart6 = null;
             spcLimits = {};
             latestChartTimeMs = Date.now();
         }
 
         /* --- BASELINE CONFIG --- */
         function hideBaselineInputs() {
-            for (let i = 1; i <= 4; i++) {
+            for (let i = 1; i <= 5; i++) {
                 const el = document.getElementById(`baseline-inputs-chart-${i}`);
                 if (el) el.style.display = 'none';
             }
@@ -1006,17 +1130,21 @@
             const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
             const isHVAC = card && card.dataset.type.includes('HVAC');
             const chartMetrics = isHVAC ?
-                [['deltat', 'Delta-T (°C)'], ['tcoil', 'Coil Temp (°C)'], ['deltarh', 'Delta-RH (%)'], ['current', 'Current (A)']] :
-                [['texhaust', 'Exhaust Temp (°C)'], ['rhexhaust', 'Exhaust RH (%)'], ['pressure', 'Pressure (hPa)'], ['current', 'Current (A)']];
+                [['deltat', 'Delta-T (°C)'], ['current', 'Current (A)']] :
+                [['texhaust', 'Exhaust Temp (°C)'], ['rhexhaust', 'Exhaust RH (%)'], ['current', 'Current (A)']];
+            const metricChartMap = isHVAC ?
+                {'deltat': 1, 'current': 5} :
+                {'texhaust': 1, 'rhexhaust': 2, 'current': 4};
 
             fetch(`/api/device/${currentDetailId}/baseline_config`).then(r => r.json()).then(data => {
                 if (data.error) return;
                 const guidance = isHVAC
-                    ? 'HVAC: set UCL to the highest value and LCL to the lowest value observed during stable inverter modulation. The system auto-derives fault thresholds from these bounds.'
-                    : 'Dryer: set UCL/LCL for Temp, Humidity, and Pressure. For Motor Current, enter the observed baseline mean — UCL and LCL are auto-derived as ±20%.';
+                    ? 'HVAC: set UCL/LCL for Delta-T and Current. Delta-T LCL is the smallest temperature split observed during normal cooling; Current UCL/LCL bound the normal compressor operating range.'
+                    : 'Dryer: set UCL/LCL for Temp and Humidity. For Motor Current, enter the observed baseline mean — UCL and LCL are auto-derived as ±20%.';
                 const guidanceHtml = `<div style="font-size:0.75rem; color:var(--text-muted); margin-bottom:0.5rem; padding:0.4rem 0.6rem; background:var(--bg); border-left:3px solid var(--primary); border-radius:0 4px 4px 0;"><strong>Guidance:</strong> ${guidance}</div>`;
-                chartMetrics.forEach(([key, label], idx) => {
-                    const container = document.getElementById(`baseline-inputs-chart-${idx + 1}`);
+                chartMetrics.forEach(([key, label]) => {
+                    const chartIdx = metricChartMap[key];
+                    const container = document.getElementById(`baseline-inputs-chart-${chartIdx}`);
                     if (!container) return;
                     const vals = data.metrics && data.metrics[key] ? data.metrics[key] : {ucl: '', lcl: '', mean: ''};
                     const isDryerCurrent = !isHVAC && key === 'current';
@@ -1025,7 +1153,7 @@
                         const meanVal = (vals.mean !== '' && vals.mean !== undefined && vals.mean !== null) ? parseFloat(vals.mean).toFixed(2) : '';
                         const uclDisp = meanVal !== '' ? (parseFloat(meanVal) * 1.20).toFixed(3) : '--';
                         const lclDisp = meanVal !== '' ? (parseFloat(meanVal) * 0.80).toFixed(3) : '--';
-                        container.innerHTML = (idx === 0 ? guidanceHtml : '') + `
+                        container.innerHTML = (chartIdx === 1 ? guidanceHtml : '') + `
                             <div style="display:flex; gap:1rem; align-items:flex-end; flex-wrap:wrap;">
                                 <div style="flex:1; min-width:100px;">
                                     <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">Mean (A)</label>
@@ -1043,7 +1171,7 @@
                         `;
                     } else {
                         const mean = (vals.ucl !== '' && vals.lcl !== '') ? ((parseFloat(vals.ucl) + parseFloat(vals.lcl)) / 2).toFixed(2) : '--';
-                        container.innerHTML = (idx === 0 ? guidanceHtml : '') + `
+                        container.innerHTML = (chartIdx === 1 ? guidanceHtml : '') + `
                             <div style="display:flex; gap:1rem; align-items:flex-end; flex-wrap:wrap;">
                                 <div style="flex:1; min-width:100px;">
                                     <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">UCL</label>
@@ -1102,7 +1230,7 @@
             if (!currentDetailId) return;
             const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
             const isHVAC = card && card.dataset.type.includes('HVAC');
-            const metrics = isHVAC ? ['deltat', 'tcoil', 'deltarh', 'current'] : ['texhaust', 'rhexhaust', 'pressure', 'current'];
+            const metrics = isHVAC ? ['deltat', 'current'] : ['texhaust', 'rhexhaust', 'current'];
             const payload = { metrics: {} };
             for (const m of metrics) {
                 const isDryerCurrent = !isHVAC && m === 'current';
@@ -1143,7 +1271,7 @@
                         if (!data.error) {
                             spcLimits = data;
                             applySPCLines();
-                            [chart1, chart2, chart3, chart4].forEach(c => { if(c) c.update('none'); });
+                            [chart1, chart2, chart3, chart4, chart5].forEach(c => { if(c) c.update('none'); });
                         }
                     }).catch(()=>{});
                 } else {
@@ -1566,10 +1694,25 @@
         /* --- EXPORT --- */
         function showExportModal() {
             document.getElementById('export-overlay').classList.add('active');
-            const now = new Date();
-            const weekAgo = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
-            setDateTimeGroup('export-end-date', 'export-end-time', 'export-end-ampm', now);
-            setDateTimeGroup('export-start-date', 'export-start-time', 'export-start-ampm', weekAgo);
+            
+            if (chartMode === 'history' && historyStart && historyEnd) {
+                // Pre-fill with the currently monitored history range
+                document.getElementById('export-range').value = 'custom';
+                toggleDateInputs();
+                
+                const startDate = new Date(historyStart);
+                const endDate = new Date(historyEnd);
+                setDateTimeGroup('export-start-date', 'export-start-time', 'export-start-ampm', startDate);
+                setDateTimeGroup('export-end-date', 'export-end-time', 'export-end-ampm', endDate);
+            } else {
+                // Default: last 7 days
+                document.getElementById('export-range').value = 'all';
+                toggleDateInputs();
+                const now = new Date();
+                const weekAgo = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
+                setDateTimeGroup('export-end-date', 'export-end-time', 'export-end-ampm', now);
+                setDateTimeGroup('export-start-date', 'export-start-time', 'export-start-ampm', weekAgo);
+            }
         }
         function closeExportModal() {
             document.getElementById('export-overlay').classList.remove('active');
@@ -1581,13 +1724,22 @@
         function downloadExcel() {
             if (!currentDetailId) return;
             const range = document.getElementById('export-range').value;
+            const includeIdle = document.getElementById('export-include-idle').checked;
             let url = '/api/device/' + currentDetailId + '/export_excel';
+            const params = [];
+            if (!includeIdle) {
+                params.push('filtered=true');
+            } else {
+                params.push('filtered=false');
+            }
             if (range === 'custom') {
                 const start = combineDateTime('export-start-date', 'export-start-time', 'export-start-ampm');
                 const end = combineDateTime('export-end-date', 'export-end-time', 'export-end-ampm');
                 if (!start || !end) { alert("Please fill in date, time, and AM/PM for both export fields."); return; }
-                url += `?start_date=${encodeURIComponent(start)}&end_date=${encodeURIComponent(end)}`;
+                params.push(`start_date=${encodeURIComponent(start)}`);
+                params.push(`end_date=${encodeURIComponent(end)}`);
             }
+            if (params.length) url += '?' + params.join('&');
             window.location.href = url;
             closeExportModal();
         }
@@ -1597,6 +1749,7 @@
         let chartMode = 'live';
         let historyStart = null;
         let historyEnd = null;
+        let showIdle = false; // filtered=true by default
         // Per-chart timestamp arrays are attached directly to Chart.js instances
         let initChartsRequestId = 0; // ignore stale fetch callbacks
 
@@ -1630,9 +1783,9 @@
         function initCharts(id, isHVAC) {
             const reqId = ++initChartsRequestId;
             historyLoading = true;  // block live pushes until history is loaded
-            [chart1, chart2, chart3, chart4].forEach(c => { if(c) c.destroy(); });
-            chart1 = chart2 = chart3 = chart4 = null;
-            latestChartTimeMs = 0;  // Reset dedup tracker before loading history
+            latestChartTimeMs = 0;  // Reset dedup tracker BEFORE destroying charts
+            [chart1, chart2, chart3, chart4, chart5, chart6].forEach(c => { if(c) c.destroy(); });
+            chart1 = chart2 = chart3 = chart4 = chart5 = chart6 = null;
 
             const mkDataset = (label, color, dash, fill=false) => ({
                 label: label, data: [], borderColor: color, backgroundColor: fill ? color+'33' : 'transparent',
@@ -1655,50 +1808,70 @@
                 });
                 chart1.timeLabels = [];
 
-                document.getElementById('title-chart-2').innerText = "Coil Temperature (Evaporator)";
+                document.getElementById('title-chart-2').innerText = "Supply Air Temperature (T_supply)";
                 document.getElementById('legend-chart-2').innerHTML = `
-                    <span><span class="spc-legend-line" style="background:#10B981"></span>Tcoil °C</span>
-                    <span><span class="spc-legend-line" style="background:#EF4444"></span>UCL</span>
-                    <span><span class="spc-legend-line" style="background:#64748B"></span>Mean</span>
-                    <span><span class="spc-legend-line" style="background:#3B82F6"></span>LCL</span>
+                    <span><span class="spc-legend-line" style="background:#10B981"></span>T_supply °C</span>
                 `;
                 chart2 = new Chart(document.getElementById('chart2').getContext('2d'), {
                     type: 'line', data: { datasets: [
-                        mkDataset('Tcoil', '#10B981', []), mkDataset('UCL', '#EF4444', [6,3]),
-                        mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
+                        mkDataset('T_supply', '#10B981', [])
                     ] }, options: makeSPCChartOptions('°C')
                 });
                 chart2.timeLabels = [];
 
-                document.getElementById('title-chart-3').innerText = "Delta RH (Return − Supply)";
+                document.getElementById('title-chart-3').innerText = "Return Air Temperature (T_return)";
                 document.getElementById('legend-chart-3').innerHTML = `
-                    <span><span class="spc-legend-line" style="background:#8B5CF6"></span>Delta-RH %</span>
-                    <span><span class="spc-legend-line" style="background:#EF4444; border-top:2px dashed #EF4444"></span>UCL</span>
-                    <span><span class="spc-legend-line" style="background:#64748B; border-top:2px dashed #64748B"></span>Mean</span>
-                    <span><span class="spc-legend-line" style="background:#3B82F6; border-top:2px dashed #3B82F6"></span>LCL</span>
+                    <span><span class="spc-legend-line" style="background:#8B5CF6"></span>T_return °C</span>
                 `;
                 chart3 = new Chart(document.getElementById('chart3').getContext('2d'), {
                     type: 'line', data: { datasets: [
-                        mkDataset('Delta-RH', '#8B5CF6', []), mkDataset('UCL', '#EF4444', [6,3]),
-                        mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
-                    ] }, options: makeSPCChartOptions('%')
+                        mkDataset('T_return', '#8B5CF6', [])
+                    ] }, options: makeSPCChartOptions('°C')
                 });
                 chart3.timeLabels = [];
 
-                document.getElementById('title-chart-4').innerText = "Compressor Current";
+                document.getElementById('title-chart-6').innerText = "Delta Humidity (ΔRH)";
+                document.getElementById('legend-chart-6').innerHTML = `
+                    <span><span class="spc-legend-line" style="background:#EC4899"></span>ΔRH %</span>
+                `;
+                chart6 = new Chart(document.getElementById('chart6').getContext('2d'), {
+                    type: 'line', data: { datasets: [
+                        mkDataset('ΔRH', '#EC4899', [])
+                    ] }, options: makeSPCChartOptions('%')
+                });
+                chart6.timeLabels = [];
+
+                document.getElementById('title-chart-4').innerText = "Coil Temperature (Evaporator)";
                 document.getElementById('legend-chart-4').innerHTML = `
+                    <span><span class="spc-legend-line" style="background:#14B8A6"></span>T_coil °C</span>
+                `;
+                chart4 = new Chart(document.getElementById('chart4').getContext('2d'), {
+                    type: 'line', data: { datasets: [
+                        mkDataset('T_coil', '#14B8A6', [])
+                    ] }, options: makeSPCChartOptions('°C')
+                });
+                chart4.timeLabels = [];
+
+                // Ensure chart 5 and chart 6 sections are visible for HVAC
+                const section5 = document.getElementById('section-chart-5');
+                if (section5) section5.style.display = 'block';
+                const section6 = document.getElementById('section-chart-6');
+                if (section6) section6.style.display = 'block';
+
+                document.getElementById('title-chart-5').innerText = "Compressor Current";
+                document.getElementById('legend-chart-5').innerHTML = `
                     <span><span class="spc-legend-line" style="background:#F59E0B"></span>Current A</span>
                     <span><span class="spc-legend-line" style="background:#EF4444; border-top:2px dashed #EF4444"></span>UCL</span>
                     <span><span class="spc-legend-line" style="background:#64748B; border-top:2px dashed #64748B"></span>Mean</span>
                     <span><span class="spc-legend-line" style="background:#3B82F6; border-top:2px dashed #3B82F6"></span>LCL</span>
                 `;
-                chart4 = new Chart(document.getElementById('chart4').getContext('2d'), {
+                chart5 = new Chart(document.getElementById('chart5').getContext('2d'), {
                     type: 'line', data: { datasets: [
                         mkDataset('Current', '#F59E0B', [], true), mkDataset('UCL', '#EF4444', [6,3]),
                         mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
                     ] }, options: makeSPCChartOptions('A')
                 });
-                chart4.timeLabels = [];
+                chart5.timeLabels = [];
 
             } else {
                 // Dryer Charts — 4 separate graphs
@@ -1735,17 +1908,23 @@
                 document.getElementById('title-chart-3').innerText = "Exhaust Pressure";
                 document.getElementById('legend-chart-3').innerHTML = `
                     <span><span class="spc-legend-line" style="background:#059669"></span>Pressure hPa</span>
-                    <span><span class="spc-legend-line" style="background:#EF4444; border-top:2px dashed #EF4444"></span>UCL</span>
-                    <span><span class="spc-legend-line" style="background:#64748B; border-top:2px dashed #64748B"></span>Mean</span>
-                    <span><span class="spc-legend-line" style="background:#3B82F6; border-top:2px dashed #3B82F6"></span>LCL</span>
                 `;
                 chart3 = new Chart(document.getElementById('chart3').getContext('2d'), {
                     type: 'line', data: { datasets: [
-                        mkDataset('Pressure', '#059669', [], true), mkDataset('UCL', '#EF4444', [6,3]),
-                        mkDataset('Mean', '#64748B', [4,4]), mkDataset('LCL', '#3B82F6', [6,3])
+                        mkDataset('Pressure', '#059669', [], true)
                     ] }, options: makeSPCChartOptions('hPa')
                 });
                 chart3.timeLabels = [];
+
+                // Hide chart 5 and chart 6 (only used for HVAC)
+                document.getElementById('title-chart-5').innerText = '';
+                document.getElementById('legend-chart-5').innerHTML = '';
+                const section5 = document.getElementById('section-chart-5');
+                if (section5) section5.style.display = 'none';
+                document.getElementById('title-chart-6').innerText = '';
+                document.getElementById('legend-chart-6').innerHTML = '';
+                const section6 = document.getElementById('section-chart-6');
+                if (section6) section6.style.display = 'none';
 
                 document.getElementById('title-chart-4').innerText = "Motor Current (Gas Ignition Spikes)";
                 document.getElementById('legend-chart-4').innerHTML = `
@@ -1775,7 +1954,7 @@
 
             // Fetch history
             const limit = chartMode === 'live' ? MAX_CHART_POINTS : 5000;
-            let url = `/api/device/${id}/latest_n?limit=${limit}`;
+            let url = `/api/device/${id}/latest_n?limit=${limit}&filtered=${!showIdle}&_cb=${Date.now()}`;
             if (chartMode === 'history' && historyStart && historyEnd) {
                 url += `&start=${encodeURIComponent(historyStart)}&end=${encodeURIComponent(historyEnd)}`;
             }
@@ -1788,15 +1967,15 @@
                     
                     hist.forEach(d => {
                         if (isHVAC) {
-                            pushToCharts(new Date(d.time), Math.abs(d.Treturn - d.Tsupply), d.Tcoil, Math.abs(d.RHreturn - d.RHsupply), d.Icompressor, false, isHVAC);
+                            pushToCharts(new Date(d.time), Math.abs(d.Treturn - d.Tsupply), d.Tsupply, d.Treturn, d.Tcoil, d.Icompressor, Math.abs(d.RHreturn - d.RHsupply), false, isHVAC);
                         } else {
-                            pushToCharts(new Date(d.time), d.Texhaust, d.RHexhaust, d.Pressure, d.Imotor, false, isHVAC);
+                            pushToCharts(new Date(d.time), d.Texhaust, d.RHexhaust, d.Pressure, d.Imotor, null, null, false, isHVAC);
                         }
                     });
                     
                     if (spcLimits) applySPCLines();
                     
-                    [chart1, chart2, chart3, chart4].forEach(c => {
+                    [chart1, chart2, chart3, chart4, chart5, chart6].forEach(c => {
                         if (c) c.update('none');
                     });
                 })
@@ -1825,19 +2004,18 @@
                 chart.update('quiet');
             }
             if (spcLimits.deltat) {
+                // HVAC: only evaluated charts get SPC lines
                 setLines(chart1, spcLimits.deltat);
-                setLines(chart2, spcLimits.tcoil);
-                setLines(chart3, spcLimits.deltarh);
-                setLines(chart4, spcLimits.current);
-            } else if (spcLimits.temp) {
-                setLines(chart1, spcLimits.temp);
-                setLines(chart2, spcLimits.humidity);
-                setLines(chart3, spcLimits.pressure);
+                setLines(chart5, spcLimits.current);
+            } else if (spcLimits.texhaust) {
+                // Dryer: only evaluated charts get SPC lines
+                setLines(chart1, spcLimits.texhaust);
+                setLines(chart2, spcLimits.rhexhaust);
                 setLines(chart4, spcLimits.current);
             }
         }
 
-        function pushToCharts(time, val1, val2, val3, val4, doUpdate=true, isHVAC=true) {
+        function pushToCharts(time, val1, val2, val3, val4, val5, val6, doUpdate=true, isHVAC=true, isIdle=false) {
             const timeMs = time instanceof Date ? time.getTime() : time;
             // Allow backward time (up to 30s) so buffered messages arriving after a reconnect are not dropped
             if (timeMs <= latestChartTimeMs - 30000) return; // skip duplicates / out-of-order
@@ -1847,32 +2025,51 @@
                 ? time.toLocaleDateString() + ' ' + time.toLocaleTimeString()
                 : new Date(time).toLocaleDateString() + ' ' + new Date(time).toLocaleTimeString();
 
-            function updateChart(chart, val) {
+            function updateChart(chart, val, idle) {
                 if (!chart) return;
                 chart.data.labels.push(label);
                 chart.data.datasets[0].data.push(val);
                 if (!chart.timeLabels) chart.timeLabels = [];
                 chart.timeLabels.push(timeLabel);
+                // Point styling for idle vs running
+                const ds = chart.data.datasets[0];
+                if (!ds.pointBackgroundColor) ds.pointBackgroundColor = [];
+                if (!Array.isArray(ds.pointBackgroundColor)) ds.pointBackgroundColor = [];
+                if (!ds.pointRadius) ds.pointRadius = [];
+                if (!Array.isArray(ds.pointRadius)) ds.pointRadius = [];
+                if (idle) {
+                    ds.pointBackgroundColor.push('#94a3b8');
+                    ds.pointRadius.push(1);
+                } else {
+                    ds.pointBackgroundColor.push(ds.borderColor);
+                    ds.pointRadius.push(3);
+                }
             }
 
-            updateChart(chart1, val1);
-            updateChart(chart2, val2);
-            updateChart(chart3, val3);
-            updateChart(chart4, val4);
+            updateChart(chart1, val1, isIdle);
+            updateChart(chart2, val2, isIdle);
+            updateChart(chart3, val3, isIdle);
+            updateChart(chart4, val4, isIdle);
+            updateChart(chart5, val5, isIdle);
+            updateChart(chart6, val6, isIdle);
 
             if (chartMode === 'live') {
-                [chart1, chart2, chart3, chart4].forEach(c => {
+                [chart1, chart2, chart3, chart4, chart5, chart6].forEach(c => {
                     if (!c) return;
                     while (c.data.labels.length > MAX_CHART_POINTS) {
                         c.data.labels.shift();
-                        c.data.datasets.forEach(ds => { if (ds.data.length) ds.data.shift(); });
+                        c.data.datasets.forEach(ds => {
+                            if (ds.data.length) ds.data.shift();
+                            if (ds.pointBackgroundColor && Array.isArray(ds.pointBackgroundColor) && ds.pointBackgroundColor.length) ds.pointBackgroundColor.shift();
+                            if (ds.pointRadius && Array.isArray(ds.pointRadius) && ds.pointRadius.length) ds.pointRadius.shift();
+                        });
                         c.timeLabels.shift();
                     }
                 });
             }
 
             if (doUpdate) {
-                [chart1, chart2, chart3, chart4].forEach(c => { if(c) c.update('quiet'); });
+                [chart1, chart2, chart3, chart4, chart5, chart6].forEach(c => { if(c) c.update('quiet'); });
                 if (spcLimits) applySPCLines();
             }
         }
@@ -1885,6 +2082,18 @@
             if (mode === 'live' && currentDetailId) {
                 const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
                 if (card) initCharts(currentDetailId, card.dataset.type.includes('HVAC'));
+                updateDataTable();
+            }
+        }
+
+        function onFilterChange(el) {
+            showIdle = el.value === 'unfiltered';
+            if (currentDetailId) {
+                const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
+                if (card) {
+                    // Small delay to let old chart cleanup finish before recreate
+                    setTimeout(() => initCharts(currentDetailId, card.dataset.type.includes('HVAC')), 50);
+                }
                 updateDataTable();
             }
         }
@@ -2076,7 +2285,8 @@
             const timeGap = timeMs - latestChartTimeMs;
 
             // Detect late-arriving buffered data or large offline gaps and refresh history
-            if (chartMode === 'live' && !historyLoading && latestChartTimeMs > 0) {
+            // Only when device is running — idle devices naturally have gaps in running data
+            if (data.running_status === 'running' && chartMode === 'live' && !historyLoading && latestChartTimeMs > 0) {
                 if (timeMs < latestChartTimeMs - 10000) {
                     console.log('[LATE DATA] Buffered point older than chart — refreshing history');
                     initCharts(currentDetailId, isHVAC);
@@ -2104,7 +2314,12 @@
                 document.getElementById('detail-deltarh').innerText = deltaRH.toFixed(1) + ' %';
                 
                 if (shouldPush) {
-                    pushToCharts(now, delta, data.Tcoil, deltaRH, data.Icompressor, true, isHVAC);
+                    const idle = data.running_status !== 'running';
+                    if (!showIdle && idle) {
+                        // Filtered mode: skip idle live updates
+                    } else {
+                        pushToCharts(now, delta, data.Tsupply, data.Treturn, data.Tcoil, data.Icompressor, deltaRH, true, isHVAC, idle);
+                    }
                 }
             } else {
                 document.getElementById('detail-t1').innerText = data.Texhaust.toFixed(1) + ' °C';
@@ -2113,7 +2328,12 @@
                 document.getElementById('detail-amp').innerText = data.Imotor.toFixed(2) + ' A';
                 
                 if (shouldPush) {
-                    pushToCharts(now, data.Texhaust, data.RHexhaust, data.Pressure, data.Imotor, true, isHVAC);
+                    const idle = data.running_status !== 'running';
+                    if (!showIdle && idle) {
+                        // Filtered mode: skip idle live updates
+                    } else {
+                        pushToCharts(now, data.Texhaust, data.RHexhaust, data.Pressure, data.Imotor, null, null, true, isHVAC, idle);
+                    }
                 }
             }
         })
@@ -2238,10 +2458,157 @@
             }).catch(() => {});
         }
 
+        /* --- ENERGY SUMMARY --- */
+        let energyPieChart = null;
+        let energyApplianceData = [];
+
+        const HVAC_COLORS = ['#2563EB', '#3B82F6', '#60A5FA', '#93C5FD', '#BFDBFE'];
+        const DRYER_COLORS = ['#F59E0B', '#FBBF24', '#FCD34D', '#FDE68A', '#FEF3C7'];
+
+        function initEnergySummary() {
+            const select = document.getElementById('energy-month-select');
+            fetch('/api/energy_months')
+                .then(r => r.json())
+                .then(months => {
+                    select.innerHTML = '';
+                    if (!months || months.length === 0) {
+                        const opt = document.createElement('option');
+                        opt.value = '';
+                        opt.textContent = 'No data available';
+                        select.appendChild(opt);
+                        select.disabled = true;
+                        return;
+                    }
+                    select.disabled = false;
+                    months.forEach(m => {
+                        const [y, mon] = m.split('-');
+                        const d = new Date(parseInt(y), parseInt(mon) - 1, 1);
+                        const label = d.toLocaleString('default', { month: 'long', year: 'numeric' });
+                        const opt = document.createElement('option');
+                        opt.value = m;
+                        opt.textContent = label;
+                        select.appendChild(opt);
+                    });
+                    select.addEventListener('change', updateEnergySummary);
+                    updateEnergySummary();
+                })
+                .catch(() => {
+                    select.innerHTML = '';
+                    const opt = document.createElement('option');
+                    opt.value = '';
+                    opt.textContent = 'No data available';
+                    select.appendChild(opt);
+                    select.disabled = true;
+                });
+
+            const ctx = document.getElementById('energyPieChart').getContext('2d');
+            energyPieChart = new Chart(ctx, {
+                type: 'pie',
+                data: { labels: [], datasets: [{ data: [], backgroundColor: [], borderWidth: 2, borderColor: '#fff' }] },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const app = energyApplianceData[context.dataIndex];
+                                    const total = energyApplianceData.reduce((s, a) => s + a.energy_kwh, 0);
+                                    const pct = total > 0 ? ((app.energy_kwh / total) * 100).toFixed(1) : '0.0';
+                                    return `${app.name}: ${app.energy_kwh.toFixed(2)} kWh (${pct}%)`;
+                                }
+                            }
+                        }
+                    },
+                }
+            });
+
+            updateEnergySummary();
+        }
+
+        function updateEnergySummary() {
+            const month = document.getElementById('energy-month-select').value;
+            fetch(`/api/energy_summary?month=${month}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) return;
+
+                    const appliances = data.appliances || [];
+                    const total = data.total_kwh || 0;
+                    const byType = data.by_type || {};
+
+                    // Filter out zero-energy appliances from chart
+                    const chartApps = appliances.filter(a => a.energy_kwh > 0);
+                    energyApplianceData = chartApps;
+
+                    // Assign colors
+                    let hvacIdx = 0, dryerIdx = 0;
+                    const colors = chartApps.map(a => {
+                        if (a.type.includes('Dryer')) {
+                            return DRYER_COLORS[dryerIdx++ % DRYER_COLORS.length];
+                        }
+                        return HVAC_COLORS[hvacIdx++ % HVAC_COLORS.length];
+                    });
+
+                    // Update chart
+                    energyPieChart.data.labels = chartApps.map(a => a.name);
+                    energyPieChart.data.datasets[0].data = chartApps.map(a => a.energy_kwh);
+                    energyPieChart.data.datasets[0].backgroundColor = colors;
+                    energyPieChart.update();
+
+                    // Update total
+                    document.getElementById('energy-total-kwh').textContent = total.toFixed(2) + ' kWh';
+
+                    // Update type breakdown
+                    const typeContainer = document.getElementById('energy-type-breakdown');
+                    typeContainer.innerHTML = '';
+                    Object.entries(byType).forEach(([type, energy]) => {
+                        const div = document.createElement('div');
+                        div.className = `energy-type-item ${type.includes('Dryer') ? 'dryer' : 'hvac'}`;
+                        const pct = total > 0 ? ((energy / total) * 100).toFixed(1) : '0.0';
+                        div.innerHTML = `
+                            <div class="energy-type-label">${type}</div>
+                            <div class="energy-type-value">${energy.toFixed(2)} kWh</div>
+                            <div style="font-size:0.75rem;color:var(--text-muted);">${pct}%</div>
+                        `;
+                        typeContainer.appendChild(div);
+                    });
+
+                    // Update appliance list (sorted desc)
+                    const listContainer = document.getElementById('energy-appliance-list');
+                    listContainer.innerHTML = '';
+                    const sorted = [...appliances].sort((a, b) => b.energy_kwh - a.energy_kwh);
+                    sorted.forEach(a => {
+                        const div = document.createElement('div');
+                        div.className = 'energy-appliance-item';
+                        const color = a.type.includes('Dryer')
+                            ? DRYER_COLORS[0]
+                            : HVAC_COLORS[0];
+                        div.innerHTML = `
+                            <div class="energy-appliance-name">
+                                <span class="energy-dot" style="background:${color}"></span>
+                                <span>${a.name}</span>
+                            </div>
+                            <span>${a.energy_kwh.toFixed(2)} kWh</span>
+                        `;
+                        listContainer.appendChild(div);
+                    });
+                })
+                .catch(() => {});
+        }
+
+        function exportEnergySummary() {
+            const month = document.getElementById('energy-month-select').value;
+            window.open(`/api/energy_summary/export?month=${month}`, '_blank');
+        }
+
         window.onload = () => {
             updateMiniCards();
             setInterval(updateMiniCards, 5000);
             setInterval(updateDetailData, 5000);
+            initEnergySummary();
+            setInterval(updateEnergySummary, 5000);
         };
     </script>
 

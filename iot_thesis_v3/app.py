@@ -50,8 +50,7 @@ SPC_ALERT_COOLDOWN = {}   # (appliance_id, metric_name, alert_type) -> last_aler
 FAULT_ALERT_TRACKER = {}      # appliance_id -> {fault_type: {cycle_count, last_trigger, active}}
 FAULT_ALERT_COOLDOWN = {}     # (appliance_id, fault_type) -> last_alert_timestamp
 DRYER_CYCLE_STATS = {}        # appliance_id -> {current_cycle: {start_time, motor_readings[], spike_peaks[], min_current}}
-HVAC_CYCLE_TRACKER = {}       # appliance_id -> {state, stable_on_start, peak_deltat, min_tcoil, avg_current, cycle_count}
-HVAC_FAULT_COUNTERS = {}      # appliance_id -> {fault_type: consecutive_count}
+HVAC_CYCLE_TRACKER = {}       # appliance_id -> {state, start_time, best_reading, peak_current, maintain_start}
 
 CLIENT_ID = f"FlaskBackend_{random.randint(10000, 99999)}"
 
@@ -157,7 +156,7 @@ def get_appliance_voltage(appliance_id):
 
 def _compute_daily_energy(readings, voltage):
     """Compute total energy (kWh) for a list of (time, current) readings.
-    Cycles are split by >60s gaps or current dropping below 0.4A.
+    Cycles are split by >60s gaps or current dropping below 0.25A.
     """
     energy_ws = 0.0
     in_cycle = False
@@ -173,13 +172,13 @@ def _compute_daily_energy(readings, voltage):
                     energy_ws += cycle_readings[j-1][1] * voltage * dt
                 in_cycle = False
                 cycle_readings = []
-        if icompressor > 0.4 and not in_cycle:
+        if icompressor > 0.25 and not in_cycle:
             in_cycle = True
             cycle_readings = [(time_val, icompressor)]
         elif in_cycle:
             if cycle_readings and cycle_readings[-1][0] != time_val:
                 cycle_readings.append((time_val, icompressor))
-        if icompressor < 0.4 and in_cycle:
+        if icompressor < 0.25 and in_cycle:
             for j in range(1, len(cycle_readings)):
                 dt = (cycle_readings[j][0] - cycle_readings[j-1][0]).total_seconds()
                 energy_ws += cycle_readings[j-1][1] * voltage * dt
@@ -189,6 +188,23 @@ def _compute_daily_energy(readings, voltage):
         for j in range(1, len(cycle_readings)):
             dt = (cycle_readings[j][0] - cycle_readings[j-1][0]).total_seconds()
             energy_ws += cycle_readings[j-1][1] * voltage * dt
+    return round(energy_ws / 3_600_000, 4)
+
+
+def _compute_energy_kwh(readings, voltage):
+    """Compute total energy (kWh) from (time, current) readings.
+    Integrates current * voltage * dt over all valid consecutive points.
+    A gap > 60s breaks the integration (appliance was off).
+    Works for both HVAC and Dryer.
+    """
+    energy_ws = 0.0
+    for i in range(1, len(readings)):
+        prev_time, prev_current = readings[i-1]
+        curr_time, curr_current = readings[i]
+        gap = (curr_time - prev_time).total_seconds()
+        if gap <= 60 and prev_current > 0.25:
+            dt = gap
+            energy_ws += prev_current * voltage * dt
     return round(energy_ws / 3_600_000, 4)
 
 
@@ -417,7 +433,7 @@ def latest_row_for_appliance(appliance_id):
     release_conn(conn)
     return row, dev_type
 
-def latest_n_rows_for_appliance(appliance_id, limit, start=None, end=None):
+def latest_n_rows_for_appliance(appliance_id, limit, start=None, end=None, filtered=True):
     conn = get_conn()
     if not conn: return [], "Unknown"
     cur = conn.cursor()
@@ -425,38 +441,40 @@ def latest_n_rows_for_appliance(appliance_id, limit, start=None, end=None):
     type_row = cur.fetchone()
     if not type_row: return [], "Unknown"
     dev_type, created_at = type_row[0], type_row[1]
+    current_filter = " AND dr.imotor >= 0.25" if filtered else ""
+    current_filter_hvac = " AND sr.icompressor >= 0.25" if filtered else ""
     if start and end:
         if "Dryer" in dev_type:
-            cur.execute("""
+            cur.execute(f"""
                 SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor
                 FROM dryer_readings dr
                 JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
-                WHERE sn.appliance_id = %s AND dr.time >= %s AND dr.time <= %s AND dr.time >= %s
+                WHERE sn.appliance_id = %s AND dr.time >= %s AND dr.time <= %s AND dr.time >= %s{current_filter}
                 ORDER BY dr.time ASC LIMIT 5000
             """, (appliance_id, start, end, created_at))
         else:
-            cur.execute("""
+            cur.execute(f"""
                 SELECT sr.time, sr.treturn, sr.rhreturn, sr.tsupply, sr.rhsupply, sr.tcoil, sr.icompressor
                 FROM hvac_readings sr
                 JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
-                WHERE sn.appliance_id = %s AND sr.time >= %s AND sr.time <= %s AND sr.time >= %s
+                WHERE sn.appliance_id = %s AND sr.time >= %s AND sr.time <= %s AND sr.time >= %s{current_filter_hvac}
                 ORDER BY sr.time ASC LIMIT 5000
             """, (appliance_id, start, end, created_at))
     else:
         if "Dryer" in dev_type:
-            cur.execute("""
+            cur.execute(f"""
                 SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor
                 FROM dryer_readings dr
                 JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
-                WHERE sn.appliance_id = %s AND dr.time >= %s
+                WHERE sn.appliance_id = %s AND dr.time >= %s{current_filter}
                 ORDER BY dr.time DESC LIMIT %s
             """, (appliance_id, created_at, limit))
         else:
-            cur.execute("""
+            cur.execute(f"""
                 SELECT sr.time, sr.treturn, sr.rhreturn, sr.tsupply, sr.rhsupply, sr.tcoil, sr.icompressor
                 FROM hvac_readings sr
                 JOIN sensor_nodes sn ON sr.sensor_node_id = sn.id
-                WHERE sn.appliance_id = %s AND sr.time >= %s
+                WHERE sn.appliance_id = %s AND sr.time >= %s{current_filter_hvac}
                 ORDER BY sr.time DESC LIMIT %s
             """, (appliance_id, created_at, limit))
     rows = cur.fetchall()
@@ -550,8 +568,8 @@ def send_node_command(mac, command_str):
     print(f"Backend -> Node {mac}: {command_str}")
 
 # --- SPC BASELINE HELPERS ---
-HVAC_METRICS = ['deltat', 'deltarh', 'tcoil', 'rhreturn', 'rhsupply', 'current']
-DRYER_METRICS = ['texhaust', 'rhexhaust', 'pressure', 'current']
+HVAC_METRICS = ['deltat', 'current']
+DRYER_METRICS = ['texhaust', 'rhexhaust', 'current']
 
 def get_spc_baselines(appliance_id):
     """Fetch manual SPC baselines from spc_manual_baselines table."""
@@ -748,7 +766,7 @@ def _check_dryer_faults(appliance_id, reading_data, baselines, now, cur, conn):
             stats = DRYER_CYCLE_STATS[appliance_id] = {}
 
     # Start new cycle
-    if current > 0.4 and not stats.get('in_cycle', False):
+    if current > 0.25 and not stats.get('in_cycle', False):
         stats = DRYER_CYCLE_STATS[appliance_id] = {
             'in_cycle': True,
             'start_time': actual_time,
@@ -899,113 +917,106 @@ def _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn):
     DRYER_CYCLE_STATS[appliance_id] = {}
 
 
-def _check_hvac_faults(appliance_id, reading_data, baselines, now, cur, conn):
-    """HVAC fault detection with STABLE_ON cycle tracking.
-    Faults are evaluated on every reading in STABLE_ON state.
-    3 consecutive readings triggering the same fault -> immediate alert."""
+def _check_hvac_faults(appliance_id, reading_data, baselines, now, cur, conn, is_inverter):
+    """HVAC fault detection with peak-performance snapshot evaluation.
+    Non-inverter: evaluates at cycle end using the reading with maximum Delta-T.
+    Inverter: evaluates at high-effort window end using the reading with maximum Delta-T."""
     current = reading_data.get('current', 0.0)
     deltat = reading_data.get('deltat', 0.0)
-    tcoil = reading_data.get('tcoil', 0.0)
+    treturn = reading_data.get('treturn', 0.0)
 
     tracker = HVAC_CYCLE_TRACKER.setdefault(appliance_id, {
         'state': 'IDLE',
-        'on_start': None,
-        'peak_deltat': 0.0,
-        'min_tcoil': 999.0,
-        'avg_current_sum': 0.0,
-        'avg_current_count': 0,
+        'start_time': None,
+        'best_reading': None,
+        'peak_current': 0.0,
+        'maintain_start': None,
     })
 
-    if current > 0.4:
-        if tracker['state'] == 'IDLE':
-            tracker['state'] = 'STARTING'
-            tracker['on_start'] = now
-            tracker['peak_deltat'] = deltat
-            tracker['min_tcoil'] = tcoil
-            tracker['avg_current_sum'] = current
-            tracker['avg_current_count'] = 1
-        elif tracker['state'] == 'STARTING':
-            elapsed = (now - tracker['on_start']).total_seconds()
-            tracker['peak_deltat'] = max(tracker['peak_deltat'], deltat)
-            tracker['min_tcoil'] = min(tracker['min_tcoil'], tcoil)
-            tracker['avg_current_sum'] += current
-            tracker['avg_current_count'] += 1
-            if elapsed >= 420:  # 7 minutes
-                tracker['state'] = 'STABLE_ON'
-        elif tracker['state'] == 'STABLE_ON':
-            tracker['peak_deltat'] = max(tracker['peak_deltat'], deltat)
-            tracker['min_tcoil'] = min(tracker['min_tcoil'], tcoil)
-            tracker['avg_current_sum'] += current
-            tracker['avg_current_count'] += 1
-            # --- Per-reading fault evaluation ---
-            _evaluate_hvac_reading(appliance_id, deltat, tcoil, current, baselines, now, cur, conn)
+    if not is_inverter:
+        # --- NON-INVERTER: track cycle, capture max Delta-T snapshot ---
+        if current > 0.25:
+            if tracker['state'] == 'IDLE':
+                tracker['state'] = 'RUNNING'
+                tracker['start_time'] = now
+                tracker['best_reading'] = reading_data.copy()
+            elif tracker['state'] == 'RUNNING':
+                if deltat > tracker['best_reading']['deltat']:
+                    tracker['best_reading'] = reading_data.copy()
+        else:
+            if tracker['state'] == 'RUNNING':
+                _evaluate_hvac_snapshot(appliance_id, tracker['best_reading'], baselines, now, cur, conn)
+                tracker['state'] = 'IDLE'
+                tracker['best_reading'] = None
     else:
-        if tracker['state'] in ('STABLE_ON', 'STARTING'):
-            tracker['state'] = 'IDLE'
-            tracker['on_start'] = None
-            # Reset consecutive counters when cycle ends
-            if appliance_id in HVAC_FAULT_COUNTERS:
-                HVAC_FAULT_COUNTERS[appliance_id] = {}
+        # --- INVERTER: track high-effort window, capture max Delta-T snapshot ---
+        is_high_effort = (current > 0.25 and treturn > 26.5)
+        if is_high_effort:
+            if tracker['state'] == 'IDLE':
+                tracker['state'] = 'RUNNING'
+                tracker['start_time'] = now
+                tracker['peak_current'] = current
+                tracker['best_reading'] = reading_data.copy()
+                tracker['maintain_start'] = None
+            elif tracker['state'] == 'RUNNING':
+                if deltat > tracker['best_reading']['deltat']:
+                    tracker['peak_current'] = current
+                    tracker['best_reading'] = reading_data.copy()
+                # Detect maintaining phase: current < 70% of peak for > 2 min
+                if current < tracker['peak_current'] * 0.7:
+                    if tracker['maintain_start'] is None:
+                        tracker['maintain_start'] = now
+                    elif (now - tracker['maintain_start']).total_seconds() > 120:
+                        _evaluate_hvac_snapshot(appliance_id, tracker['best_reading'], baselines, now, cur, conn)
+                        tracker['state'] = 'IDLE'
+                        tracker['best_reading'] = None
+                        tracker['maintain_start'] = None
+                else:
+                    tracker['maintain_start'] = None
+        else:
+            if tracker['state'] == 'RUNNING':
+                _evaluate_hvac_snapshot(appliance_id, tracker['best_reading'], baselines, now, cur, conn)
+                tracker['state'] = 'IDLE'
+                tracker['best_reading'] = None
+                tracker['maintain_start'] = None
 
 
-def _evaluate_hvac_reading(appliance_id, deltat, tcoil, current, baselines, now, cur, conn):
-    """Evaluate HVAC faults on a single telemetry reading.
-    Tracks consecutive triggers; fires alert after 3 consecutive readings."""
-    counters = HVAC_FAULT_COUNTERS.setdefault(appliance_id, {})
+def _evaluate_hvac_snapshot(appliance_id, snapshot, baselines, now, cur, conn):
+    """Evaluate HVAC faults using a single peak-performance snapshot.
+    Fires at most ONE alert per cycle/window."""
+    if not snapshot:
+        return
 
-    # --- Low Refrigerant (Critical) ---
-    deltat_ucl = baselines.get('deltat', {}).get('ucl')
-    deltat_mean = baselines.get('deltat', {}).get('mean')
-    deltat_threshold = (deltat_ucl + deltat_mean) / 2.0 if deltat_ucl is not None and deltat_mean is not None else None
-    tcoil_ucl = baselines.get('tcoil', {}).get('ucl')
+    deltat = snapshot.get('deltat', 0.0)
+    current = snapshot.get('current', 0.0)
 
-    low_ref_met = False
-    if tcoil_ucl is not None and tcoil > tcoil_ucl:
-        low_ref_met = True
-    if deltat_threshold is not None and deltat < deltat_threshold:
-        low_ref_met = True
-
-    if low_ref_met:
-        counters['fault_hvac_low_refrigerant'] = counters.get('fault_hvac_low_refrigerant', 0) + 1
-        if counters['fault_hvac_low_refrigerant'] >= 3:
-            if tcoil_ucl is not None and tcoil > tcoil_ucl:
-                msg = f"Low refrigerant - coil temp {tcoil:.2f}C above UCL {tcoil_ucl:.2f}C"
-                val, thresh = tcoil, tcoil_ucl
-            else:
-                msg = f"Low refrigerant - dT {deltat:.2f}C below threshold {deltat_threshold:.2f}C"
-                val, thresh = deltat, deltat_threshold
-            _insert_fault_alert(
-                appliance_id, 'fault_hvac_low_refrigerant', msg,
-                val, thresh, now, cur, conn)
-            counters['fault_hvac_low_refrigerant'] = 0
-    else:
-        counters['fault_hvac_low_refrigerant'] = 0
-
-    # --- Dirty Filter (Warning) ---
-    tcoil_lcl = baselines.get('tcoil', {}).get('lcl')
-    if tcoil_lcl is not None and tcoil < tcoil_lcl:
-        counters['fault_hvac_dirty_filter'] = counters.get('fault_hvac_dirty_filter', 0) + 1
-        if counters['fault_hvac_dirty_filter'] >= 3:
-            _insert_fault_alert(
-                appliance_id, 'fault_hvac_dirty_filter',
-                f"Dirty indoor filter - coil temp {tcoil:.2f}C below LCL {tcoil_lcl:.2f}C",
-                tcoil, tcoil_lcl, now, cur, conn)
-            counters['fault_hvac_dirty_filter'] = 0
-    else:
-        counters['fault_hvac_dirty_filter'] = 0
-
-    # --- Compressor Fault (Critical) ---
+    deltat_lcl = baselines.get('deltat', {}).get('lcl')
+    current_lcl = baselines.get('current', {}).get('lcl')
     current_ucl = baselines.get('current', {}).get('ucl')
-    if current_ucl is not None and current > current_ucl:
-        counters['fault_hvac_compressor_fault'] = counters.get('fault_hvac_compressor_fault', 0) + 1
-        if counters['fault_hvac_compressor_fault'] >= 3:
-            _insert_fault_alert(
-                appliance_id, 'fault_hvac_compressor_fault',
-                f"Compressor electrical fault - current {current:.2f}A exceeds UCL {current_ucl:.2f}A",
-                current, current_ucl, now, cur, conn)
-            counters['fault_hvac_compressor_fault'] = 0
+
+    if deltat_lcl is None or current_lcl is None or current_ucl is None:
+        return  # Baselines not fully configured
+
+    if deltat >= deltat_lcl:
+        # Delta-T is large enough — good cooling performance, no fault
+        return
+
+    # Delta-T is LOW (poor cooling) — determine cause from current
+    if current < current_lcl:
+        _insert_fault_alert(
+            appliance_id, 'fault_hvac_low_refrigerant',
+            f"Low refrigerant - Delta-T {deltat:.1f}C below LCL {deltat_lcl:.1f}C with low current {current:.2f}A",
+            deltat, deltat_lcl, now, cur, conn)
+    elif current > current_ucl:
+        _insert_fault_alert(
+            appliance_id, 'fault_hvac_compressor_fault',
+            f"Outdoor problem - Delta-T {deltat:.1f}C below LCL {deltat_lcl:.1f}C with high current {current:.2f}A",
+            current, current_ucl, now, cur, conn)
     else:
-        counters['fault_hvac_compressor_fault'] = 0
+        _insert_fault_alert(
+            appliance_id, 'fault_hvac_dirty_filter',
+            f"Dirty indoor filter - Delta-T {deltat:.1f}C below LCL {deltat_lcl:.1f}C with normal current {current:.2f}A",
+            deltat, deltat_lcl, now, cur, conn)
 
 
 def check_fault_alerts(appliance_id, reading_data, dev_type, actual_time):
@@ -1018,21 +1029,22 @@ def check_fault_alerts(appliance_id, reading_data, dev_type, actual_time):
         return
     cur = conn.cursor()
     try:
-        cur.execute("SELECT baseline_configured, alert_enabled FROM appliances WHERE id = %s", (appliance_id,))
+        cur.execute("SELECT baseline_configured, alert_enabled, sub_type FROM appliances WHERE id = %s", (appliance_id,))
         app_info = cur.fetchone()
         if not app_info or not app_info[0] or not app_info[1]:
             return
-        baseline_configured, alert_enabled = app_info[0], app_info[1]
+        baseline_configured, alert_enabled, sub_type = app_info[0], app_info[1], app_info[2]
         if not baseline_configured or not alert_enabled:
             return
 
         now = datetime.now(timezone.utc)
         reading_data['_actual_time'] = actual_time
+        is_inverter = (sub_type == 'inverter')
 
         if "Dryer" in dev_type:
             _check_dryer_faults(appliance_id, reading_data, baselines, now, cur, conn)
         else:
-            _check_hvac_faults(appliance_id, reading_data, baselines, now, cur, conn)
+            _check_hvac_faults(appliance_id, reading_data, baselines, now, cur, conn, is_inverter)
     except Exception as e:
         print(f"Fault alert check error: {e}")
     finally:
@@ -1086,19 +1098,25 @@ def handle_node_events(mac, payload):
                 send_node_command(mac, "settype:unpaired")
             else:
                 appliance_id = node_row[0]
-                cur.execute("SELECT type, operational_status FROM appliances WHERE id = %s", (appliance_id,))
+                cur.execute("SELECT type, operational_status, cf, deductor FROM appliances WHERE id = %s", (appliance_id,))
                 row = cur.fetchone()
                 if row:
                     app_type, app_status = row[0], row[1]
+                    cf = row[2] if len(row) > 2 and row[2] is not None else (33.0 if "Dryer" in app_type else 11.0)
+                    deductor = row[3] if len(row) > 3 and row[3] is not None else (0.111 if "Dryer" in app_type else 0.033)
                     if app_status == 'calibrating':
                         cur.execute("UPDATE appliances SET operational_status='calibration_needed' WHERE id=%s", (appliance_id,))
                         conn.commit()
                         app_status = 'calibration_needed'
                     if "Dryer" in app_type:
                         send_node_command(mac, "settype:dryer")
+                        send_node_command(mac, f"setcf:{cf}")
+                        send_node_command(mac, f"setdeductor:{deductor}")
                         send_node_command(mac, "restore:normal")
                     else:
                         send_node_command(mac, "settype:hvac")
+                        send_node_command(mac, f"setcf:{cf}")
+                        send_node_command(mac, f"setdeductor:{deductor}")
                         if app_status == 'normal':
                             send_node_command(mac, "restore:normal")
                         else:
@@ -1289,63 +1307,57 @@ def on_mqtt_message(client, userdata, msg):
                     cur.execute("UPDATE sensor_nodes SET last_seen = NOW() WHERE id = %s", (sensor_node_id,))
                     conn.commit()
 
-                raw_amps = data.get("CurrentA", 0.0)
-                final_amps = 0.0
-                if raw_amps is not None:
-                    try:
-                        final_amps = float(raw_amps)
-                    except:
-                        final_amps = 0.0
+                # Current is computed by the sensor node using backend-provided CF/deductor
+                final_amps = max(0.0, float(data.get("CurrentA", 0.0) or 0.0))
 
                 status_field = data.get("status", "running")
                 is_running = (status_field == "running")
 
                 reading_values = {}
                 if appliance_type:
-                    if is_running:
-                        if "Dryer" in appliance_type:
-                            tex = data.get("BME280Temp")
-                            rhex = data.get("BME280Hum")
-                            pres = data.get("BME280Pres")
-                            cur.execute("""
-                                INSERT INTO dryer_readings (sensor_node_id, texhaust, rh_exhaust, pressure, imotor, time)
-                                VALUES (%s, %s, %s, %s, %s, %s)
-                            """, (sensor_node_id, tex, rhex, pres, final_amps, actual_time))
-                            reading_values = {'texhaust': tex, 'rhexhaust': rhex, 'pressure': pres, 'current': final_amps}
-                        else:
-                            t1 = data.get("DHT1Temp")
-                            h1 = data.get("DHT1Hum")
-                            t2 = data.get("DHT2Temp")
-                            h2 = data.get("DHT2Hum")
-                            t3 = data.get("DS18B20Temp")
-                            cur.execute("""
-                                INSERT INTO hvac_readings (sensor_node_id, treturn, rhreturn, tsupply, rhsupply, tcoil, icompressor, time)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                            """, (sensor_node_id, t1, h1, t2, h2, t3, final_amps, actual_time))
-                            # Compute deltas for SPC alert checking
-                            cal = get_appliance_calibration(appliance_id)
-                            t1c = apply_calibration(t1, cal['t1_m'], cal['t1_c'])
-                            t2c = apply_calibration(t2, cal['t2_m'], cal['t2_c'])
-                            h1c = apply_calibration(h1, cal['h1_m'], cal['h1_c'])
-                            h2c = apply_calibration(h2, cal['h2_m'], cal['h2_c'])
-                            reading_values = {
-                                'deltat': abs(t1c - t2c),
-                                'deltarh': abs(h1c - h2c),
-                                'tcoil': apply_calibration(t3, cal['tcoil_m'], cal['tcoil_c']),
-                                'rhreturn': h1c,
-                                'rhsupply': h2c,
-                                'current': final_amps
-                            }
-                        cur.execute("UPDATE sensor_nodes SET last_seen = NOW() WHERE id = %s", (sensor_node_id,))
-                        conn.commit()
-
-                        # --- NEW: Real-time SPC alert checking ---
-                        if appliance_id and reading_values:
-                            check_spc_alerts(appliance_id, reading_values, appliance_type)
-                            check_fault_alerts(appliance_id, reading_values, appliance_type, actual_time)
+                    # Always insert readings (both running and idle)
+                    if "Dryer" in appliance_type:
+                        tex = data.get("BME280Temp")
+                        rhex = data.get("BME280Hum")
+                        pres = data.get("BME280Pres")
+                        cur.execute("""
+                            INSERT INTO dryer_readings (sensor_node_id, texhaust, rh_exhaust, pressure, imotor, time)
+                            VALUES (%s, %s, %s, %s, %s, %s)
+                        """, (sensor_node_id, tex, rhex, pres, final_amps, actual_time))
+                        reading_values = {'texhaust': tex, 'rhexhaust': rhex, 'pressure': pres, 'current': final_amps}
                     else:
-                        cur.execute("UPDATE sensor_nodes SET last_seen = NOW() WHERE id = %s", (sensor_node_id,))
-                        conn.commit()
+                        t1 = data.get("DHT1Temp")
+                        h1 = data.get("DHT1Hum")
+                        t2 = data.get("DHT2Temp")
+                        h2 = data.get("DHT2Hum")
+                        t3 = data.get("DS18B20Temp")
+                        cur.execute("""
+                            INSERT INTO hvac_readings (sensor_node_id, treturn, rhreturn, tsupply, rhsupply, tcoil, icompressor, time)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (sensor_node_id, t1, h1, t2, h2, t3, final_amps, actual_time))
+                        # Compute deltas for SPC alert checking
+                        cal = get_appliance_calibration(appliance_id)
+                        t1c = apply_calibration(t1, cal['t1_m'], cal['t1_c'])
+                        t2c = apply_calibration(t2, cal['t2_m'], cal['t2_c'])
+                        h1c = apply_calibration(h1, cal['h1_m'], cal['h1_c'])
+                        h2c = apply_calibration(h2, cal['h2_m'], cal['h2_c'])
+                        reading_values = {
+                            'deltat': abs(t1c - t2c),
+                            'deltarh': abs(h1c - h2c),
+                            'tcoil': apply_calibration(t3, cal['tcoil_m'], cal['tcoil_c']),
+                            'rhreturn': h1c,
+                            'rhsupply': h2c,
+                            'current': final_amps,
+                            'treturn': t1c,
+                            'tsupply': t2c
+                        }
+                    cur.execute("UPDATE sensor_nodes SET last_seen = NOW() WHERE id = %s", (sensor_node_id,))
+                    conn.commit()
+
+                    # --- Real-time SPC alert checking (only on running data) ---
+                    if appliance_id and reading_values and final_amps >= 0.25:
+                        check_spc_alerts(appliance_id, reading_values, appliance_type)
+                        check_fault_alerts(appliance_id, reading_values, appliance_type, actual_time)
 
                     # --- Dryer cycle tracker + end-of-cycle humidity alert ---
                     def _process_cycle_end(app_id, cyc_start, cyc_end):
@@ -1494,10 +1506,12 @@ def pair_device():
     cur = conn.cursor()
     try:
         initial_status = 'normal' if "Dryer" in dev_type else 'calibration_needed'
+        cf = 33.0 if "Dryer" in dev_type else 11.0
+        deductor = 0.111 if "Dryer" in dev_type else 0.033
         cur.execute("""
-            INSERT INTO appliances (user_id, name, type, location, brand, operational_status, sub_type)
-            VALUES (%s, %s, %s, 'Home', 'Generic', %s, %s) RETURNING id
-        """, (current_user.id, name, dev_type, initial_status, sub_type))
+            INSERT INTO appliances (user_id, name, type, location, brand, operational_status, sub_type, cf, deductor)
+            VALUES (%s, %s, %s, 'Home', 'Generic', %s, %s, %s, %s) RETURNING id
+        """, (current_user.id, name, dev_type, initial_status, sub_type, cf, deductor))
         appliance_id = cur.fetchone()[0]
         cur.execute("UPDATE sensor_nodes SET appliance_id = %s, status = 'paired' WHERE id = %s RETURNING mac_address", (appliance_id, node_id))
         mac = cur.fetchone()[0]
@@ -1649,7 +1663,7 @@ def api_device_latest(appliance_id):
 
     if "Dryer" in dev_type:
         imotor = max(0.0, row_data[4] or 0)
-        running_status = 'idle' if is_stale else ('running' if imotor >= 0.4 else 'idle')
+        running_status = 'idle' if is_stale else ('running' if imotor >= 0.25 else 'idle')
         return jsonify({
             'time': time_val.isoformat(),
             'Texhaust': apply_calibration(row_data[1], cal['t1_m'], cal['t1_c']),
@@ -1668,7 +1682,7 @@ def api_device_latest(appliance_id):
         })
     else:
         icomp = row_data[6] or 0
-        running_status = 'idle' if is_stale else ('running' if icomp >= 0.4 else 'idle')
+        running_status = 'idle' if is_stale else ('running' if icomp >= 0.25 else 'idle')
         t1c = apply_calibration(row_data[1], cal['t1_m'], cal['t1_c'])
         t2c = apply_calibration(row_data[3], cal['t2_m'], cal['t2_c'])
         h1c = apply_calibration(row_data[2], cal['h1_m'], cal['h1_c'])
@@ -1709,7 +1723,8 @@ def api_device_latest_n(appliance_id):
     limit = int(request.args.get('limit', 1080))
     start = request.args.get('start')
     end = request.args.get('end')
-    rows, dev_type = latest_n_rows_for_appliance(appliance_id, limit, start, end)
+    filtered = request.args.get('filtered', 'true').lower() != 'false'
+    rows, dev_type = latest_n_rows_for_appliance(appliance_id, limit, start, end, filtered)
     cal = get_appliance_calibration(appliance_id)
     if 't1_m' not in cal: return jsonify([])
     result = []
@@ -1753,7 +1768,8 @@ def get_table_data(appliance_id):
     release_conn(conn)
     if not status_row or ("Dryer" not in status_row[1] and status_row[0] in ['calibration_needed', 'calibrating']):
         return jsonify([]), 200
-    rows, dev_type = latest_n_rows_for_appliance(appliance_id, 120)
+    filtered = request.args.get('filtered', 'true').lower() != 'false'
+    rows, dev_type = latest_n_rows_for_appliance(appliance_id, 120, filtered=filtered)
     cal = get_appliance_calibration(appliance_id)
     if 't1_m' not in cal: return jsonify([])
     result = []
@@ -1827,6 +1843,7 @@ def export_excel(appliance_id):
     app_name, dev_type, sub_type, status, created_at = app_info
     start_date = request.args.get('start_date', None)
     end_date = request.args.get('end_date', None)
+    filtered = request.args.get('filtered', 'true').lower() != 'false'
     query_params = [appliance_id]
     date_filter = ""
     if start_date:
@@ -1835,13 +1852,15 @@ def export_excel(appliance_id):
     if end_date:
         date_filter += " AND r.time <= %s"
         query_params.append(end_date)
+    current_filter = " AND r.imotor >= 0.25" if (filtered and "Dryer" in dev_type) else ""
+    current_filter_hvac = " AND r.icompressor >= 0.25" if (filtered and "Dryer" not in dev_type) else ""
     if "Dryer" in dev_type:
         query = f"""
             SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor
             FROM dryer_readings r
             JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
             JOIN appliances a ON a.id = sn.appliance_id
-            WHERE sn.appliance_id = %s AND r.time >= a.created_at {date_filter}
+            WHERE sn.appliance_id = %s AND r.time >= a.created_at {date_filter}{current_filter}
             ORDER BY r.time ASC
         """
     else:
@@ -1850,7 +1869,7 @@ def export_excel(appliance_id):
             FROM hvac_readings r
             JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
             JOIN appliances a ON a.id = sn.appliance_id
-            WHERE sn.appliance_id = %s AND r.time >= a.created_at {date_filter}
+            WHERE sn.appliance_id = %s AND r.time >= a.created_at {date_filter}{current_filter_hvac}
             ORDER BY r.time ASC
         """
     cur.execute(query, tuple(query_params))
@@ -2039,30 +2058,16 @@ def api_spc_limits(appliance_id):
             return {"mean": b['mean'], "ucl": b['ucl'], "lcl": b['lcl']}
         return {"mean": 0, "ucl": 0, "lcl": 0}
 
-    if "Dryer" in dev_type:
-        return jsonify({
-            "type": dev_type,
-            "subtype": subtype,
-            "status": status,
-            "baseline_configured": baseline_configured,
-            "temp": make_limit('texhaust'),
-            "humidity": make_limit('rhexhaust'),
-            "pressure": make_limit('pressure'),
-            "current": make_limit('current')
-        })
-    else:
-        return jsonify({
-            "type": dev_type,
-            "subtype": subtype,
-            "status": status,
-            "baseline_configured": baseline_configured,
-            "deltat": make_limit('deltat'),
-            "deltarh": make_limit('deltarh'),
-            "tcoil": make_limit('tcoil'),
-            "rhreturn": make_limit('rhreturn'),
-            "rhsupply": make_limit('rhsupply'),
-            "current": make_limit('current')
-        })
+    expected = DRYER_METRICS if "Dryer" in dev_type else HVAC_METRICS
+    result = {
+        "type": dev_type,
+        "subtype": subtype,
+        "status": status,
+        "baseline_configured": baseline_configured,
+    }
+    for m in expected:
+        result[m] = make_limit(m)
+    return jsonify(result)
 
 # --- API: BASELINE ANALYSIS (reads from spc_manual_baselines) ---
 @app.route('/api/device/<int:appliance_id>/baseline_analysis')
@@ -2089,30 +2094,16 @@ def api_baseline_analysis(appliance_id):
             return {"mean": b['mean'], "ucl": b['ucl'], "lcl": b['lcl']}
         return None
 
-    if "Dryer" in dev_type:
-        return jsonify({
-            "type": dev_type,
-            "status": status,
-            "baseline_configured": baseline_configured,
-            "baseline_set_at": baseline_set_at,
-            "texhaust": metric_info('texhaust'),
-            "rhexhaust": metric_info('rhexhaust'),
-            "pressure": metric_info('pressure'),
-            "current": metric_info('current')
-        })
-    else:
-        return jsonify({
-            "type": dev_type,
-            "status": status,
-            "baseline_configured": baseline_configured,
-            "baseline_set_at": baseline_set_at,
-            "deltat": metric_info('deltat'),
-            "deltarh": metric_info('deltarh'),
-            "tcoil": metric_info('tcoil'),
-            "rhreturn": metric_info('rhreturn'),
-            "rhsupply": metric_info('rhsupply'),
-            "current": metric_info('current')
-        })
+    expected = DRYER_METRICS if "Dryer" in dev_type else HVAC_METRICS
+    result = {
+        "type": dev_type,
+        "status": status,
+        "baseline_configured": baseline_configured,
+        "baseline_set_at": baseline_set_at,
+    }
+    for m in expected:
+        result[m] = metric_info(m)
+    return jsonify(result)
 
 # --- API: BASELINE CONFIG (NEW) ---
 @app.route('/api/device/<int:appliance_id>/baseline_config', methods=['GET', 'POST'])
@@ -2174,6 +2165,35 @@ def api_baseline_config(appliance_id):
         notify_node_baseline_set(appliance_id)
         return jsonify({'success': True, 'message': msg})
     return jsonify({'error': msg}), 500
+
+# --- API: SENSOR CONFIG (CF / Deductor) ---
+@app.route('/api/device/<int:appliance_id>/sensor_config', methods=['GET', 'POST'])
+@login_required
+def api_sensor_config(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify({'error': 'db error'}), 500
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, type, cf, deductor FROM appliances WHERE id = %s", (appliance_id,))
+    row = cur.fetchone()
+    if not row or row[0] != current_user.id:
+        cur.close(); release_conn(conn)
+        return jsonify({'error': 'unauthorized'}), 403
+    app_type = row[1]
+    if request.method == 'GET':
+        cf = row[2] if row[2] is not None else (33.0 if "Dryer" in app_type else 11.0)
+        deductor = row[3] if row[3] is not None else (0.111 if "Dryer" in app_type else 0.033)
+        cur.close(); release_conn(conn)
+        return jsonify({'cf': cf, 'deductor': deductor})
+    data = request.get_json() or {}
+    cf = data.get('cf')
+    deductor = data.get('deductor')
+    if cf is None or deductor is None:
+        cur.close(); release_conn(conn)
+        return jsonify({'error': 'cf and deductor required'}), 400
+    cur.execute("UPDATE appliances SET cf = %s, deductor = %s WHERE id = %s", (cf, deductor, appliance_id))
+    conn.commit()
+    cur.close(); release_conn(conn)
+    return jsonify({'success': True})
 
 # --- API: THRESHOLDS ---
 @app.route('/api/device/<int:appliance_id>/thresholds', methods=['GET', 'POST'])
@@ -2273,7 +2293,7 @@ def hvac_analytics(appliance_id):
                 FROM hvac_readings r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
                 JOIN appliances a ON a.id = sn.appliance_id
-                WHERE sn.appliance_id = %s AND r.icompressor >= 0.4 AND r.time >= a.created_at AND r.time >= %s AND r.time <= %s
+                WHERE sn.appliance_id = %s AND r.icompressor >= 0.25 AND r.time >= a.created_at AND r.time >= %s AND r.time <= %s
                 GROUP BY DATE(r.time)
                 ORDER BY DATE(r.time) DESC
                 LIMIT 30
@@ -2285,7 +2305,7 @@ def hvac_analytics(appliance_id):
                 FROM hvac_readings r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
                 JOIN appliances a ON a.id = sn.appliance_id
-                WHERE sn.appliance_id = %s AND r.icompressor >= 0.4 AND r.time >= a.created_at
+                WHERE sn.appliance_id = %s AND r.icompressor >= 0.25 AND r.time >= a.created_at
                 GROUP BY DATE(r.time)
                 ORDER BY DATE(r.time) DESC
                 LIMIT 30
@@ -2353,7 +2373,7 @@ def dryer_analytics(appliance_id):
         row = cur.fetchone()
         if not row or "Dryer" not in row[0]:
             return jsonify({'error': 'Not a dryer'}), 400
-        cycle_start = 0.4
+        cycle_start = 0.25
         cycle_end = 0.15
         baselines = get_spc_baselines(appliance_id)
         mean_current = baselines.get('current', {}).get('mean', 2.0)
@@ -2570,6 +2590,235 @@ def dryer_analytics(appliance_id):
         if conn:
             cur.close()
             release_conn(conn)
+
+# --- API: MONTHLY ENERGY SUMMARY ---
+@app.route('/api/energy_summary')
+@login_required
+def api_energy_summary():
+    """Return monthly energy consumption per appliance for the current user."""
+    month_str = request.args.get('month', datetime.now().strftime('%Y-%m'))
+    try:
+        year, month = map(int, month_str.split('-'))
+        month_start = datetime(year, month, 1)
+        if month == 12:
+            month_end = datetime(year + 1, 1, 1)
+        else:
+            month_end = datetime(year, month + 1, 1)
+    except ValueError:
+        return jsonify({'error': 'Invalid month format. Use YYYY-MM.'}), 400
+
+    conn = get_conn()
+    if not conn:
+        return jsonify({'error': 'db'}), 500
+    cur = conn.cursor()
+    try:
+        # Get all appliances for current user
+        cur.execute("""
+            SELECT id, name, type, created_at
+            FROM appliances WHERE user_id = %s ORDER BY name
+        """, (current_user.id,))
+        appliances = cur.fetchall()
+
+        result = []
+        by_type = defaultdict(float)
+        total_kwh = 0.0
+
+        for app_id, app_name, app_type, created_at in appliances:
+            voltage = get_appliance_voltage(app_id)
+            # Clamp query to appliance creation time
+            query_start = max(month_start, created_at) if created_at else month_start
+
+            if 'Dryer' in app_type:
+                cur.execute("""
+                    SELECT r.time, r.imotor
+                    FROM dryer_readings r
+                    JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                    WHERE sn.appliance_id = %s AND r.time >= %s AND r.time < %s
+                    ORDER BY r.time ASC
+                """, (app_id, query_start, month_end))
+            else:
+                cur.execute("""
+                    SELECT r.time, r.icompressor
+                    FROM hvac_readings r
+                    JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                    WHERE sn.appliance_id = %s AND r.time >= %s AND r.time < %s
+                    ORDER BY r.time ASC
+                """, (app_id, query_start, month_end))
+
+            readings = cur.fetchall()
+            energy = _compute_energy_kwh(readings, voltage)
+            result.append({
+                'id': app_id,
+                'name': app_name,
+                'type': app_type,
+                'energy_kwh': energy
+            })
+            by_type[app_type] += energy
+            total_kwh += energy
+
+        return jsonify({
+            'month': month_str,
+            'appliances': result,
+            'total_kwh': round(total_kwh, 4),
+            'by_type': dict(by_type)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            cur.close()
+            release_conn(conn)
+
+
+@app.route('/api/energy_summary/export')
+@login_required
+def api_energy_summary_export():
+    """Export monthly energy summary to Excel."""
+    month_str = request.args.get('month', datetime.now().strftime('%Y-%m'))
+    try:
+        year, month = map(int, month_str.split('-'))
+        month_start = datetime(year, month, 1)
+        if month == 12:
+            month_end = datetime(year + 1, 1, 1)
+        else:
+            month_end = datetime(year, month + 1, 1)
+    except ValueError:
+        return jsonify({'error': 'Invalid month format. Use YYYY-MM.'}), 400
+
+    conn = get_conn()
+    if not conn:
+        return jsonify({'error': 'db'}), 500
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, name, type, created_at
+            FROM appliances WHERE user_id = %s ORDER BY type, name
+        """, (current_user.id,))
+        appliances = cur.fetchall()
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Energy Summary"
+        header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+
+        # Title rows
+        ws.merge_cells('A1:E1')
+        ws['A1'] = f"Monthly Energy Consumption Summary"
+        ws['A1'].font = Font(size=14, bold=True)
+        ws.merge_cells('A2:E2')
+        ws['A2'] = f"Month: {month_str}"
+        ws['A2'].font = Font(size=11, bold=True)
+        ws.merge_cells('A3:E3')
+        ws['A3'] = f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
+        # Headers
+        headers = ["Appliance Type", "Appliance Name", "Energy Consumption (kWh)"]
+        row_idx = 5
+        for col, header in enumerate(headers, start=1):
+            cell = ws.cell(row=row_idx, column=col, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        total_kwh = 0.0
+        for app_id, app_name, app_type, created_at in appliances:
+            voltage = get_appliance_voltage(app_id)
+            query_start = max(month_start, created_at) if created_at else month_start
+
+            if 'Dryer' in app_type:
+                cur.execute("""
+                    SELECT r.time, r.imotor
+                    FROM dryer_readings r
+                    JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                    WHERE sn.appliance_id = %s AND r.time >= %s AND r.time < %s
+                    ORDER BY r.time ASC
+                """, (app_id, query_start, month_end))
+            else:
+                cur.execute("""
+                    SELECT r.time, r.icompressor
+                    FROM hvac_readings r
+                    JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                    WHERE sn.appliance_id = %s AND r.time >= %s AND r.time < %s
+                    ORDER BY r.time ASC
+                """, (app_id, query_start, month_end))
+
+            readings = cur.fetchall()
+            energy = _compute_energy_kwh(readings, voltage)
+            row_idx += 1
+            ws.cell(row=row_idx, column=1, value=app_type)
+            ws.cell(row=row_idx, column=2, value=app_name)
+            ws.cell(row=row_idx, column=3, value=energy)
+            total_kwh += energy
+
+        # Total row
+        row_idx += 1
+        ws.cell(row=row_idx, column=1, value="Total")
+        ws.cell(row=row_idx, column=1).font = Font(bold=True)
+        ws.cell(row=row_idx, column=3, value=round(total_kwh, 4))
+        ws.cell(row=row_idx, column=3).font = Font(bold=True)
+
+        # Auto-width
+        for col_idx in range(1, 4):
+            max_length = 0
+            col_letter = get_column_letter(col_idx)
+            for r in range(1, ws.max_row + 1):
+                cell_value = ws.cell(row=r, column=col_idx).value
+                if cell_value:
+                    max_length = max(max_length, len(str(cell_value)))
+            ws.column_dimensions[col_letter].width = max_length + 2
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        filename = f"Energy_Summary_{month_str}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            cur.close()
+            release_conn(conn)
+
+
+# --- API: ENERGY MONTHS (only months with data) ---
+@app.route('/api/energy_months')
+@login_required
+def api_energy_months():
+    """Return distinct year-months where the current user has sensor readings."""
+    conn = get_conn()
+    if not conn:
+        return jsonify([]), 500
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT DISTINCT TO_CHAR(DATE_TRUNC('month', r.time), 'YYYY-MM') AS month
+            FROM hvac_readings r
+            JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+            JOIN appliances a ON a.id = sn.appliance_id
+            WHERE a.user_id = %s
+            UNION
+            SELECT DISTINCT TO_CHAR(DATE_TRUNC('month', r.time), 'YYYY-MM') AS month
+            FROM dryer_readings r
+            JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+            JOIN appliances a ON a.id = sn.appliance_id
+            WHERE a.user_id = %s
+            ORDER BY month DESC
+        """, (current_user.id, current_user.id))
+        rows = cur.fetchall()
+        return jsonify([r[0] for r in rows])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            cur.close()
+            release_conn(conn)
+
 
 # --- DISCORD WEBHOOK API ---
 @app.route('/api/user/discord_webhook', methods=['GET'])

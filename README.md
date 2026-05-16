@@ -4,10 +4,12 @@
 > **Author:** Tiara Mae Muljana  
 > **Institution:** Swiss German University
 
-This repository contains two distinct systems developed for an IoT-based predictive maintenance thesis:
+This repository contains four distinct systems developed for an IoT-based predictive maintenance thesis:
 
-1. **`iot_thesis/`** — The **full production system** for residential split-type HVAC units and commercial gas dryers. It collects real-time sensor telemetry, establishes Statistical Process Control (SPC) baselines, runs calibration workflows, and triggers maintenance alerts.
-2. **`gas_dryer_test/`** — A **standalone PCB validation testbed** used to verify that the custom sensor node PCB can successfully read BME280 and SCT-013 data, transmit via MQTT, and display it on a local Flask dashboard. This is a simplified prototype and is **not** part of the main production architecture.
+1. **`iot_thesis/`** — The **original production system** (v1) for residential split-type HVAC units and commercial gas dryers. Uses automatic 15-minute (HVAC) or cycle-based (dryer) baseline recording.
+2. **`iot_thesis_v2/`** — The **second generation** (v2). Replaces automatic baseline recording with manual UCL/LCL input, adds real-time SPC breach alerts, fault pattern detection, and Discord webhook integration.
+3. **`iot_thesis_v3/`** — The **active development branch** (v3). Backend owns calibration factor (CF) and deductor per appliance; sensor node computes current locally. Stores **all** telemetry (running + idle) with a filtered/unfiltered dashboard toggle.
+4. **`gas_dryer_test/`** — A **standalone PCB validation testbed** used to verify that the custom sensor node PCB can successfully read BME280 and SCT-013 data, transmit via MQTT, and display it on a local Flask dashboard. This is a simplified prototype and is **not** part of the main production architecture.
 
 ---
 
@@ -42,7 +44,9 @@ Each appliance is paired with a custom ESP32-C3 sensor node that transmits data 
 
 ## Architecture
 
-### Production System (`iot_thesis/`)
+### Production System (`iot_thesis/` & `iot_thesis_v2/`)
+
+Both versions share the same ESP32 firmware and MQTT broker, but use different backend logic and database schemas.
 
 ```
 ┌─────────────────┐     WiFi + TLS      ┌─────────────────┐
@@ -54,10 +58,11 @@ Each appliance is paired with a custom ESP32-C3 sensor node that transmits data 
                        │
               ┌────────▼────────┐
               │  Flask Backend  │
-              │  (iot_thesis)   │
+              │ (iot_thesis_v2) │
               │  ├─ PostgreSQL  │
               │  ├─ MQTT Client │
-              │  └─ SPC Logic   │
+              │  ├─ SPC Logic   │
+              │  └─ Discord     │
               └────────┬────────┘
                        │
               ┌────────▼────────┐
@@ -105,15 +110,27 @@ iot-monitoring/
 │   └── esp32dryertest/       # Arduino firmware (BME280 + SCT)
 │       └── esp32dryertest.ino
 │
-└── iot_thesis/               # Full production application
-    ├── app.py                # Flask backend (MQTT, DB, API, auth, SPC)
-    ├── fix_db_columns.py     # DB migration utility
+├── iot_thesis/               # Full production application v1 (auto-baseline)
+│   ├── app.py                # Flask backend (MQTT, DB, API, auth, SPC)
+│   ├── fix_db_columns.py     # DB migration utility
+│   ├── templates/            # Jinja2 HTML templates
+│   │   ├── dashboard.html    # Main monitoring dashboard
+│   │   ├── login.html
+│   │   └── signup.html
+│   └── Update_SensorNode/    # Production ESP32 firmware (shared with v2)
+│       └── Update_SensorNode.ino
+│
+└── iot_thesis_v2/            # Active development v2 (manual SPC + fault alerts)
+    ├── app.py                # Flask backend (manual baseline, fault detection, Discord)
     ├── templates/            # Jinja2 HTML templates
-    │   ├── dashboard.html    # Main monitoring dashboard
-    │   ├── login.html        # User login
-    │   └── signup.html       # User registration
-    └── Update_SensorNode/    # Production ESP32 firmware
-        └── Update_SensorNode.ino
+    │   ├── dashboard.html    # Inline baseline config, 4-chart layout
+    │   ├── login.html
+    │   └── signup.html
+    ├── Update_SensorNode/    # Cleaned firmware (baseline:set only)
+    ├── Update_SensorNode_Data_Auto/  # Continuous telemetry variant (no idle discard)
+    ├── AGENTS.md
+    ├── FAULTALERT.md
+    └── README.md
 ```
 
 > **Note:** PCB design files, full documentation, and additional hardware assets will be added to this repository in future updates.
@@ -366,7 +383,7 @@ Supports both HVAC and Dryer modes. Appliance type is set by the backend during 
 - Calibration state machine for HVAC units
 - Automatic Wi-Fi and MQTT reconnection with LED status indication
 - Buzzer feedback for user actions
-- **Telemetry gating:** Only transmits when appliance current ≥ 0.4 A (running). Idle samples are discarded, not buffered.
+- **Telemetry gating:** Only transmits when appliance current ≥ 0.25 A (running). Idle samples are discarded, not buffered.
 
 ### PCB Validation Test Node (`gas_dryer_test/esp32dryertest/`)
 
@@ -419,8 +436,9 @@ This section describes the complete end-to-end data flow from physical sensors t
 
 **Data Flow Summary:**
 1. **Sensor Node** reads sensors every 2 seconds. After 5 samples (10 seconds), it computes averages.
-2. If average current ≥ 0.4 A, the node builds a JSON telemetry payload including `"status":"running"` and publishes via MQTT. If current < 0.4 A, samples are discarded (idle state).
-3. If Wi-Fi or MQTT is down, running samples are queued in a 200-slot FIFO buffer and flushed on reconnect.
+2. **Standard firmware:** If `calibrationAcked == true` AND average current ≥ 0.25 A, the node builds a JSON telemetry payload including `"status":"running"` and publishes via MQTT. If current < 0.25 A or calibration is not done, samples are discarded (idle state).
+   **Data Auto variant:** Once `calibrationAcked == true`, telemetry is always published regardless of current. Idle windows are sent with `"status":"idle"`.
+3. If Wi-Fi or MQTT is down, samples are queued in a 200-slot FIFO buffer and flushed on reconnect.
 4. **HiveMQ Cloud** relays the message to the Flask backend via TLS on port 8883.
 5. **Backend** (`on_mqtt_message`) parses the JSON, corrects timestamps via `ago_ms`, deduplicates rapid messages, and gates database inserts: only `"running"` data is inserted; idle data only updates `last_seen`.
 6. **Database** stores running readings in `hvac_readings` or `dryer_readings`.
@@ -434,29 +452,29 @@ This section describes the complete end-to-end data flow from physical sensors t
 
 | Sensor | Pin | Purpose |
 |--------|-----|---------|
-| DHT1 | GPIO 4 | Return air temp/RH |
+| DHT1 | GPIO 5 | Return air temp/RH |
 | DHT2 | GPIO 6 | Supply air temp/RH |
-| DS18B20 | GPIO 5 | Evaporator coil temp |
-| ZHT103C | GPIO 1 (ADC) | Compressor current |
-| LED | GPIO 10 | Status indicator |
-| Buzzer | GPIO 20 | Audio feedback |
-| Button 1 | GPIO 9 | Maintenance request |
-| Button 2 | GPIO 8 | Calibration trigger |
+| DS18B20 | GPIO 7 | Evaporator coil temp |
+| ZHT103C | GPIO 0 (ADC) | Compressor current |
+| LED | GPIO 4 | Status indicator |
+| Buzzer | GPIO 10 | Audio feedback |
+| Button 1 | GPIO 1 | Maintenance request |
+| Button 2 | GPIO 3 | Calibration trigger |
 
 ### Hardware Assembly — Dryer Node
 
 | Sensor | Pin | Purpose |
 |--------|-----|---------|
-| BME280 (I2C) | SDA=GPIO 7, SCL=GPIO 2 | Exhaust temp/RH/pressure |
-| SCT-013 | GPIO 1 (ADC) | Motor current |
-| LED | GPIO 10 | Status indicator |
-| Buzzer | GPIO 20 | Audio feedback |
-| Button 1 | GPIO 9 | Maintenance request |
-| Button 2 | GPIO 8 | *(Disabled — no function)* |
+| BME280 (I2C) | SDA=GPIO 8, SCL=GPIO 9 | Exhaust temp/RH/pressure |
+| SCT-013 | GPIO 0 (ADC) | Motor current |
+| LED | GPIO 4 | Status indicator |
+| Buzzer | GPIO 10 | Audio feedback |
+| Button 1 | GPIO 1 | Maintenance request |
+| Button 2 | GPIO 3 | *(Disabled — no function)* |
 
 ### Firmware Upload
 
-1. Open `iot_thesis/Update_SensorNode/Update_SensorNode.ino` in Arduino IDE.
+1. Open `iot_thesis_v2/Update_SensorNode/Update_SensorNode.ino` in Arduino IDE (active development version).
 2. Select **Board:** ESP32C3 Dev Module.
 3. Set `WIFI_SSID` and `WIFI_PASSWORD` in the firmware (or use a separate `secrets.h`).
 4. Set `MQTT_BROKER`, `MQTT_PORT` (8883), `MQTT_USER`, and `MQTT_PASS` for HiveMQ Cloud.
@@ -604,8 +622,8 @@ Every 2 seconds, `loop()` calls `readSensors()`:
 
 When `sampleCount >= MAX_SAMPLES` (5):
 - Computes `lastAvgCurrent = sumCurrentA / MAX_SAMPLES`.
-- **If `lastAvgCurrent >= 0.4 A`:** builds telemetry payload and publishes.
-- **If `lastAvgCurrent < 0.4 A`:** calls `resetAverages()` and discards all samples.
+- **If `lastAvgCurrent >= 0.25 A`:** builds telemetry payload and publishes.
+- **If `lastAvgCurrent < 0.25 A`:** calls `resetAverages()` and discards all samples.
 
 ### Current Measurement
 
@@ -623,7 +641,7 @@ float readCurrentIrms() {
 ```
 
 - **HVAC (ZHT103C):** `cf = 11.0`, `deductor = 0.033`
-- **Dryer (SCT-013):** `cf = 37.0`, `deductor = 0.111`
+- **Dryer (SCT-013):** `cf = 33.0`, `deductor = 0.111`
 
 ### Telemetry Payload Format
 
@@ -640,7 +658,7 @@ float readCurrentIrms() {
 }
 ```
 
-The `status` field is always included and is determined by `avgCurrent >= 0.4`.
+The `status` field is always included and is determined by `avgCurrent >= 0.25`.
 
 ### Offline Buffering
 
@@ -764,8 +782,8 @@ Collapsible panel with:
 | 2 | Baselining active | Alternating fast (200 ms) / slow (1000 ms) blink |
 | 3 | Wi-Fi disconnected | Fast blink, 200 ms period |
 | 4 | MQTT disconnected | Medium blink, 500 ms period |
-| 5 | Running (current ≥ 0.4 A) | Solid ON |
-| 6 | Idle (current < 0.4 A) | Brief blink every 10 seconds |
+| 5 | Running (current ≥ 0.25 A) | Solid ON |
+| 6 | Idle (current < 0.25 A) | Brief blink every 10 seconds |
 
 ### Buzzer Sounds
 
@@ -774,6 +792,7 @@ Collapsible panel with:
 | `baselinestartack` received | 2 short beeps |
 | `baselinesuccessack` received | 3 short beeps |
 | `baselinefailack` received | 2 long beeps |
+| `startcalibration` received | 1 short beep |
 | `calibrationsuccessack` received | 3 short beeps |
 | Connection down (Wi-Fi or MQTT) | 1 beep every 10 seconds |
 
@@ -821,7 +840,7 @@ Collapsible panel with:
 **Objective:** Verify baseline completes successfully.
 
 **HVAC Steps:**
-1. Start appliance. Confirm current ≥ 0.4 A.
+1. Start appliance. Confirm current ≥ 0.25 A.
 2. In dashboard, click **Start Baseline Recording**.
 3. Confirm node beeps twice and LED alternates fast/slow.
 4. Keep appliance running for 15 minutes.
@@ -915,8 +934,8 @@ Collapsible panel with:
 | 2 | ~~Baseline Redesign~~ | ✅ Done | Dryer: cycle-based baseline; HVAC: 15-min fixed; Cancel button wired |
 | 3 | ~~Ignition Detection~~ | ✅ Done | Dynamic state machine + prominence threshold for dryer cycle analytics |
 | 4 | ~~BME280 Hardware Fix~~ | ✅ Done | Replaced dead BME280 with 3.3V-native module. Sensor now working correctly. |
-| 5 | **SPC Limit Enforcement** | 🔴 High | Trigger alerts when UCL/LCL breached during operation |
-| 6 | **Discord Integration** | 🔴 High | Webhook alerts for maintenance reminders and fault notifications |
+| 5 | ~~SPC Limit Enforcement~~ | ✅ Done (v2) | Real-time SPC breach alerts (`spc_ucl_breach`, `spc_lcl_breach`) active immediately after baseline config |
+| 6 | ~~Discord Integration~~ | ✅ Done (v2) | Per-user Discord webhook alerts for actionable fault alerts only (7 fault types). SPC breaches and legacy humidity alerts remain DB/dashboard-only. |
 | 7 | **Multi-Device Dashboard Stress Test** | 🟡 Medium | Verify UI performance with 5+ simultaneous devices |
 | 8 | **Unit Tests** | 🟡 Medium | pytest suite for SPC math, calibration regression, cycle detection |
 | 9 | **Docker Deployment** | 🟡 Medium | Containerize Flask app + PostgreSQL for easy cloud deployment |
@@ -927,6 +946,11 @@ Collapsible panel with:
 | 14 | **CI/CD** | 🟢 Low | GitHub Actions for linting and basic tests |
 
 ### Completed Recently
+- ✅ **v3 Backend-Driven CF/Deductor** — Backend stores CF and deductor per appliance; node receives them via MQTT and computes `CurrentA` locally. Eliminates hardcoded sensor constants in firmware.
+- ✅ **v3 Continuous Telemetry** — All 10-second windows (running + idle) are stored in PostgreSQL. Filtered/unfiltered toggle lets users view idle gaps as gray dots on charts.
+- ✅ **v3 Delta RH Chart** — New 6th chart for HVAC showing `abs(RHreturn - RHsupply)` with SPC bands.
+- ✅ **v3 Dashboard Fixes** — chart6 destroy on filter toggle, cache-busting on history fetch, Delta RH section visibility when switching dryer→HVAC, dryer pushToCharts argument mapping fix, export modal sync with history range, "Include idle data" checkbox fix.
+- ✅ **v3 Inverter/Non-Inverter Pairing Fix** — Form field name `subtype` → `sub_type` aligned with backend. Card template now only shows sub_type for HVAC. DB updated for devices intended as inverter.
 - ✅ Web-triggered baseline only (removed physical button baseline)
 - ✅ Data gating: only running data inserted; idle updates `last_seen` only
 - ✅ Dryer end-of-cycle humidity alert system with configurable thresholds
@@ -949,6 +973,39 @@ Collapsible panel with:
 - ✅ **BME280 diagnostic sketch** — `BME280_Test.ino` created for hardware debugging; tests I2C bus, detects lockups, tries both 0x76/0x77 addresses
 - ✅ **BME280 hardware failure confirmed & fixed** — Original sensor died (no response at 0x76 or 0x77). Replaced with 3.3V-native module; sensor now working correctly.
 - ✅ **Dryer cycle detection fix** — Gap threshold 600s → 60s, `cycle_start` fixed at 0.4A (was `thresh_min * 0.8`), noise filter 3.0 min → 1.0 min. Fixes merged-cycle bug where multiple dryer runs were incorrectly grouped into one long cycle.
+- ✅ **BME280 invalid readings fix** — Removed false stuck detection and `recoverI2C()`. Simplified to proven gas-dryer-test config with 10 ms spacing between register reads, 3-attempt NaN retry, and auto-soft-reset on 5 consecutive NaN.
+- ✅ **BME280 null telemetry** — Invalid readings emit `null` instead of `0.0`; dashboard shows "—" for missing data.
+- ✅ **Dryer analytics motor current fix** — Collects all readings regardless of peak state; filters spikes at runtime with `filter_threshold = average * 1.15`. Motor baseline median now stable (~3.1 A).
+- ✅ **Dryer ignition count fix** — Added hysteresis (`_peak_max - 0.1`) and hard floor (`_peak_max > mean_current + 0.15`) to prevent over-counting gas ignitions. Applied to v1 and v2.
+- ✅ **Live vs Historical Ignition Unification (v2)** — Live `_check_dryer_faults()` and historical `dryer_analytics()` used completely different spike detection algorithms, causing live to under-count. Unified to identical 3-state logic with cycle-end confirmation.
+- ✅ **Prominence Threshold Fixed to 0.4A (v2)** — Replaced dynamic `max(0.35, mean*0.20)` with fixed 0.4A threshold. Cycle 2 now counts 4 spikes (was 3).
+- ✅ **Frontend Cache Fix (v2)** — Added cache-busting (`_t=Date.now()`) to analytics fetch and `updateDataTable()` refresh on live mode switch. Prevents stale cached data from showing different counts.
+- ✅ **Cycle-End Ordering Bug Fix (v2)** — Fixed `dryer_analytics()` gap/current-drop paths where `_confirm_peak()` was called AFTER `ignition_count` was computed, causing pending spikes to be missed. All 3 finalization paths now confirm before counting.
+- ✅ **BME280 Infinite Reset Loop Fix + Hardening (v2 Firmware)** — Added error check on `bme.begin()` and stabilization delays. Reduced I2C clock to 100kHz. Increased inter-register delays to 50ms. Added stuck-value detection (15 identical readings **while running** → soft reset), out-of-range detection (15 consecutive impossible readings → soft reset), and 5-second reset cooldown across all paths. Diagnostic logging of actual T/H/P values. Prevents infinite reset loops when wires are loose.
+- ✅ **LED TX Flash Removed (v2 Firmware)** — Removed LED toggle from `publishEventJson()` and `publishTelemetry()`. LED state machine is now the single source of truth; LED stays perfectly solid ON during running state with no flicker during MQTT transmissions.
+- ✅ **Energy kWh Integration** — Proper kWh calculation using `current × voltage × dt` for both HVAC daily totals and dryer per-cycle consumption. Added `appliances.voltage` column (default 220V).
+- ✅ **HVAC Analytics Daily Report** — Daily averages with integrated daily energy consumption (kWh). Backend detects cycles per day and sums energy across all cycles within that day.
+- ✅ **Dryer Analytics Energy Column** — Per-cycle energy (kWh) replacing raw current sum, using actual time deltas between readings.
+- ✅ **Date/Time Input Auto-Format** — Custom text inputs with digits-only typing and automatic `-` / `:` insertion. Parses `DD-MM-YYYY HH:MM:SS` to ISO for backend queries.
+- ✅ **HVAC Fault Alert Refinement** — 3 consecutive reading confirmation in 7-minute STABLE_ON window for dirty filter, low refrigerant, and compressor fault.
+- ✅ **Idle Badge Delay Fix** — Modal now activates before `updateDetailData()` runs, so the status badge (Idle/Running) appears immediately instead of waiting 5 seconds for the global interval.
+- ✅ **Empty Charts Race Condition Fix** — Added `historyLoading` flag to prevent live data from being pushed to charts before `initCharts()` finishes loading history. Fixes empty charts on first open and reopen.
+- ✅ **Time-Range Query Fix** — Padded `end` parameter by +1 second to include milliseconds, fixing cycle end-time mismatch when copying timestamps from the UI.
+- ✅ **Frontend DOM Cleanup** — Fixed "Daily Averages" ghost header leaking into dryer view; removed invalid `<div>` insertion inside `<table>`.
+- ✅ **HVAC calibration progress fix** — Firmware now publishes `calibration_progress` events every ~2.2 s during calibration. Backend reads from `CALIBRATION_TRACKER` instead of stale `hvac_readings`. Fixes frozen progress bar and wrong `start_tcoil` (was showing 25.9°C instead of actual 20.00°C).
+- ✅ **Discord alert revision** — Raw SPC breaches (`spc_ucl_breach`, `spc_lcl_breach`) and legacy `dryer_humidity_high` removed from Discord. Only 7 actionable fault alerts go to Discord now, with maintenance-ticket style embeds (severity icon, title, cause, recommended action). `fault_dryer_roller_wear` and `fault_hvac_dirty_filter` fire immediately (removed 3-cycle delay).
+- ✅ **Offline/awaiting status distinction** — Added `ever_connected` flag. Devices that were never paired show yellow "Awaiting Sensor Data..."; devices that went offline after previously connecting show red "Device Offline".
+- ✅ **Offline threshold relaxed** — Increased from 600s → **660s** (11 min) to prevent idle devices from flickering offline between 10-minute checkins.
+- ✅ **Dryer analytics debug cleanup** — Removed 7 temporary `[DRYER_ANALYTICS]` print statements.
+- ✅ **BME280 threshold finalization** — Stuck-value and out-of-range now require **15 consecutive readings** (was 5). Stuck detection only active while running (`lastAvgCurrent >= 0.4`) to avoid false positives in stable exhaust conditions.
+- ✅ **DHT NaN corruption fix (v2 Firmware)** — Per-metric valid counters + last-known-good fallbacks. NaN samples are skipped from averages instead of added as 0. Fixes ~8°C temperature drop artifacts caused by DHT22 intermittent failures.
+- ✅ **Infinite false telemetry fix (v2 Firmware)** — Removed `lastGoodCurrentA` fallback. When compressor is off and current reads 0.0 for a full window, average is now 0.0 instead of stale 3.1A. Eliminates sustained false "running" telemetry when LED shows idle.
+- ✅ **HVAC calibration-needed telemetry leak fix (v2 Firmware)** — Telemetry gate now requires `calibrationAcked && avgCurrent >= 0.25`. Prevents unpaired or calibration-needed HVAC nodes from sending data even when current exceeds threshold.
+- ✅ **Data Auto firmware variant** — New `Update_SensorNode_Data_Auto.ino` sends telemetry continuously (both running and idle windows) once `calibrationAcked == true`. No `current >= 0.25` gate. Backend still filters inserts by `status`.
+- ✅ **Dryer SCT-013 CF corrected to 33.0** — Calibration factor updated from 30.0 → 33.0 across all v2 docs and the Data Auto firmware.
+- ✅ **Calendar date picker + auto-format time (v2 Frontend)** — Replaced free-text date/time inputs with calendar `type="date"` picker, auto-colon time input (`092534` → `09:25:34`), and AM/PM dropdown. Applies to History Range and Export Modal.
+- ✅ **Humidity calibration clamp reverted** — Removed `clamp_to=(0, 100)` from all humidity `apply_calibration()` calls. Calibrated RH values now display as-is from linear regression (`y = mx + c`), even when they exceed 100%. User will consult advisor before finalizing approach.
+- ✅ **Monthly energy consumption pie chart (v3)** — Pie chart at top of dashboard grouped by appliance type (HVAC = blue, Dryer = orange). Month selector shows only months with actual data. Right-side panel shows total kWh, per-type breakdown, and sorted appliance list. Excel export with month, date, type, name, energy, and total. Updates every 5s. Forgotten devices excluded.
 
 ---
 
