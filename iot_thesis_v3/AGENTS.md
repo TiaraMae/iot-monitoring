@@ -259,6 +259,13 @@ See `FAULTALERT.md` for full details.
 - **Reason:** Calibrated humidity values from linear regression can legitimately exceed 100% when operating conditions fall outside the calibration range. User will consult their advisor before deciding on a final approach (clamp, raw values, or alternative calibration method).
 - **Impact:** Dashboard, exports, and SPC calculations now show raw calibrated humidity values as-is from `y = mx + c`.
 
+### 2026-05-16 — Monthly Energy Consumption Pie Chart
+- **New feature:** One pie chart at the top of the dashboard showing monthly energy consumption grouped by appliance type (HVAC = blue, Dryer = orange).
+- **Backend:** Added `_compute_energy_kwh()` unified energy integral, `/api/energy_summary`, `/api/energy_summary/export`, and `/api/energy_months`.
+- **Frontend:** Month selector (only shows months with actual data), pie chart, right-side summary panel with total kWh + per-type breakdown + per-appliance list, Excel export button.
+- **Polling:** Updates every 5 seconds.
+- **Forgotten devices:** Excluded — only current appliances are queried.
+
 ### 2026-05-12 — Delta RH Chart Added for HVAC
 - **New chart6:** Displays `abs(RHreturn - RHsupply)` with pink `#EC4899` line, placed between T_return and T_coil in the 6-chart HVAC layout.
 - **Backend:** `api_device_latest` and `api_device_latest_n` return `DeltaRH` field.

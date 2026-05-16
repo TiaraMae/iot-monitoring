@@ -1005,6 +1005,7 @@ Collapsible panel with:
 - ✅ **Dryer SCT-013 CF corrected to 33.0** — Calibration factor updated from 30.0 → 33.0 across all v2 docs and the Data Auto firmware.
 - ✅ **Calendar date picker + auto-format time (v2 Frontend)** — Replaced free-text date/time inputs with calendar `type="date"` picker, auto-colon time input (`092534` → `09:25:34`), and AM/PM dropdown. Applies to History Range and Export Modal.
 - ✅ **Humidity calibration clamp reverted** — Removed `clamp_to=(0, 100)` from all humidity `apply_calibration()` calls. Calibrated RH values now display as-is from linear regression (`y = mx + c`), even when they exceed 100%. User will consult advisor before finalizing approach.
+- ✅ **Monthly energy consumption pie chart (v3)** — Pie chart at top of dashboard grouped by appliance type (HVAC = blue, Dryer = orange). Month selector shows only months with actual data. Right-side panel shows total kWh, per-type breakdown, and sorted appliance list. Excel export with month, date, type, name, energy, and total. Updates every 5s. Forgotten devices excluded.
 
 ---
 

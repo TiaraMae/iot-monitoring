@@ -392,7 +392,77 @@
         /* Countdown */
         .countdown-timer { font-size: 1.1rem; font-weight: 700; color: var(--primary); margin-top: 0.5rem; display: inline-block;}
 
-        /* --- MOBILE RESPONSIVE --- */
+        /* --- ENERGY SUMMARY SECTION --- */
+        .energy-summary-section {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            box-shadow: var(--shadow-sm);
+        }
+        .energy-summary-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+        .energy-summary-title { font-size: 1.25rem; font-weight: 600; }
+        .energy-summary-controls { display: flex; gap: 0.75rem; align-items: center; }
+        .energy-summary-body {
+            display: flex;
+            gap: 2rem;
+            align-items: flex-start;
+        }
+        .energy-chart-wrapper {
+            flex: 0 0 320px;
+            height: 320px;
+            position: relative;
+        }
+        .energy-summary-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            min-width: 0;
+        }
+        .energy-total-box {
+            background: var(--bg);
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
+        }
+        .energy-total-label { display: block; color: var(--text-muted); font-size: 0.875rem; }
+        .energy-total-value { display: block; font-size: 1.75rem; font-weight: 700; color: var(--primary); margin-top: 0.25rem; }
+        .energy-type-breakdown { display: flex; gap: 1rem; }
+        .energy-type-item {
+            flex: 1;
+            background: var(--bg);
+            border-radius: 8px;
+            padding: 0.75rem;
+            text-align: center;
+        }
+        .energy-type-item.hvac { border-left: 4px solid #2563EB; }
+        .energy-type-item.dryer { border-left: 4px solid #F59E0B; }
+        .energy-type-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; }
+        .energy-type-value { font-size: 1.1rem; font-weight: 600; margin-top: 0.25rem; }
+        .energy-appliance-list { max-height: 160px; overflow-y: auto; }
+        .energy-appliance-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.4rem 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.875rem;
+        }
+        .energy-appliance-name { display: flex; align-items: center; gap: 0.5rem; }
+        .energy-dot {
+            width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0;
+        }
+
+        /* --- MOBILE RESPONSIVE ---
         .sidebar-overlay {
             display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(0,0,0,0.5); z-index: 95;
@@ -406,6 +476,9 @@
             .dashboard-grid { grid-template-columns: 1fr; }
             .detail-panel { height: 100%; max-height: 100vh; border-radius: 0; transform: translateY(100%); }
             .detail-overlay { padding: 0; }
+            .energy-summary-body { flex-direction: column; align-items: center; }
+            .energy-chart-wrapper { flex: 0 0 auto; width: 280px; height: 280px; }
+            .energy-summary-header { flex-direction: column; align-items: flex-start; }
         }
     </style>
 </head>
@@ -456,6 +529,28 @@
                 <div class="page-header"><h1 class="page-title">Device Dashboard</h1></div>
 
                 {% if appliances %}
+                <div class="energy-summary-section" id="energy-summary-section">
+                    <div class="energy-summary-header">
+                        <h2 class="energy-summary-title">Monthly Energy Consumption</h2>
+                        <div class="energy-summary-controls">
+                            <select id="energy-month-select" class="form-control"></select>
+                            <button class="btn btn-primary" onclick="exportEnergySummary()">📥 Export Excel</button>
+                        </div>
+                    </div>
+                    <div class="energy-summary-body">
+                        <div class="energy-chart-wrapper">
+                            <canvas id="energyPieChart"></canvas>
+                        </div>
+                        <div class="energy-summary-panel">
+                            <div class="energy-total-box">
+                                <span class="energy-total-label">Total Consumption</span>
+                                <span class="energy-total-value" id="energy-total-kwh">-- kWh</span>
+                            </div>
+                            <div class="energy-type-breakdown" id="energy-type-breakdown"></div>
+                            <div class="energy-appliance-list" id="energy-appliance-list"></div>
+                        </div>
+                    </div>
+                </div>
                 <div class="dashboard-grid">
                     {% for a in appliances %}
                     <div class="card" id="card-{{ a.id }}" data-id="{{ a.id }}" data-name="{{ a.name|replace('"', '&quot;') }}" data-type="{{ a.type }}" data-status="{{ a.status }}" onclick="openDeviceDetail(this)">
@@ -2363,10 +2458,157 @@
             }).catch(() => {});
         }
 
+        /* --- ENERGY SUMMARY --- */
+        let energyPieChart = null;
+        let energyApplianceData = [];
+
+        const HVAC_COLORS = ['#2563EB', '#3B82F6', '#60A5FA', '#93C5FD', '#BFDBFE'];
+        const DRYER_COLORS = ['#F59E0B', '#FBBF24', '#FCD34D', '#FDE68A', '#FEF3C7'];
+
+        function initEnergySummary() {
+            const select = document.getElementById('energy-month-select');
+            fetch('/api/energy_months')
+                .then(r => r.json())
+                .then(months => {
+                    select.innerHTML = '';
+                    if (!months || months.length === 0) {
+                        const opt = document.createElement('option');
+                        opt.value = '';
+                        opt.textContent = 'No data available';
+                        select.appendChild(opt);
+                        select.disabled = true;
+                        return;
+                    }
+                    select.disabled = false;
+                    months.forEach(m => {
+                        const [y, mon] = m.split('-');
+                        const d = new Date(parseInt(y), parseInt(mon) - 1, 1);
+                        const label = d.toLocaleString('default', { month: 'long', year: 'numeric' });
+                        const opt = document.createElement('option');
+                        opt.value = m;
+                        opt.textContent = label;
+                        select.appendChild(opt);
+                    });
+                    select.addEventListener('change', updateEnergySummary);
+                    updateEnergySummary();
+                })
+                .catch(() => {
+                    select.innerHTML = '';
+                    const opt = document.createElement('option');
+                    opt.value = '';
+                    opt.textContent = 'No data available';
+                    select.appendChild(opt);
+                    select.disabled = true;
+                });
+
+            const ctx = document.getElementById('energyPieChart').getContext('2d');
+            energyPieChart = new Chart(ctx, {
+                type: 'pie',
+                data: { labels: [], datasets: [{ data: [], backgroundColor: [], borderWidth: 2, borderColor: '#fff' }] },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    const app = energyApplianceData[context.dataIndex];
+                                    const total = energyApplianceData.reduce((s, a) => s + a.energy_kwh, 0);
+                                    const pct = total > 0 ? ((app.energy_kwh / total) * 100).toFixed(1) : '0.0';
+                                    return `${app.name}: ${app.energy_kwh.toFixed(2)} kWh (${pct}%)`;
+                                }
+                            }
+                        }
+                    },
+                }
+            });
+
+            updateEnergySummary();
+        }
+
+        function updateEnergySummary() {
+            const month = document.getElementById('energy-month-select').value;
+            fetch(`/api/energy_summary?month=${month}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) return;
+
+                    const appliances = data.appliances || [];
+                    const total = data.total_kwh || 0;
+                    const byType = data.by_type || {};
+
+                    // Filter out zero-energy appliances from chart
+                    const chartApps = appliances.filter(a => a.energy_kwh > 0);
+                    energyApplianceData = chartApps;
+
+                    // Assign colors
+                    let hvacIdx = 0, dryerIdx = 0;
+                    const colors = chartApps.map(a => {
+                        if (a.type.includes('Dryer')) {
+                            return DRYER_COLORS[dryerIdx++ % DRYER_COLORS.length];
+                        }
+                        return HVAC_COLORS[hvacIdx++ % HVAC_COLORS.length];
+                    });
+
+                    // Update chart
+                    energyPieChart.data.labels = chartApps.map(a => a.name);
+                    energyPieChart.data.datasets[0].data = chartApps.map(a => a.energy_kwh);
+                    energyPieChart.data.datasets[0].backgroundColor = colors;
+                    energyPieChart.update();
+
+                    // Update total
+                    document.getElementById('energy-total-kwh').textContent = total.toFixed(2) + ' kWh';
+
+                    // Update type breakdown
+                    const typeContainer = document.getElementById('energy-type-breakdown');
+                    typeContainer.innerHTML = '';
+                    Object.entries(byType).forEach(([type, energy]) => {
+                        const div = document.createElement('div');
+                        div.className = `energy-type-item ${type.includes('Dryer') ? 'dryer' : 'hvac'}`;
+                        const pct = total > 0 ? ((energy / total) * 100).toFixed(1) : '0.0';
+                        div.innerHTML = `
+                            <div class="energy-type-label">${type}</div>
+                            <div class="energy-type-value">${energy.toFixed(2)} kWh</div>
+                            <div style="font-size:0.75rem;color:var(--text-muted);">${pct}%</div>
+                        `;
+                        typeContainer.appendChild(div);
+                    });
+
+                    // Update appliance list (sorted desc)
+                    const listContainer = document.getElementById('energy-appliance-list');
+                    listContainer.innerHTML = '';
+                    const sorted = [...appliances].sort((a, b) => b.energy_kwh - a.energy_kwh);
+                    sorted.forEach(a => {
+                        const div = document.createElement('div');
+                        div.className = 'energy-appliance-item';
+                        const color = a.type.includes('Dryer')
+                            ? DRYER_COLORS[0]
+                            : HVAC_COLORS[0];
+                        div.innerHTML = `
+                            <div class="energy-appliance-name">
+                                <span class="energy-dot" style="background:${color}"></span>
+                                <span>${a.name}</span>
+                            </div>
+                            <span>${a.energy_kwh.toFixed(2)} kWh</span>
+                        `;
+                        listContainer.appendChild(div);
+                    });
+                })
+                .catch(() => {});
+        }
+
+        function exportEnergySummary() {
+            const month = document.getElementById('energy-month-select').value;
+            window.open(`/api/energy_summary/export?month=${month}`, '_blank');
+        }
+
         window.onload = () => {
             updateMiniCards();
             setInterval(updateMiniCards, 5000);
             setInterval(updateDetailData, 5000);
+            initEnergySummary();
+            setInterval(updateEnergySummary, 5000);
         };
     </script>
 

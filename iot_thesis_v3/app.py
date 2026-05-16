@@ -191,6 +191,23 @@ def _compute_daily_energy(readings, voltage):
     return round(energy_ws / 3_600_000, 4)
 
 
+def _compute_energy_kwh(readings, voltage):
+    """Compute total energy (kWh) from (time, current) readings.
+    Integrates current * voltage * dt over all valid consecutive points.
+    A gap > 60s breaks the integration (appliance was off).
+    Works for both HVAC and Dryer.
+    """
+    energy_ws = 0.0
+    for i in range(1, len(readings)):
+        prev_time, prev_current = readings[i-1]
+        curr_time, curr_current = readings[i]
+        gap = (curr_time - prev_time).total_seconds()
+        if gap <= 60 and prev_current > 0.25:
+            dt = gap
+            energy_ws += prev_current * voltage * dt
+    return round(energy_ws / 3_600_000, 4)
+
+
 def get_appliance_calibration(appliance_id):
     conn = get_conn()
     default_cal = {
@@ -2573,6 +2590,235 @@ def dryer_analytics(appliance_id):
         if conn:
             cur.close()
             release_conn(conn)
+
+# --- API: MONTHLY ENERGY SUMMARY ---
+@app.route('/api/energy_summary')
+@login_required
+def api_energy_summary():
+    """Return monthly energy consumption per appliance for the current user."""
+    month_str = request.args.get('month', datetime.now().strftime('%Y-%m'))
+    try:
+        year, month = map(int, month_str.split('-'))
+        month_start = datetime(year, month, 1)
+        if month == 12:
+            month_end = datetime(year + 1, 1, 1)
+        else:
+            month_end = datetime(year, month + 1, 1)
+    except ValueError:
+        return jsonify({'error': 'Invalid month format. Use YYYY-MM.'}), 400
+
+    conn = get_conn()
+    if not conn:
+        return jsonify({'error': 'db'}), 500
+    cur = conn.cursor()
+    try:
+        # Get all appliances for current user
+        cur.execute("""
+            SELECT id, name, type, created_at
+            FROM appliances WHERE user_id = %s ORDER BY name
+        """, (current_user.id,))
+        appliances = cur.fetchall()
+
+        result = []
+        by_type = defaultdict(float)
+        total_kwh = 0.0
+
+        for app_id, app_name, app_type, created_at in appliances:
+            voltage = get_appliance_voltage(app_id)
+            # Clamp query to appliance creation time
+            query_start = max(month_start, created_at) if created_at else month_start
+
+            if 'Dryer' in app_type:
+                cur.execute("""
+                    SELECT r.time, r.imotor
+                    FROM dryer_readings r
+                    JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                    WHERE sn.appliance_id = %s AND r.time >= %s AND r.time < %s
+                    ORDER BY r.time ASC
+                """, (app_id, query_start, month_end))
+            else:
+                cur.execute("""
+                    SELECT r.time, r.icompressor
+                    FROM hvac_readings r
+                    JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                    WHERE sn.appliance_id = %s AND r.time >= %s AND r.time < %s
+                    ORDER BY r.time ASC
+                """, (app_id, query_start, month_end))
+
+            readings = cur.fetchall()
+            energy = _compute_energy_kwh(readings, voltage)
+            result.append({
+                'id': app_id,
+                'name': app_name,
+                'type': app_type,
+                'energy_kwh': energy
+            })
+            by_type[app_type] += energy
+            total_kwh += energy
+
+        return jsonify({
+            'month': month_str,
+            'appliances': result,
+            'total_kwh': round(total_kwh, 4),
+            'by_type': dict(by_type)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            cur.close()
+            release_conn(conn)
+
+
+@app.route('/api/energy_summary/export')
+@login_required
+def api_energy_summary_export():
+    """Export monthly energy summary to Excel."""
+    month_str = request.args.get('month', datetime.now().strftime('%Y-%m'))
+    try:
+        year, month = map(int, month_str.split('-'))
+        month_start = datetime(year, month, 1)
+        if month == 12:
+            month_end = datetime(year + 1, 1, 1)
+        else:
+            month_end = datetime(year, month + 1, 1)
+    except ValueError:
+        return jsonify({'error': 'Invalid month format. Use YYYY-MM.'}), 400
+
+    conn = get_conn()
+    if not conn:
+        return jsonify({'error': 'db'}), 500
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, name, type, created_at
+            FROM appliances WHERE user_id = %s ORDER BY type, name
+        """, (current_user.id,))
+        appliances = cur.fetchall()
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Energy Summary"
+        header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
+        header_font = Font(color="FFFFFF", bold=True)
+
+        # Title rows
+        ws.merge_cells('A1:E1')
+        ws['A1'] = f"Monthly Energy Consumption Summary"
+        ws['A1'].font = Font(size=14, bold=True)
+        ws.merge_cells('A2:E2')
+        ws['A2'] = f"Month: {month_str}"
+        ws['A2'].font = Font(size=11, bold=True)
+        ws.merge_cells('A3:E3')
+        ws['A3'] = f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+
+        # Headers
+        headers = ["Appliance Type", "Appliance Name", "Energy Consumption (kWh)"]
+        row_idx = 5
+        for col, header in enumerate(headers, start=1):
+            cell = ws.cell(row=row_idx, column=col, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        total_kwh = 0.0
+        for app_id, app_name, app_type, created_at in appliances:
+            voltage = get_appliance_voltage(app_id)
+            query_start = max(month_start, created_at) if created_at else month_start
+
+            if 'Dryer' in app_type:
+                cur.execute("""
+                    SELECT r.time, r.imotor
+                    FROM dryer_readings r
+                    JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                    WHERE sn.appliance_id = %s AND r.time >= %s AND r.time < %s
+                    ORDER BY r.time ASC
+                """, (app_id, query_start, month_end))
+            else:
+                cur.execute("""
+                    SELECT r.time, r.icompressor
+                    FROM hvac_readings r
+                    JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                    WHERE sn.appliance_id = %s AND r.time >= %s AND r.time < %s
+                    ORDER BY r.time ASC
+                """, (app_id, query_start, month_end))
+
+            readings = cur.fetchall()
+            energy = _compute_energy_kwh(readings, voltage)
+            row_idx += 1
+            ws.cell(row=row_idx, column=1, value=app_type)
+            ws.cell(row=row_idx, column=2, value=app_name)
+            ws.cell(row=row_idx, column=3, value=energy)
+            total_kwh += energy
+
+        # Total row
+        row_idx += 1
+        ws.cell(row=row_idx, column=1, value="Total")
+        ws.cell(row=row_idx, column=1).font = Font(bold=True)
+        ws.cell(row=row_idx, column=3, value=round(total_kwh, 4))
+        ws.cell(row=row_idx, column=3).font = Font(bold=True)
+
+        # Auto-width
+        for col_idx in range(1, 4):
+            max_length = 0
+            col_letter = get_column_letter(col_idx)
+            for r in range(1, ws.max_row + 1):
+                cell_value = ws.cell(row=r, column=col_idx).value
+                if cell_value:
+                    max_length = max(max_length, len(str(cell_value)))
+            ws.column_dimensions[col_letter].width = max_length + 2
+
+        output = io.BytesIO()
+        wb.save(output)
+        output.seek(0)
+        filename = f"Energy_Summary_{month_str}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        return send_file(
+            output,
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            as_attachment=True,
+            download_name=filename
+        )
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            cur.close()
+            release_conn(conn)
+
+
+# --- API: ENERGY MONTHS (only months with data) ---
+@app.route('/api/energy_months')
+@login_required
+def api_energy_months():
+    """Return distinct year-months where the current user has sensor readings."""
+    conn = get_conn()
+    if not conn:
+        return jsonify([]), 500
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT DISTINCT TO_CHAR(DATE_TRUNC('month', r.time), 'YYYY-MM') AS month
+            FROM hvac_readings r
+            JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+            JOIN appliances a ON a.id = sn.appliance_id
+            WHERE a.user_id = %s
+            UNION
+            SELECT DISTINCT TO_CHAR(DATE_TRUNC('month', r.time), 'YYYY-MM') AS month
+            FROM dryer_readings r
+            JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+            JOIN appliances a ON a.id = sn.appliance_id
+            WHERE a.user_id = %s
+            ORDER BY month DESC
+        """, (current_user.id, current_user.id))
+        rows = cur.fetchall()
+        return jsonify([r[0] for r in rows])
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    finally:
+        if conn:
+            cur.close()
+            release_conn(conn)
+
 
 # --- DISCORD WEBHOOK API ---
 @app.route('/api/user/discord_webhook', methods=['GET'])

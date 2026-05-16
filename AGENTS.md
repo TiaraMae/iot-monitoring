@@ -585,6 +585,15 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 - **Reason:** Calibrated humidity values from linear regression can legitimately exceed 100% when operating conditions fall outside the calibration range. User will consult their advisor before deciding on a final approach (clamp, raw values, or alternative calibration method).
 - **Impact:** Dashboard, exports, and SPC calculations now show raw calibrated humidity values as-is from `y = mx + c`.
 
+### 2026-05-16 — Monthly Energy Consumption Pie Chart (v3 Frontend + Backend)
+- **New feature:** One pie chart at the top of the device dashboard, above the device cards, showing monthly energy consumption grouped by appliance type.
+- **Backend:** Added `_compute_energy_kwh()` unified energy integral (works for both HVAC and Dryer), `GET /api/energy_summary?month=YYYY-MM`, `GET /api/energy_summary/export?month=YYYY-MM`, and `GET /api/energy_months`.
+- **Frontend:** Month selector dropdown, pie chart with color-coded slices (HVAC = blue family, Dryer = orange family), right-side summary panel with total kWh, per-type breakdown, and per-appliance sorted list.
+- **Smart month selector:** `api_energy_months` queries the database and only returns months that actually have sensor readings, preventing empty 2025 months from appearing.
+- **Excel export:** Downloadable file with Month, Export Date, Appliance Type, Name, Energy (kWh), and Total row.
+- **Polling:** Updates every 5 seconds alongside existing `updateMiniCards()`.
+- **Forgotten devices:** Only currently paired appliances are included; deleted appliances are excluded.
+
 ### 2026-05-12 — Delta RH Chart Added for HVAC (v3 Frontend)
 - **New chart6:** Displays `abs(RHreturn - RHsupply)` with pink `#EC4899` line, placed between T_return and T_coil in the 6-chart HVAC layout.
 - **Backend:** `api_device_latest` and `api_device_latest_n` return `DeltaRH` field.

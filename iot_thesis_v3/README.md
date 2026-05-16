@@ -80,6 +80,14 @@ Because v3 stores **all** telemetry (not just running), database size will grow 
 - **Change:** Removed `clamp_to=(0, 100)` from all humidity `apply_calibration()` calls and reverted the function to its original 3-parameter signature.
 - **Reason:** Calibrated humidity values from linear regression can legitimately exceed 100% when operating conditions fall outside the calibration range. User will consult their advisor before deciding on a final approach.
 
+### 2026-05-16 — Monthly Energy Consumption Pie Chart
+- **Pie chart** at top of dashboard showing monthly energy grouped by appliance type (HVAC = blue, Dryer = orange).
+- **Month selector** only shows months that have actual sensor data (queries DB via `/api/energy_months`).
+- **Summary panel:** Total kWh, per-type breakdown with percentages, sorted per-appliance list.
+- **Excel export** with month, export date, type, name, energy, and total.
+- **Backend:** `_compute_energy_kwh()`, `/api/energy_summary`, `/api/energy_summary/export`, `/api/energy_months`.
+- **Updates every 5 seconds.** Forgotten devices excluded.
+
 ### 2026-05-12
 - **Delta RH chart (chart6)** added for HVAC — shows `abs(RHreturn - RHsupply)` with pink `#EC4899` line.
 
