@@ -245,6 +245,19 @@ See `FAULTALERT.md` for full details.
 - **Delta RH section visibility:** HVAC `initCharts` restored visibility for `section-chart-5` but not `section-chart-6`. After viewing a dryer (which hides section-chart-6), switching back to HVAC left Delta RH invisible. Added `section-chart-6.style.display = 'block'` in HVAC's `initCharts`.
 - **Dryer `pushToCharts` mapping fix:** When `pushToCharts` was expanded from 5 to 6 values, the dryer calls were not updated. They passed `undefined, false/true` which landed in `val6` and `doUpdate` positions, breaking dryer live updates. Fixed by passing explicit `null, null` for val5/val6.
 - **Radio button sync on modal open:** `openDeviceDetail` now resets filter radio buttons to "Filtered" to match the `showIdle = false` default, preventing UI/JS state mismatch when reopening the modal.
+- **Export modal sync with history range:** When `chartMode === 'history'`, `showExportModal()` pre-fills export dates from `historyStart`/`historyEnd`.
+- **"Include idle data" checkbox fix:** Explicitly sends `filtered=false` when checked (backend defaulted to `filtered=true` when param was missing).
+
+### 2026-05-15 — Inverter/Non-Inverter Pairing Fix
+- **Root cause:** Pairing form sent `name="subtype"` but backend read `request.form.get('sub_type')`. Mismatch caused every device to default to `'noninverter'` regardless of user selection.
+- **Fix:** Form field changed to `name="sub_type"` and option value to `value="noninverter"`.
+- **Card display:** Template now only shows `sub_type` for HVAC (`'HVAC' in a.type`), hiding it for dryers.
+- **DB update:** Set `sub_type = 'inverter'` for "AC WS 1" (189), "1 - AC01" (197), "5 - AC Home 01" (202).
+
+### 2026-05-15 — Humidity Calibration Clamp Reverted
+- **Change:** Removed `clamp_to=(0, 100)` from all humidity `apply_calibration()` calls and reverted the function to its original 3-parameter signature.
+- **Reason:** Calibrated humidity values from linear regression can legitimately exceed 100% when operating conditions fall outside the calibration range. User will consult their advisor before deciding on a final approach (clamp, raw values, or alternative calibration method).
+- **Impact:** Dashboard, exports, and SPC calculations now show raw calibrated humidity values as-is from `y = mx + c`.
 
 ### 2026-05-12 — Delta RH Chart Added for HVAC
 - **New chart6:** Displays `abs(RHreturn - RHsupply)` with pink `#EC4899` line, placed between T_return and T_coil in the 6-chart HVAC layout.

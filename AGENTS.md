@@ -571,6 +571,19 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 - **Delta RH section visibility:** HVAC `initCharts` restored visibility for `section-chart-5` but not `section-chart-6`. After viewing a dryer (which hides section-chart-6), switching back to HVAC left Delta RH invisible. Added `section-chart-6.style.display = 'block'` in HVAC's `initCharts`.
 - **Dryer `pushToCharts` mapping fix:** When `pushToCharts` was expanded from 5 to 6 values, the dryer calls were not updated. They passed `undefined, false/true` which landed in `val6` and `doUpdate` positions, breaking dryer live updates. Fixed by passing explicit `null, null` for val5/val6.
 - **Radio button sync on modal open:** `openDeviceDetail` now resets filter radio buttons to "Filtered" to match the `showIdle = false` default, preventing UI/JS state mismatch when reopening the modal.
+- **Export modal sync with history range:** When `chartMode === 'history'` and `historyStart`/`historyEnd` are set, `showExportModal()` now pre-fills the export date inputs with the same range and sets the dropdown to "Custom Date Range".
+- **"Include idle data" checkbox fix:** The checkbox previously sent no `filtered` param when checked, and the backend defaulted to `filtered=true`. Now explicitly sends `filtered=false` when checked so idle data is actually included in exports.
+
+### 2026-05-15 — Inverter/Non-Inverter Display and Pairing Fix
+- **Root cause:** The pairing form sent `name="subtype"` but the backend read `request.form.get('sub_type')`. Field name mismatch caused the backend to always use the default `'noninverter'`, completely ignoring user selection.
+- **Fix 1:** Changed form field to `name="sub_type"` and option value to `value="noninverter"` (was `non_inverter`) to align with backend convention.
+- **Fix 2:** Card template now only shows `sub_type` for HVAC devices (`{% if a.sub_type and 'HVAC' in a.type %}`), preventing dryers from showing `(NONINVERTER)`.
+- **Fix 3:** Updated DB records for three HVAC devices the user had intended as inverter: "AC WS 1" (id 189), "1 - AC01" (id 197), "5 - AC Home 01" (id 202).
+
+### 2026-05-15 — Humidity Calibration Clamp Reverted
+- **Change:** Removed `clamp_to=(0, 100)` from all humidity `apply_calibration()` calls and reverted the function to its original 3-parameter signature.
+- **Reason:** Calibrated humidity values from linear regression can legitimately exceed 100% when operating conditions fall outside the calibration range. User will consult their advisor before deciding on a final approach (clamp, raw values, or alternative calibration method).
+- **Impact:** Dashboard, exports, and SPC calculations now show raw calibrated humidity values as-is from `y = mx + c`.
 
 ### 2026-05-12 — Delta RH Chart Added for HVAC (v3 Frontend)
 - **New chart6:** Displays `abs(RHreturn - RHsupply)` with pink `#EC4899` line, placed between T_return and T_coil in the 6-chart HVAC layout.

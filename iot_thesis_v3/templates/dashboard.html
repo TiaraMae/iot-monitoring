@@ -462,7 +462,7 @@
                         <div class="card-header">
                             <div>
                                 <h3 class="card-title">{{ a.name }}</h3>
-                                <div class="card-subtitle">{{ a.type }} {% if a.subtype %}({{ a.subtype|title }}){% endif %}</div>
+                                <div class="card-subtitle">{{ a.type }} {% if a.sub_type and 'HVAC' in a.type %}({{ a.sub_type|title }}){% endif %}</div>
                             </div>
                             <div>
                                 {% if a.status == 'calibration_needed' %}
@@ -542,8 +542,8 @@
                         <div id="dynamic-details" style="display:none;">
                             <div class="form-group" id="ac-subtype" style="display:none;">
                                 <label class="form-label">HVAC Technology</label>
-                                <select name="subtype" class="form-control">
-                                    <option value="non_inverter">Non-Inverter (Fixed Speed)</option>
+                                <select name="sub_type" class="form-control">
+                                    <option value="noninverter">Non-Inverter (Fixed Speed)</option>
                                     <option value="inverter">Inverter (Variable Speed)</option>
                                 </select>
                             </div>
@@ -1599,10 +1599,25 @@
         /* --- EXPORT --- */
         function showExportModal() {
             document.getElementById('export-overlay').classList.add('active');
-            const now = new Date();
-            const weekAgo = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
-            setDateTimeGroup('export-end-date', 'export-end-time', 'export-end-ampm', now);
-            setDateTimeGroup('export-start-date', 'export-start-time', 'export-start-ampm', weekAgo);
+            
+            if (chartMode === 'history' && historyStart && historyEnd) {
+                // Pre-fill with the currently monitored history range
+                document.getElementById('export-range').value = 'custom';
+                toggleDateInputs();
+                
+                const startDate = new Date(historyStart);
+                const endDate = new Date(historyEnd);
+                setDateTimeGroup('export-start-date', 'export-start-time', 'export-start-ampm', startDate);
+                setDateTimeGroup('export-end-date', 'export-end-time', 'export-end-ampm', endDate);
+            } else {
+                // Default: last 7 days
+                document.getElementById('export-range').value = 'all';
+                toggleDateInputs();
+                const now = new Date();
+                const weekAgo = new Date(now.getTime() - (7 * 24 * 60 * 60 * 1000));
+                setDateTimeGroup('export-end-date', 'export-end-time', 'export-end-ampm', now);
+                setDateTimeGroup('export-start-date', 'export-start-time', 'export-start-ampm', weekAgo);
+            }
         }
         function closeExportModal() {
             document.getElementById('export-overlay').classList.remove('active');
@@ -1617,7 +1632,11 @@
             const includeIdle = document.getElementById('export-include-idle').checked;
             let url = '/api/device/' + currentDetailId + '/export_excel';
             const params = [];
-            if (!includeIdle) params.push('filtered=true');
+            if (!includeIdle) {
+                params.push('filtered=true');
+            } else {
+                params.push('filtered=false');
+            }
             if (range === 'custom') {
                 const start = combineDateTime('export-start-date', 'export-start-time', 'export-start-ampm');
                 const end = combineDateTime('export-end-date', 'export-end-time', 'export-end-ampm');

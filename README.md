@@ -949,7 +949,8 @@ Collapsible panel with:
 - ✅ **v3 Backend-Driven CF/Deductor** — Backend stores CF and deductor per appliance; node receives them via MQTT and computes `CurrentA` locally. Eliminates hardcoded sensor constants in firmware.
 - ✅ **v3 Continuous Telemetry** — All 10-second windows (running + idle) are stored in PostgreSQL. Filtered/unfiltered toggle lets users view idle gaps as gray dots on charts.
 - ✅ **v3 Delta RH Chart** — New 6th chart for HVAC showing `abs(RHreturn - RHsupply)` with SPC bands.
-- ✅ **v3 Dashboard Fixes** — chart6 destroy on filter toggle, cache-busting on history fetch, Delta RH section visibility when switching dryer→HVAC, dryer pushToCharts argument mapping fix.
+- ✅ **v3 Dashboard Fixes** — chart6 destroy on filter toggle, cache-busting on history fetch, Delta RH section visibility when switching dryer→HVAC, dryer pushToCharts argument mapping fix, export modal sync with history range, "Include idle data" checkbox fix.
+- ✅ **v3 Inverter/Non-Inverter Pairing Fix** — Form field name `subtype` → `sub_type` aligned with backend. Card template now only shows sub_type for HVAC. DB updated for devices intended as inverter.
 - ✅ Web-triggered baseline only (removed physical button baseline)
 - ✅ Data gating: only running data inserted; idle updates `last_seen` only
 - ✅ Dryer end-of-cycle humidity alert system with configurable thresholds
@@ -1003,6 +1004,7 @@ Collapsible panel with:
 - ✅ **Data Auto firmware variant** — New `Update_SensorNode_Data_Auto.ino` sends telemetry continuously (both running and idle windows) once `calibrationAcked == true`. No `current >= 0.25` gate. Backend still filters inserts by `status`.
 - ✅ **Dryer SCT-013 CF corrected to 33.0** — Calibration factor updated from 30.0 → 33.0 across all v2 docs and the Data Auto firmware.
 - ✅ **Calendar date picker + auto-format time (v2 Frontend)** — Replaced free-text date/time inputs with calendar `type="date"` picker, auto-colon time input (`092534` → `09:25:34`), and AM/PM dropdown. Applies to History Range and Export Modal.
+- ✅ **Humidity calibration clamp reverted** — Removed `clamp_to=(0, 100)` from all humidity `apply_calibration()` calls. Calibrated RH values now display as-is from linear regression (`y = mx + c`), even when they exceed 100%. User will consult advisor before finalizing approach.
 
 ---
 
