@@ -171,7 +171,6 @@ Flask Backend
   ├── Receives MQTT telemetry
   ├── Stores CurrentA directly into DB (no computation)
   ├── If CurrentA >= 0.25:
-  │     ├── check_spc_alerts()
   │     └── check_fault_alerts()
   └── API endpoints serve data with optional ?filtered= param
 
@@ -212,7 +211,7 @@ The HVAC fault detection system was **redesigned in v3** around a **peak-perform
 
 ### Snapshot Capture
 - **Non-inverter:** Reading with **maximum Delta-T** during the ON cycle, evaluated at cycle end (current < 0.25 A).
-- **Inverter:** Reading with **maximum Delta-T** during high-effort window (T_return > 26.5°C), evaluated when maintaining phase detected (current < 70% of peak for > 2 min) or compressor turns off.
+- **Inverter:** Reading with **maximum Delta-T** during high-effort window (T_return > 26.5°C), evaluated when maintaining phase detected (current < 80% of peak for > 2 min) or compressor turns off.
 
 ### Key Changes from v2
 - **Removed:** 10-minute STABLE_ON window, T_coil-based evaluation, consecutive counters.
@@ -227,7 +226,6 @@ See `FAULTALERT.md` for full details.
 ## 9. Retained from v2 (Unchanged in v3)
 
 - Manual SPC baseline input (`spc_manual_baselines` table)
-- Real-time SPC breach alerts (`spc_ucl_breach`, `spc_lcl_breach`)
 - Dryer fault alert system (4 fault types, unchanged)
 - Discord webhook integration
 - HVAC calibration (ice-bath method)
@@ -237,6 +235,62 @@ See `FAULTALERT.md` for full details.
 ---
 
 ## 10. Changelog
+
+### 2026-05-17 — Baseline Removal Feature
+- **New capability:** Users can now remove/clear a previously saved baseline via a `🗑️ Remove Baseline` button next to `✏️ Edit Baseline`.
+- **Backend:** Extended `api_baseline_config` to accept `DELETE`. Deletes all `spc_manual_baselines` rows for the appliance and sets `appliances.baseline_configured = FALSE`.
+- **Frontend:** `removeBaselineConfig()` calls DELETE, then clears SPC line datasets (1–3) from all charts, resets `currentDeviceHasBaseline`, hides inputs, and rebuilds the action bar. No firmware impact.
+
+### 2026-05-17 — Idle Point Styling Removed + Dryer Cycle RH Refinement
+- **Idle point styling removed:** `updateChart` no longer applies per-point `pointBackgroundColor`/`pointRadius` arrays for idle vs running distinction. Idle data points now render with the same color and radius as running points. The `!showIdle && idle` guard in live updates still controls whether idle points are pushed at all.
+- **Dryer cycle begin RH:** Historical `dryer_analytics` defers `start_rh` computation to cycle finalization, averaging the **first 6** `valid_rh` entries (was single first reading at cycle start). Live `_finalize_dryer_cycle` also computes `begin_rh_avg` from first 6 `rh_history` entries.
+- **Dryer cycle end RH:** Both live and historical paths now compute `end_rh_avg` from the **last 6** RH readings (was last 10). Consistent ~1-minute smoothing window at both cycle start and end.
+
+### 2026-05-17 — SPC Breach Alerts Completely Removed
+- **Rationale:** `spc_ucl_breach` / `spc_lcl_breach` fired on every individual reading crossing a threshold (e.g., dryer ignition spike crossing Current UCL). This was raw data-point spam, not actionable maintenance advice. The 7 fault alerts already evaluate at cycle/window end and provide diagnostics.
+- **Backend:** Deleted `SPC_ALERT_COOLDOWN` global, `check_spc_alerts()` function, and its call in `on_mqtt_message()`. Removed from tracker cleanup in `forget_device()`.
+- **Frontend:** Removed `isSPCBreach` styling branch from `loadAlerts()`. Alerts panel now only shows the 7 actionable fault types.
+- **SPC baselines preserved:** UCL/LCL/Mean values continue to drive chart lines and gate the 7 fault alerts. Only the per-reading breach alerts are gone.
+
+### 2026-05-18 — Dryer Cycle Gap Threshold Increased to 2 Minutes
+- **Change:** Gap threshold that differentiates separate dryer cycles increased from **60 seconds → 120 seconds (2 minutes)**.
+- **Files changed:** `app.py` — 8 substitutions across `_compute_daily_energy`, `_compute_energy_kwh`, `_check_dryer_faults`, `on_mqtt_message` CYCLE_TRACKER, and `dryer_analytics`.
+- **Rationale:** 1-minute gaps were too aggressive — brief pauses (e.g., ignition gaps) within a single cycle were incorrectly splitting it into multiple cycles. A 2-minute gap better represents a true "cycle ended" condition.
+- **Energy computation:** Also updated to use 120s gap breaks for consistency with cycle detection.
+
+### 2026-05-18 — Two-Tier Severity System (Warning + Critical) + Rolling-Window Evaluation
+- **HVAC evaluation redesigned:**
+  - Non-inverter: evaluates at **10 min of running** OR before compressor turns off (whichever comes first).
+  - Inverter: evaluates **before maintaining state** (before current drops) OR at 10 min.
+  - Uses **average of last 3 readings** at the evaluation point (instead of single snapshot).
+  - **Severity:** Warning when Treturn < 27°C. **Critical** when Treturn ≥ 27°C after 10 min (no effective cooling).
+- **Dryer evaluation redesigned:**
+  - Uses **average of last 6 readings** at cycle end for end-RH, end-temp, and end-current.
+  - `fault_dryer_lint_blockage`: Warning when end RH > UCL + temp > UCL. **Critical** when max temp > 100°C (burning risk).
+  - `fault_dryer_incomplete_drying`: Warning when end RH > UCL. **Critical** when end RH > 90% (not drying at all).
+- **Backend:** Added `severity` column to `alerts` table. Updated `_insert_fault_alert()`, `send_discord_alert()`, `_check_hvac_faults()`, `_evaluate_hvac_window()`, `_finalize_dryer_cycle()`, `api_alerts()`.
+- **Frontend:** `loadAlerts()` now shows severity badges (red CRITICAL pill / amber WARNING pill) using the `severity` field from API.
+- **Docs:** Updated `FAULTALERT.md` with new evaluation timing, severity matrices, and code snippets.
+
+## 11. Testing Discord Alerts via Tight Baselines (No Code Changes)
+
+You can test Discord fault alerts without any code changes by setting very tight baselines that normal running data will immediately cross.
+
+### Quick Examples
+| Fault | Appliance | Baseline Settings | Trigger Condition |
+|-------|-----------|-------------------|-------------------|
+| `fault_dryer_roller_wear` | Dryer | Current UCL = 2.01 (baseline ~2.0 A) | Current > 2.01 A |
+| `fault_dryer_belt_snapped` | Dryer | Current LCL = 1.99 (baseline ~2.0 A) | Current < 1.99 A |
+| `fault_hvac_dirty_filter` | HVAC | Delta-T LCL = 9.5 (normal ~10°C) | Delta-T < 9.5°C with normal current |
+| `fault_hvac_low_refrigerant` | HVAC | Delta-T LCL = 9.5, Current LCL = 2.5 | Delta-T < 9.5°C with current < 2.5 A |
+| `fault_hvac_compressor_fault` | HVAC | Delta-T LCL = 9.5, Current UCL = 4.0 | Delta-T < 9.5°C with current > 4.0 A |
+
+### Limitations
+- **10-minute cooldown** per fault type per appliance (`_insert_fault_alert` cooldown). Restart backend to reset.
+- **DB pollution** — test alerts are real rows in `alerts`. Clean up with `DELETE FROM alerts WHERE appliance_id = X;` after testing.
+- **Lint blockage / incomplete drying** require cycle-end conditions (both RH + temp thresholds). Harder to trigger naturally.
+
+---
 
 ### 2026-05-14 — Dashboard Fixes
 - **Chart6 destroy fix:** `initCharts` was destroying charts 1–5 but **not chart6** (Delta RH). On filter toggle, Chart.js threw "Canvas is already in use" because the old chart6 instance was still attached. This aborted `initCharts`, leaving all charts empty. Fixed by adding `chart6` to the destroy and null-reset arrays.
@@ -258,6 +312,41 @@ See `FAULTALERT.md` for full details.
 - **Change:** Removed `clamp_to=(0, 100)` from all humidity `apply_calibration()` calls and reverted the function to its original 3-parameter signature.
 - **Reason:** Calibrated humidity values from linear regression can legitimately exceed 100% when operating conditions fall outside the calibration range. User will consult their advisor before deciding on a final approach (clamp, raw values, or alternative calibration method).
 - **Impact:** Dashboard, exports, and SPC calculations now show raw calibrated humidity values as-is from `y = mx + c`.
+
+### 2026-05-19 — Belt Snap & Roller Wear: 3-Consecutive-Reading Fix
+- **Root cause of false belt snap on Dryer 2:** The gap >120s check in `_check_dryer_faults` inferred belt snap from `min_current < LCL` — a single lowest point in the entire cycle. This falsely triggered on normal ignition valleys or brief dips.
+- **Removed redundant logic:**
+  - Deleted `CYCLE_TRACKER` / `_process_cycle_end` / `dryer_humidity_high` alert (redundant with `fault_dryer_incomplete_drying`).
+  - Deleted gap-based belt snap inference (`min_current < LCL` on gap >120s).
+  - Deleted median-based belt snap and roller wear checks from `_finalize_dryer_cycle`.
+- **New real-time detection (`_check_dryer_faults`):**
+  - Tracks `consecutive_below_lcl` and `consecutive_above_ucl` counters during active cycles.
+  - Only counts **running readings** (`current >= 0.25`) because `_check_dryer_faults` is gated by `final_amps >= 0.25`.
+  - Belt snap: 3 consecutive readings < LCL → critical alert.
+  - Roller wear: 3 consecutive readings > UCL → warning alert.
+  - `belt_snap_triggered` / `roller_wear_triggered` flags prevent duplicates per cycle.
+- **New end-of-cycle backup (`_finalize_dryer_cycle`):**
+  - Added missing `baseline_configured` + `alert_enabled` gate at top of function.
+  - Belt snap: last 3 `motor_readings` all < LCL (catches immediate-shutdown cases).
+  - Roller wear: any 3 consecutive `motor_readings` all > UCL.
+  - `motor_readings` only contains running data, so idle/pause gaps cannot false-trigger.
+- **Why pause gaps are safe:** `_check_dryer_faults` only receives running data; idle readings (current = 0 during 1-2 min gas dryer pauses) are inserted into DB but never passed to fault detection. `DRYER_CYCLE_STATS['motor_readings']` is only appended inside `_check_dryer_faults`, so it exclusively contains running readings.
+- **Docs:** Updated `FAULTALERT.md` §2.4, §3.2, §3.3, §5.2, §8.4, §9 with new detection logic and removed `dryer_humidity_high`.
+
+### 2026-05-17 — Alert-Based Device Badge + Resolve Button
+- **Backend:**
+  - Added `get_appliance_alert_status(appliance_id)` helper → queries `MAX(severity)` of unresolved alerts, returns `'normal'`, `'warning'`, or `'critical'`.
+  - `api_device_latest` now returns `alert_status` in all response paths.
+  - `api_spc_limits` now returns `alert_status` for frontend polling.
+  - `get_appliances_for_user` includes `alert_status` per appliance.
+  - `POST /api/alert/<int:alert_id>/resolve` endpoint added — sets `resolved_at = NOW()`, verifies ownership via `appliances.user_id` join.
+- **Frontend:**
+  - Card badge now reflects `alert_status` instead of `operational_status`: Normal (green) = no unresolved alerts; Warning (amber); Critical (red). Calibration states (`calibration_needed`, `calibrating`) still take precedence.
+  - `data-alert-status` attribute added to card divs.
+  - `loadAlerts()` renders a **Resolve** button for each unresolved alert; resolved alerts show their resolution timestamp and are dimmed (`opacity: 0.7`).
+  - `resolveAlert(alertId)` function POSTs to `/api/alert/${alertId}/resolve`, then refreshes `loadAlerts()` and `updateMiniCards()`.
+  - `updateMiniCards()` polling now updates the main status badge dynamically when `alert_status` changes.
+  - `buildStatusPolling()` `doPoll` updates badge from `alert_status` independently of `operational_status`.
 
 ### 2026-05-16 — Monthly Energy Consumption Pie Chart
 - **New feature:** One pie chart at the top of the dashboard showing monthly energy consumption grouped by appliance type (HVAC = blue, Dryer = orange).

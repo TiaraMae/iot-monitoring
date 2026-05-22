@@ -91,6 +91,11 @@ Because v3 stores **all** telemetry (not just running), database size will grow 
 ### 2026-05-12
 - **Delta RH chart (chart6)** added for HVAC — shows `abs(RHreturn - RHsupply)` with pink `#EC4899` line.
 
+### 2026-05-17
+- **Baseline removal feature** — New `🗑️ Remove Baseline` button appears when baseline exists. `DELETE /api/device/<id>/baseline_config` clears all baseline rows and sets `baseline_configured = FALSE`. Frontend wipes SPC lines from charts and refreshes UI state.
+- **Discord alert testing documented** — Fault alerts can be tested by setting tight UCL/LCL baselines (e.g., Current UCL = 2.01 for a 2.0 A motor baseline) so normal running data immediately crosses thresholds. This fires real Discord alerts with the maintenance-ticket embed format. See AGENTS.md §11 for examples, limitations (10-min cooldown, DB pollution), and cleanup instructions.
+- **Idle point styling removed** — `updateChart` no longer applies gray tiny-dot styling to idle points. Idle and running points now render identically. The filtered/unfiltered toggle still controls visibility.
+- **Dryer cycle RH refined** — `start_rh` computed from first 6 RH readings (was single point). `end_rh_avg` computed from last 6 RH readings (was last 10). Both live fault detection and historical analytics updated.
+
 ### 2026-05-10
 - **DHT22 stuck detection** in firmware — per-window (10s) stuck-value detection with `dht.begin()` re-init after 3 consecutive stuck windows.
-- **Idle data visualization** — gray dots (`#94a3b8`, radius 1) for idle points in unfiltered mode.

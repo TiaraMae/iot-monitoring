@@ -585,7 +585,7 @@ Baseline recording is initiated **exclusively from the web dashboard**. Physical
 ### Recording Duration
 
 - **HVAC:** 15-minute fixed recording window. The appliance should keep running for the full 15 minutes.
-- **Dryer:** Records **one full cycle**. The backend detects when the cycle ends (no running data for 1 minute) and completes baseline automatically.
+- **Dryer:** Records **one full cycle**. The backend detects when the cycle ends (no running data for 2 minutes) and completes baseline automatically.
 - **Dryer safety timeout:** If the dryer does not start within 5 minutes of clicking "Start Baseline," the recording fails automatically.
 
 ### Completion
@@ -852,7 +852,7 @@ Collapsible panel with:
 2. Confirm node beeps twice.
 3. Start the dryer. Confirm running telemetry arrives.
 4. Let the dryer run through one full cycle.
-5. After the cycle ends, wait ~1 minute for auto-completion.
+5. After the cycle ends, wait ~2 minutes for auto-completion.
 6. Confirm node beeps 3 times and dashboard shows baseline results panel.
 7. Query `appliances` table: confirm `baseline_*_mean` and `baseline_*_std` are populated.
 
@@ -934,8 +934,8 @@ Collapsible panel with:
 | 2 | ~~Baseline Redesign~~ | ✅ Done | Dryer: cycle-based baseline; HVAC: 15-min fixed; Cancel button wired |
 | 3 | ~~Ignition Detection~~ | ✅ Done | Dynamic state machine + prominence threshold for dryer cycle analytics |
 | 4 | ~~BME280 Hardware Fix~~ | ✅ Done | Replaced dead BME280 with 3.3V-native module. Sensor now working correctly. |
-| 5 | ~~SPC Limit Enforcement~~ | ✅ Done (v2) | Real-time SPC breach alerts (`spc_ucl_breach`, `spc_lcl_breach`) active immediately after baseline config |
-| 6 | ~~Discord Integration~~ | ✅ Done (v2) | Per-user Discord webhook alerts for actionable fault alerts only (7 fault types). SPC breaches and legacy humidity alerts remain DB/dashboard-only. |
+| 5 | ~~SPC Limit Enforcement~~ | ✅ Done (v2) | Real-time SPC breach alerts (`spc_ucl_breach`, `spc_lcl_breach`) active immediately after baseline config. **Removed in v3** — replaced by 7 actionable fault alerts evaluated at cycle/window end. |
+| 6 | ~~Discord Integration~~ | ✅ Done (v2) | Per-user Discord webhook alerts for actionable fault alerts only (7 fault types). SPC breaches and legacy humidity alerts removed in v3. |
 | 7 | **Multi-Device Dashboard Stress Test** | 🟡 Medium | Verify UI performance with 5+ simultaneous devices |
 | 8 | **Unit Tests** | 🟡 Medium | pytest suite for SPC math, calibration regression, cycle detection |
 | 9 | **Docker Deployment** | 🟡 Medium | Containerize Flask app + PostgreSQL for easy cloud deployment |
@@ -972,7 +972,7 @@ Collapsible panel with:
 - ✅ **Backend future-timestamp guard** — clamps incoming readings to `now + 1 min`; hardened staleness check detects future-dated rows
 - ✅ **BME280 diagnostic sketch** — `BME280_Test.ino` created for hardware debugging; tests I2C bus, detects lockups, tries both 0x76/0x77 addresses
 - ✅ **BME280 hardware failure confirmed & fixed** — Original sensor died (no response at 0x76 or 0x77). Replaced with 3.3V-native module; sensor now working correctly.
-- ✅ **Dryer cycle detection fix** — Gap threshold 600s → 60s, `cycle_start` fixed at 0.4A (was `thresh_min * 0.8`), noise filter 3.0 min → 1.0 min. Fixes merged-cycle bug where multiple dryer runs were incorrectly grouped into one long cycle.
+- ✅ **Dryer cycle detection fix** — Gap threshold 600s → 120s (v3), `cycle_start` fixed at 0.4A (was `thresh_min * 0.8`), noise filter 3.0 min → 1.0 min. Fixes merged-cycle bug where multiple dryer runs were incorrectly grouped into one long cycle.
 - ✅ **BME280 invalid readings fix** — Removed false stuck detection and `recoverI2C()`. Simplified to proven gas-dryer-test config with 10 ms spacing between register reads, 3-attempt NaN retry, and auto-soft-reset on 5 consecutive NaN.
 - ✅ **BME280 null telemetry** — Invalid readings emit `null` instead of `0.0`; dashboard shows "—" for missing data.
 - ✅ **Dryer analytics motor current fix** — Collects all readings regardless of peak state; filters spikes at runtime with `filter_threshold = average * 1.15`. Motor baseline median now stable (~3.1 A).
@@ -993,7 +993,8 @@ Collapsible panel with:
 - ✅ **Time-Range Query Fix** — Padded `end` parameter by +1 second to include milliseconds, fixing cycle end-time mismatch when copying timestamps from the UI.
 - ✅ **Frontend DOM Cleanup** — Fixed "Daily Averages" ghost header leaking into dryer view; removed invalid `<div>` insertion inside `<table>`.
 - ✅ **HVAC calibration progress fix** — Firmware now publishes `calibration_progress` events every ~2.2 s during calibration. Backend reads from `CALIBRATION_TRACKER` instead of stale `hvac_readings`. Fixes frozen progress bar and wrong `start_tcoil` (was showing 25.9°C instead of actual 20.00°C).
-- ✅ **Discord alert revision** — Raw SPC breaches (`spc_ucl_breach`, `spc_lcl_breach`) and legacy `dryer_humidity_high` removed from Discord. Only 7 actionable fault alerts go to Discord now, with maintenance-ticket style embeds (severity icon, title, cause, recommended action). `fault_dryer_roller_wear` and `fault_hvac_dirty_filter` fire immediately (removed 3-cycle delay).
+- ✅ **Discord alert revision (v2)** — Raw SPC breaches (`spc_ucl_breach`, `spc_lcl_breach`) and legacy `dryer_humidity_high` removed from Discord. Only 7 actionable fault alerts go to Discord now, with maintenance-ticket style embeds (severity icon, title, cause, recommended action). `fault_dryer_roller_wear` and `fault_hvac_dirty_filter` fire immediately (removed 3-cycle delay).
+- ✅ **SPC breach alerts removed entirely (v3)** — `spc_ucl_breach` and `spc_lcl_breach` deleted from backend and frontend. No longer insert into `alerts` table or appear on dashboard. SPC baselines still drive chart lines and fault-alert gating.
 - ✅ **Offline/awaiting status distinction** — Added `ever_connected` flag. Devices that were never paired show yellow "Awaiting Sensor Data..."; devices that went offline after previously connecting show red "Device Offline".
 - ✅ **Offline threshold relaxed** — Increased from 600s → **660s** (11 min) to prevent idle devices from flickering offline between 10-minute checkins.
 - ✅ **Dryer analytics debug cleanup** — Removed 7 temporary `[DRYER_ANALYTICS]` print statements.
@@ -1006,6 +1007,10 @@ Collapsible panel with:
 - ✅ **Calendar date picker + auto-format time (v2 Frontend)** — Replaced free-text date/time inputs with calendar `type="date"` picker, auto-colon time input (`092534` → `09:25:34`), and AM/PM dropdown. Applies to History Range and Export Modal.
 - ✅ **Humidity calibration clamp reverted** — Removed `clamp_to=(0, 100)` from all humidity `apply_calibration()` calls. Calibrated RH values now display as-is from linear regression (`y = mx + c`), even when they exceed 100%. User will consult advisor before finalizing approach.
 - ✅ **Monthly energy consumption pie chart (v3)** — Pie chart at top of dashboard grouped by appliance type (HVAC = blue, Dryer = orange). Month selector shows only months with actual data. Right-side panel shows total kWh, per-type breakdown, and sorted appliance list. Excel export with month, date, type, name, energy, and total. Updates every 5s. Forgotten devices excluded.
+- ✅ **Baseline removal feature (v3)** — Users can now remove a saved baseline via `🗑️ Remove Baseline` button. Backend `DELETE /api/device/<id>/baseline_config` clears `spc_manual_baselines` rows and sets `baseline_configured = FALSE`. Frontend clears SPC lines from charts and refreshes UI state.
+- ✅ **Discord alert testing via tight baselines (documented)** — Fault alerts can be tested by setting very tight UCL/LCL thresholds (e.g., UCL = 2.01 for a 2.0 A motor baseline) so normal running data immediately crosses them. This triggers real fault alerts and Discord webhooks without code changes. Documented with examples and cleanup instructions.
+- ✅ **Idle point styling removed (v3)** — Idle data points no longer use gray tiny-dot styling. They render identically to running points. The filtered/unfiltered toggle still controls visibility.
+- ✅ **Dryer cycle RH calculation refined (v3)** — `start_rh` (begin RH) now averages the first 6 readings (~1 min). `end_rh_avg` now averages the last 6 readings (~1 min), changed from last 10. Applied to both live fault detection and historical analytics.
 
 ---
 

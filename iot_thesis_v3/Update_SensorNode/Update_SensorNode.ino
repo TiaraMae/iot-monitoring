@@ -16,8 +16,8 @@
 // =========================
 // WIFI CONFIG
 // =========================
-const char* WIFI_SSID = "MT-LAB";
-const char* WIFI_PASS = "yangmana";
+const char* WIFI_SSID = "SGU-Guest";
+const char* WIFI_PASS = "Springbloom@2026";
 
 // =========================
 // MQTT CONFIG

@@ -553,7 +553,7 @@
                 </div>
                 <div class="dashboard-grid">
                     {% for a in appliances %}
-                    <div class="card" id="card-{{ a.id }}" data-id="{{ a.id }}" data-name="{{ a.name|replace('"', '&quot;') }}" data-type="{{ a.type }}" data-status="{{ a.status }}" onclick="openDeviceDetail(this)">
+                    <div class="card" id="card-{{ a.id }}" data-id="{{ a.id }}" data-name="{{ a.name|replace('"', '&quot;') }}" data-type="{{ a.type }}" data-status="{{ a.status }}" data-alert-status="{{ a.alert_status }}" onclick="openDeviceDetail(this)">
                         <div class="card-header">
                             <div>
                                 <h3 class="card-title">{{ a.name }}</h3>
@@ -564,10 +564,12 @@
                                     <span class="status-badge status-danger">Calib. Needed</span>
                                 {% elif a.status == 'calibrating' %}
                                     <span class="status-badge status-calibrating">Calibrating...</span>
-                                {% elif a.status == 'normal' %}
-                                    <span class="status-badge status-normal">Normal</span>
-                                {% else %}
+                                {% elif a.alert_status == 'critical' %}
+                                    <span class="status-badge status-danger">Critical</span>
+                                {% elif a.alert_status == 'warning' %}
                                     <span class="status-badge status-warning">Warning</span>
+                                {% else %}
+                                    <span class="status-badge status-normal">Normal</span>
                                 {% endif %}
                             </div>
                         </div>
@@ -824,6 +826,7 @@
                     <span id="baseline-timestamp" style="font-size:0.75rem; color:var(--text-muted); margin-right:auto;"></span>
                     <button id="btn-configure-baseline" class="btn btn-primary" style="display:none; font-size:0.85rem;" onclick="showBaselineConfigPanel()">⚙️ Configure Baseline</button>
                     <button id="btn-edit-baseline" class="btn btn-primary" style="display:none; font-size:0.85rem;" onclick="showBaselineConfigPanel()">✏️ Edit Baseline</button>
+                    <button id="btn-remove-baseline" class="btn btn-danger" style="display:none; font-size:0.85rem; background:var(--bg); color:var(--danger); border:1px solid var(--danger);" onclick="removeBaselineConfig()">🗑️ Remove Baseline</button>
                     <button id="btn-save-baseline" class="btn btn-primary" style="display:none; font-size:0.85rem;" onclick="saveBaselineConfig()">💾 Save Baseline</button>
                     <button id="btn-cancel-baseline" class="btn btn-secondary" style="display:none; font-size:0.85rem; background:var(--bg); color:var(--text); border:1px solid var(--border);" onclick="hideBaselineInputs()">Cancel</button>
                     <form id="forget-form" method="POST" onsubmit="return confirm('Are you sure you want to forget this device?');">
@@ -1121,6 +1124,7 @@
             }
             document.getElementById('btn-configure-baseline').style.display = currentDeviceHasBaseline ? 'none' : 'inline-flex';
             document.getElementById('btn-edit-baseline').style.display = currentDeviceHasBaseline ? 'inline-flex' : 'none';
+            document.getElementById('btn-remove-baseline').style.display = currentDeviceHasBaseline ? 'inline-flex' : 'none';
             document.getElementById('btn-save-baseline').style.display = 'none';
             document.getElementById('btn-cancel-baseline').style.display = 'none';
         }
@@ -1192,6 +1196,7 @@
                 });
                 document.getElementById('btn-configure-baseline').style.display = 'none';
                 document.getElementById('btn-edit-baseline').style.display = 'none';
+                document.getElementById('btn-remove-baseline').style.display = 'none';
                 document.getElementById('btn-save-baseline').style.display = 'inline-flex';
                 document.getElementById('btn-cancel-baseline').style.display = 'inline-flex';
             }).catch(() => {});
@@ -1280,6 +1285,37 @@
             }).catch(e => {
                 alert('Network error: ' + e);
             });
+        }
+
+        function removeBaselineConfig() {
+            if (!currentDetailId) return;
+            if (!confirm('Are you sure you want to remove the baseline for this device?')) return;
+            fetch(`/api/device/${currentDetailId}/baseline_config`, { method: 'DELETE' })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        currentDeviceHasBaseline = false;
+                        spcLimits = {};
+                        // Clear SPC lines from charts by emptying datasets 1-3 (UCL, Mean, LCL)
+                        [chart1, chart2, chart3, chart4, chart5, chart6].forEach(c => {
+                            if (!c) return;
+                            c.data.datasets.forEach((ds, idx) => {
+                                if (idx >= 1 && idx <= 3) ds.data = [];
+                            });
+                            c.update('none');
+                        });
+                        hideBaselineInputs();
+                        checkBaselineResults();
+                        const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
+                        if (card) buildActionBar('normal', currentDetailId, card.dataset.type.includes('HVAC'), false);
+                    } else {
+                        alert(data.error || 'Failed to remove baseline');
+                    }
+                })
+                .catch(e => {
+                    console.error(e);
+                    alert('Failed to remove baseline');
+                });
         }
 
         /* --- ACTION BAR BUILDER --- */
@@ -1379,30 +1415,36 @@
                 const card = document.querySelector(`.card[data-id="${id}"]`);
                 if (!card) return;
                 const oldStatus = card.dataset.status;
+                const oldAlertStatus = card.dataset.alertStatus || 'normal';
                 fetch('/api/device/' + id + '/spc_limits').then(r => r.json()).then(data => {
                     if (!data.error && data.status) {
+                        // Update operational status and action bar
                         if (data.status !== oldStatus) {
                             card.dataset.status = data.status;
-                            // Update badge on card
-                            const badge = card.querySelector('.status-badge');
-                            if (badge) {
-                                if (data.status === 'normal') { badge.className = 'status-badge status-normal'; badge.innerText = 'Normal'; }
-                                else if (data.status === 'calibration_needed') { badge.className = 'status-badge status-danger'; badge.innerText = 'Calib. Needed'; }
-                                else if (data.status === 'calibrating') { badge.className = 'status-badge status-calibrating'; badge.innerText = 'Calibrating...'; }
-                            }
-                            // Update action bar in modal
                             if (currentDetailId == id) {
                                 buildActionBar(data.status, id, isHVAC, currentDeviceHasBaseline);
                                 if (data.status === 'normal') {
                                     document.getElementById('btn-export').style.display = 'inline-flex';
                                     checkBaselineResults().then(() => {
-                                        // Rebuild action bar with updated baseline state
                                         if (currentDetailId == id) {
                                             buildActionBar('normal', id, isHVAC, currentDeviceHasBaseline);
                                         }
                                     });
                                     updateDataTable();
                                 }
+                            }
+                        }
+                        // Update alert badge independently
+                        const alertStatus = data.alert_status || 'normal';
+                        if (alertStatus !== oldAlertStatus || data.status !== oldStatus) {
+                            card.dataset.alertStatus = alertStatus;
+                            const badge = card.querySelector('.status-badge');
+                            if (badge) {
+                                if (data.status === 'calibration_needed') { badge.className = 'status-badge status-danger'; badge.innerText = 'Calib. Needed'; }
+                                else if (data.status === 'calibrating') { badge.className = 'status-badge status-calibrating'; badge.innerText = 'Calibrating...'; }
+                                else if (alertStatus === 'critical') { badge.className = 'status-badge status-danger'; badge.innerText = 'Critical'; }
+                                else if (alertStatus === 'warning') { badge.className = 'status-badge status-warning'; badge.innerText = 'Warning'; }
+                                else { badge.className = 'status-badge status-normal'; badge.innerText = 'Normal'; }
                             }
                         }
                         if (data.status === 'normal') {
@@ -2015,7 +2057,7 @@
             }
         }
 
-        function pushToCharts(time, val1, val2, val3, val4, val5, val6, doUpdate=true, isHVAC=true, isIdle=false) {
+        function pushToCharts(time, val1, val2, val3, val4, val5, val6, doUpdate=true, isHVAC=true) {
             const timeMs = time instanceof Date ? time.getTime() : time;
             // Allow backward time (up to 30s) so buffered messages arriving after a reconnect are not dropped
             if (timeMs <= latestChartTimeMs - 30000) return; // skip duplicates / out-of-order
@@ -2025,33 +2067,20 @@
                 ? time.toLocaleDateString() + ' ' + time.toLocaleTimeString()
                 : new Date(time).toLocaleDateString() + ' ' + new Date(time).toLocaleTimeString();
 
-            function updateChart(chart, val, idle) {
+            function updateChart(chart, val) {
                 if (!chart) return;
                 chart.data.labels.push(label);
                 chart.data.datasets[0].data.push(val);
                 if (!chart.timeLabels) chart.timeLabels = [];
                 chart.timeLabels.push(timeLabel);
-                // Point styling for idle vs running
-                const ds = chart.data.datasets[0];
-                if (!ds.pointBackgroundColor) ds.pointBackgroundColor = [];
-                if (!Array.isArray(ds.pointBackgroundColor)) ds.pointBackgroundColor = [];
-                if (!ds.pointRadius) ds.pointRadius = [];
-                if (!Array.isArray(ds.pointRadius)) ds.pointRadius = [];
-                if (idle) {
-                    ds.pointBackgroundColor.push('#94a3b8');
-                    ds.pointRadius.push(1);
-                } else {
-                    ds.pointBackgroundColor.push(ds.borderColor);
-                    ds.pointRadius.push(3);
-                }
             }
 
-            updateChart(chart1, val1, isIdle);
-            updateChart(chart2, val2, isIdle);
-            updateChart(chart3, val3, isIdle);
-            updateChart(chart4, val4, isIdle);
-            updateChart(chart5, val5, isIdle);
-            updateChart(chart6, val6, isIdle);
+            updateChart(chart1, val1);
+            updateChart(chart2, val2);
+            updateChart(chart3, val3);
+            updateChart(chart4, val4);
+            updateChart(chart5, val5);
+            updateChart(chart6, val6);
 
             if (chartMode === 'live') {
                 [chart1, chart2, chart3, chart4, chart5, chart6].forEach(c => {
@@ -2060,8 +2089,6 @@
                         c.data.labels.shift();
                         c.data.datasets.forEach(ds => {
                             if (ds.data.length) ds.data.shift();
-                            if (ds.pointBackgroundColor && Array.isArray(ds.pointBackgroundColor) && ds.pointBackgroundColor.length) ds.pointBackgroundColor.shift();
-                            if (ds.pointRadius && Array.isArray(ds.pointRadius) && ds.pointRadius.length) ds.pointRadius.shift();
                         });
                         c.timeLabels.shift();
                     }
@@ -2157,6 +2184,16 @@
                         runBadge.className = 'status-badge status-pending';
                         runBadge.innerText = 'Idle';
                     }
+                }
+                // Update main status badge based on alert severity
+                const mainBadge = card.querySelector('.card-header .status-badge');
+                if (mainBadge && data.status) {
+                    if (data.status === 'calibration_needed') { mainBadge.className = 'status-badge status-danger'; mainBadge.innerText = 'Calib. Needed'; }
+                    else if (data.status === 'calibrating') { mainBadge.className = 'status-badge status-calibrating'; mainBadge.innerText = 'Calibrating...'; }
+                    else if (data.alert_status === 'critical') { mainBadge.className = 'status-badge status-danger'; mainBadge.innerText = 'Critical'; }
+                    else if (data.alert_status === 'warning') { mainBadge.className = 'status-badge status-warning'; mainBadge.innerText = 'Warning'; }
+                    else { mainBadge.className = 'status-badge status-normal'; mainBadge.innerText = 'Normal'; }
+                    card.dataset.alertStatus = data.alert_status || 'normal';
                 }
                 if (type.includes("HVAC")) {
                     const delta = Math.abs(data.Treturn - data.Tsupply).toFixed(1);
@@ -2318,7 +2355,7 @@
                     if (!showIdle && idle) {
                         // Filtered mode: skip idle live updates
                     } else {
-                        pushToCharts(now, delta, data.Tsupply, data.Treturn, data.Tcoil, data.Icompressor, deltaRH, true, isHVAC, idle);
+                        pushToCharts(now, delta, data.Tsupply, data.Treturn, data.Tcoil, data.Icompressor, deltaRH, true, isHVAC);
                     }
                 }
             } else {
@@ -2332,7 +2369,7 @@
                     if (!showIdle && idle) {
                         // Filtered mode: skip idle live updates
                     } else {
-                        pushToCharts(now, data.Texhaust, data.RHexhaust, data.Pressure, data.Imotor, null, null, true, isHVAC, idle);
+                        pushToCharts(now, data.Texhaust, data.RHexhaust, data.Pressure, data.Imotor, null, null, true, isHVAC);
                     }
                 }
             }
@@ -2399,28 +2436,29 @@
                 data.forEach(alert => {
                     const div = document.createElement('div');
                     div.style.cssText = 'padding: 0.5rem; margin-bottom: 0.5rem; border-radius: var(--radius); border: 1px solid var(--border); font-size: 0.8rem;';
-                    const isSPCBreach = alert.alert_type === 'spc_ucl_breach' || alert.alert_type === 'spc_lcl_breach';
-                    const isCriticalFault = ['fault_dryer_belt_snapped', 'fault_dryer_lint_blockage', 'fault_hvac_low_refrigerant', 'fault_hvac_compressor_fault'].includes(alert.alert_type);
-                    const isWarningFault = ['fault_dryer_roller_wear', 'fault_hvac_dirty_filter'].includes(alert.alert_type);
-                    const isInfoFault = alert.alert_type === 'fault_dryer_incomplete_drying';
-                    if (alert.resolved_at) {
+                    const severity = alert.severity || 'warning';
+                    const isCritical = severity === 'critical';
+                    const isResolved = !!alert.resolved_at;
+                    if (isResolved) {
                         div.style.borderLeft = '3px solid var(--success)';
-                    } else if (isCriticalFault) {
+                        div.style.opacity = '0.7';
+                    } else if (isCritical) {
                         div.style.borderLeft = '3px solid #EF4444';
                         div.style.background = '#FEF2F2';
-                    } else if (isWarningFault) {
+                    } else {
                         div.style.borderLeft = '3px solid #F59E0B';
                         div.style.background = '#FFFBEB';
-                    } else if (isInfoFault) {
-                        div.style.borderLeft = '3px solid #3B82F6';
-                        div.style.background = '#EFF6FF';
-                    } else if (isSPCBreach) {
-                        div.style.borderLeft = '3px solid var(--danger)';
-                        div.style.background = '#FEF2F2';
-                    } else {
-                        div.style.borderLeft = '3px solid var(--danger)';
                     }
-                    div.innerHTML = `<strong>${alert.alert_type}</strong> — ${alert.message}<br><span style="color:var(--text-muted);">${new Date(alert.created_at).toLocaleString()}</span>`;
+                    const severityBadge = isCritical
+                        ? '<span style="display:inline-block; background:#EF4444; color:white; padding:1px 6px; border-radius:4px; font-size:0.7rem; font-weight:bold; margin-right:4px;">CRITICAL</span>'
+                        : '<span style="display:inline-block; background:#F59E0B; color:white; padding:1px 6px; border-radius:4px; font-size:0.7rem; font-weight:bold; margin-right:4px;">WARNING</span>';
+                    let resolveHtml = '';
+                    if (isResolved) {
+                        resolveHtml = `<span style="color:var(--success); font-size:0.75rem;">Resolved: ${new Date(alert.resolved_at).toLocaleString()}</span>`;
+                    } else {
+                        resolveHtml = `<button class="btn btn-sm btn-secondary" onclick="resolveAlert(${alert.id})" style="margin-top:4px; font-size:0.7rem; padding:2px 8px;">Resolve</button>`;
+                    }
+                    div.innerHTML = `${severityBadge}<strong>${alert.alert_type}</strong> — ${alert.message}<br><span style="color:var(--text-muted);">${new Date(alert.created_at).toLocaleString()}</span><br>${resolveHtml}`;
                     content.appendChild(div);
                 });
             }).catch(() => {
@@ -2428,10 +2466,25 @@
             });
         }
 
+        function resolveAlert(alertId) {
+            fetch(`/api/alert/${alertId}/resolve`, { method: 'POST' }).then(r => r.json()).then(data => {
+                if (data.success) {
+                    loadAlerts();
+                    // Refresh badge on card via mini-cards polling
+                    updateMiniCards();
+                } else {
+                    alert('Failed to resolve alert: ' + (data.error || 'Unknown error'));
+                }
+            }).catch(() => {
+                alert('Failed to resolve alert.');
+            });
+        }
+
         function checkBaselineResults() {
             if (!currentDetailId) return Promise.resolve();
             const configureBtn = document.getElementById('btn-configure-baseline');
             const editBtn = document.getElementById('btn-edit-baseline');
+            const removeBtn = document.getElementById('btn-remove-baseline');
             return fetch(`/api/device/${currentDetailId}/baseline_analysis`).then(r => r.json()).then(data => {
                 if (data.error || !data.status) return;
 
@@ -2443,6 +2496,9 @@
                 }
                 if (editBtn) {
                     editBtn.style.display = currentDeviceHasBaseline ? 'inline-flex' : 'none';
+                }
+                if (removeBtn) {
+                    removeBtn.style.display = currentDeviceHasBaseline ? 'inline-flex' : 'none';
                 }
 
                 // Show baseline timestamp
@@ -2529,6 +2585,7 @@
 
         function updateEnergySummary() {
             const month = document.getElementById('energy-month-select').value;
+            if (!month) return;
             fetch(`/api/energy_summary?month=${month}`)
                 .then(r => r.json())
                 .then(data => {

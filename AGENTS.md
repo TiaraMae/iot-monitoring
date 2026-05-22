@@ -246,18 +246,22 @@ LED shows the **highest-priority** active state:
 | 6 | Idle (all connected) | Brief flash every 10 s |
 
 ### 4.7 Buzzer Signals
+
 | Trigger | Pattern |
 |---------|---------|
-| `baselinestartack` | 2 short beeps |
-| `baselinesuccessack` | 3 short beeps |
-| `baselinefailack` | 2 long beeps (900 ms) |
-| `calibrationsuccessack` | 3 short beeps |
-| `startcalibration` | 1 short beep |
-| `maintenancedenied` | 1 long beep (1500 ms) |
-| Pairing success | 1 short beep |
-| Pairing cleared | 1 long beep |
+| `calibrationsuccessack` | 3 short beeps (120 ms each, 120 ms gap) |
+| `calibrationfailack` | 2 long beeps (800 ms each, 300 ms gap) |
+| `startcalibration` | 1 short beep (120 ms) |
+| `maintenanceack` | 1 long beep (1000 ms) |
+| `maintenancedenied` | **Silent** — no beep |
+| `actiondenied:busy` | 1 long beep (900 ms) |
+| `baseline:set` | 3 short beeps (120 ms each, 120 ms gap) |
+| Pairing success | 1 short beep (100 ms) |
+| Pairing cleared | 1 long beep (1500 ms) |
 
-> **Note:** Button 2 5s hold (HVAC calibration request) is **silent** — no local beep. The only audible feedback is the `startcalibration` ack from the backend (1 short beep).
+> **Notes:**
+> - Button 2 5s hold (HVAC calibration request) is **silent** — no local beep. The only audible feedback is the `startcalibration` ack from the backend (1 short beep).
+> - `baselinestartack`, `baselinesuccessack`, and `baselinefailack` were v2 baseline signals and are **no longer handled** by the v3 firmware. The v3 backend sends `baseline:set` instead (manual baseline configuration ack).
 
 ### 4.8 Data Gating & Running Status
 - Firmware **always** includes `"status":"running"` or `"status":"idle"` in telemetry based on `avgCurrent >= 0.25 A`.
@@ -418,7 +422,7 @@ For each appliance type, baseline statistics establish control limits:
 
 1. **Cycle start threshold:** Fixed at **0.4 A** (matching firmware running gate). Decoupled from `threshold_current_min` so new cycles can start after gaps.
 2. **Cycle end threshold:** `baseline_current_mean × 0.3` (or fallback `0.15 A`)
-3. **Gap end:** >**60 seconds** between consecutive readings forces cycle finalization
+3. **Gap end:** >**120 seconds** between consecutive readings forces cycle finalization
 4. **Noise filter:** Cycles shorter than **1 minute** are discarded
 5. **Per-cycle stats:** min/max temp, start/end RH, ignition count, current consumption, spike average, motor baseline median
 
@@ -455,7 +459,7 @@ For each appliance type, baseline statistics establish control limits:
 
 3. **`CYCLE_TRACKER`** monitors dryer running→idle transitions:
    - Tracks in-memory state per appliance.
-   - Processes stale cycles (>60 s gap) on new running data.
+   - Processes stale cycles (>120 s gap) on new running data.
    - Inserts humidity alerts when end-of-cycle RH exceeds threshold.
 
 ### 5.6 Calibration Data Flow
@@ -563,6 +567,33 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 ---
 
 ## 10. Recent Changes & Changelog
+
+### 2026-05-17 — Baseline Removal Feature
+- **New capability:** Users can now remove/clear a previously saved baseline. A `🗑️ Remove Baseline` button appears next to `✏️ Edit Baseline` when a baseline exists.
+- **Backend:** `DELETE /api/device/<id>/baseline_config` deletes all rows from `spc_manual_baselines`, sets `baseline_configured = FALSE`, and returns success.
+- **Frontend:** `removeBaselineConfig()` confirms with the user, calls the DELETE endpoint, clears SPC lines from charts (empties datasets 1–3), resets `currentDeviceHasBaseline`, and rebuilds the action bar. No firmware change needed.
+
+### 2026-05-17 — Idle Point Styling Removed + Dryer Cycle RH Refinement
+- **Idle point styling removed:** `updateChart` no longer applies gray (`#94a3b8`) tiny dots (`radius 1`) to idle data points. Idle points now render with the same color and radius as running points. The filtered/unfiltered toggle still controls whether idle points appear at all; when visible, they look normal.
+- **Dryer cycle begin RH refined:** Historical `dryer_analytics` now computes `start_rh` as the average of the **first 6** RH readings in a cycle (was single first reading). Deferred to cycle finalization. Live `_finalize_dryer_cycle` also computes `begin_rh_avg` from first 6 readings.
+- **Dryer cycle end RH refined:** Both live `_finalize_dryer_cycle` and historical `dryer_analytics` now compute `end_rh_avg` from the **last 6** RH readings (was last 10). This provides ~1 minute of smoothing at both cycle boundaries.
+
+### 2026-05-17 — SPC Breach Alerts Completely Removed (v3)
+- **Rationale:** Real-time `spc_ucl_breach` / `spc_lcl_breach` alerts fired on every individual reading that crossed a threshold (e.g., dryer ignition spikes crossing Current UCL at cycle start). This produced raw data-point spam, not actionable maintenance advice. The 7 fault alerts (`fault_dryer_*`, `fault_hvac_*`) already evaluate at cycle/window end and provide actionable diagnostics.
+- **Backend:** Deleted `SPC_ALERT_COOLDOWN` global, `check_spc_alerts()` function, and its call in `on_mqtt_message()`. Removed from tracker cleanup in `forget_device()`.
+- **Frontend:** Removed `isSPCBreach` styling branch from `loadAlerts()`. Alerts panel now only shows the 7 actionable fault types.
+- **SPC baselines preserved:** UCL/LCL/Mean values in `spc_manual_baselines` continue to drive (a) SPC lines on charts and (b) gating logic for the 7 fault alerts. Only the per-reading breach alerts are gone.
+- **Documentation:** Updated `FAULTALERT.md` (removed SPC breach rows from Discord table, updated data flow diagram), `AGENTS.md` v3 (removed from "Retained from v2" list), and root `AGENTS.md` / `README.md`.
+
+### 2026-05-18 — Dryer Cycle Gap Threshold 60s → 120s (v3)
+- **Change:** Gap threshold that differentiates separate dryer cycles increased from **60 seconds → 120 seconds (2 minutes)** across all backend paths.
+- **Locations:** `_compute_daily_energy`, `_compute_energy_kwh`, `_check_dryer_faults`, `on_mqtt_message` CYCLE_TRACKER, and `dryer_analytics`.
+- **Rationale:** 1-minute gaps were too aggressive — brief pauses within a single cycle (e.g., ignition gaps) were incorrectly splitting it. Two minutes better represents a true cycle-end condition.
+
+### 2026-05-18 — Two-Tier Severity System + Rolling-Window Evaluation (v3)
+- **HVAC:** Evaluates at 10 min OR before compressor turn-off/maintaining state. Uses **average of last 3 readings**. Warning vs Critical determined by Treturn ≥ 27°C after 10 min.
+- **Dryer:** Uses **average of last 6 readings** at cycle end. Critical lint blockage when temp > 100°C. Critical incomplete drying when RH > 90%.
+- **System:** Added `severity` column to `alerts` table. Frontend shows CRITICAL/WARNING badges. Discord embeds include severity prefix and color.
 
 ### 2026-05-14 — v3 Dashboard Fixes (chart6, filter toggle, Delta RH visibility)
 - **Chart6 destroy fix:** `initCharts` was destroying charts 1–5 but **not chart6** (Delta RH). On filter toggle, Chart.js threw "Canvas is already in use" because the old chart6 instance was still attached. This aborted `initCharts`, leaving all charts empty. Fixed by adding `chart6` to the destroy and null-reset arrays.
@@ -727,7 +758,8 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 - **Backend (Ignition count):** Added hysteresis (`_peak_max - 0.1`) and hard floor (`_peak_max > mean_current + 0.15`) to peak detection. Applied to both v1 (`iot_thesis/app.py`) and v2 (`iot_thesis_v2/app.py`). Verified against `Dryer_Test_20260505_111710.xlsx` — correctly reports 4 ignitions instead of 5.
 
 ### 2026-05-05 — Discord Alert System Revision
-- **Discord — Fault-Only Alerts:** Raw SPC breach alerts (`spc_ucl_breach`, `spc_lcl_breach`) are **removed from Discord**. They still insert into the `alerts` table and appear on the dashboard, but they no longer spam the Discord channel.
+- **Discord — Fault-Only Alerts (v2):** Raw SPC breach alerts (`spc_ucl_breach`, `spc_lcl_breach`) are **removed from Discord**. They still insert into the `alerts` table and appear on the dashboard, but they no longer spam the Discord channel.
+- **SPC Breach Alerts Completely Removed (v3):** The `spc_ucl_breach` and `spc_lcl_breach` alert types are deleted entirely from v3. They no longer insert into the `alerts` table, appear on the dashboard, or go to Discord. The 7 actionable fault alerts remain.
 - **Discord — `dryer_humidity_high` Removed:** The legacy end-of-cycle humidity alert (`dryer_humidity_high`) is also **removed from Discord**. The more precise `fault_dryer_incomplete_drying` (SPC-based) remains active and is sent to Discord instead.
 - **Discord — Maintenance-Ticket Embeds:** `send_discord_alert()` rewritten with `FAULT_DISCORD_MAP`. Each fault alert now sends a rich embed containing: severity icon + human-readable title, fault description, root cause, and recommended action — formatted like a maintenance work order.
 - **Fault Triggering — Immediate:** Removed the 3-consecutive-cycle confirmation delay from `fault_dryer_roller_wear` and `fault_hvac_dirty_filter`. Both now fire **immediately on first detection** at cycle end. The existing 10-minute cooldown per fault type (`_insert_fault_alert()`) prevents spam without delaying actionable maintenance advice.
@@ -741,7 +773,7 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 - **Firmware (BME280):** Stuck-value detection now only active when running (`lastAvgCurrent >= 0.4`). Counter resets when idle to avoid false positives in stable exhaust duct conditions.
 
 ### 2026-05-01 — Dryer Cycle Detection Fix
-- **Backend:** Gap threshold lowered from **600s → 60s** to correctly split separate dryer runs.
+- **Backend:** Gap threshold set to **120s** to correctly split separate dryer runs.
 - **Backend:** `cycle_start` decoupled from `threshold_current_min`. Now fixed at **0.4A** (matching firmware running gate) to ensure new cycles can start after gaps.
 - **Backend:** Noise filter reduced from **3.0 min → 1.0 min** to preserve short dryer bursts that were incorrectly discarded.
 - **Backend:** Added temporary debug logging to `dryer_analytics()` (subsequently cleaned up) to diagnose missing cycles.
@@ -790,7 +822,7 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 ### Prior Session — Major Features Added
 - Web-triggered baseline only (removed Button 2 baseline trigger).
 - Alert system (`alerts` table, configurable thresholds, humidity alerts for dryers).
-- Dryer cycle tracker with gap-based detection (>600 s gap) and 3-minute minimum duration filter.
+- Dryer cycle tracker with gap-based detection (>120 s gap) and 1-minute minimum duration filter.
 - `CYCLE_TRACKER` for end-of-cycle humidity monitoring.
 - `api_device_latest` staleness fix: returns `idle` if last reading >60 s old.
 - Chart deduplication (`timeMs <= latestChartTimeMs` guard + `initChartsRequestId`).
@@ -801,7 +833,53 @@ The following are located in `D:\Tiara\IoT Predictive Maintenance Paper\` and ar
 
 ---
 
-## 11. Known Issues
+## 11. Testing Discord Alerts via Tight Baselines (No Code Changes)
+
+You can simulate and test Discord fault alerts without any code changes by setting **very tight baselines** that your normal running data will immediately cross.
+
+### How It Works
+The fault detection logic (`_check_dryer_faults`, `_check_hvac_faults`) evaluates every running reading against SPC baselines. If you set UCL/LCL thresholds extremely close to normal values, normal fluctuations will trigger faults within seconds.
+
+### Dryer Example — Trigger Roller Wear
+1. Open device detail → **Edit Baseline**
+2. Set Motor Current: Mean = `2.0`, UCL = `2.01`, LCL = `1.99`
+3. Save baseline
+4. Start the dryer normally
+5. Any current reading above `2.01 A` triggers `fault_dryer_roller_wear` → Discord alert fires immediately
+
+### Dryer Example — Trigger Belt Snap
+1. Set Motor Current: Mean = `2.0`, UCL = `2.01`, LCL = `1.99`
+2. Save baseline
+3. Stop the dryer mid-cycle (current drops near zero)
+4. Current below `1.99 A` triggers `fault_dryer_belt_snapped` → Discord alert fires
+
+### HVAC Example — Trigger Dirty Filter
+1. Open device detail → **Edit Baseline**
+2. Set Delta-T: UCL = `20`, LCL = `9.5`
+3. Save baseline
+4. Run the AC normally
+5. Any reading where Delta-T drops below `9.5°C` (while current stays within its own limits) triggers `fault_hvac_dirty_filter`
+
+### Important Limitations
+| Limitation | Details |
+|------------|---------|
+| **10-minute cooldown** | `_insert_fault_alert` enforces a 600s cooldown per `(appliance_id, fault_type)`. Each fault type can only fire once per 10 minutes. Wait or restart the backend to reset in-memory cooldowns. |
+| **DB pollution** | Every triggered alert is permanently inserted into the `alerts` table. You may want to `DELETE FROM alerts WHERE appliance_id = X;` after testing. |
+| **Lint blockage is harder** | Requires **both** end-RH > `rhexhaust_ucl` **AND** max temp > `texhaust_ucl` at cycle end. You need tight thresholds on both metrics. |
+| **Incomplete drying is harder** | Requires end-RH > `rhexhaust_ucl` at cycle end (after lint blockage check fails). |
+
+### Cleaning Up After Testing
+```sql
+-- Remove test alerts
+DELETE FROM alerts WHERE appliance_id = <your_appliance_id>;
+
+-- Or remove the baseline entirely (v3 feature)
+-- Click 🗑️ Remove Baseline in the device detail modal
+```
+
+---
+
+## 12. Known Issues
 
 | Issue | Status | Notes |
 |-------|--------|-------|
