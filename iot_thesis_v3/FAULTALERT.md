@@ -1,8 +1,17 @@
-# Fault Alert System — IoT Monitoring v2 (Revised)
+# Fault Alert System — IoT Monitoring v3
 
 > **Document Purpose:** Define the fault detection logic, SPC rule framework, and alert generation strategy for the IoT-Based Monitoring and Alert System. All fault alerts are **gated behind manual SPC baseline configuration** — if UCL/LCL lines are not set, no fault alerts are generated.
 >
-> **Revision Notes (2026-05-03):** This revision addresses real-world cyclic data patterns observed in production telemetry. The original zone-based SPC rules (Western Electric Zones A/B/C) are **removed** because they generate false positives on naturally cyclic signals (HVAC compressor cycling, gas dryer ignition spikes). Replaced with **state-aware, cycle-aggregated evaluation**.
+> **Revision Notes (2026-05-18):** 
+> - HVAC fault detection redesigned to use **last-6-reading averaged evaluation** (~1 min of data). Non-inverter evaluates at 1 hour with hourly re-evaluation. Inverter evaluates at 5 minutes when Treturn > 26.5°C. Compressor fault (current > UCL) triggers immediately on any single reading. Severity is two-tier: **Warning** (degraded performance) vs **Critical** (no cooling after 1 hour with Treturn ≥ 27°C).
+> - Dryer fault detection now uses **last-6-reading averages** at cycle end. Severity is two-tier: **Warning** (elevated values) vs **Critical** (burning risk >100°C or not drying at all >90% RH).
+> - All fault alerts carry a `severity` column (`warning` | `critical`).
+>
+> **Revision Notes (2026-05-19):**
+> - **Belt snap** redesigned to **3 consecutive readings** below LCL. **Roller wear** redesigned to use **motor baseline median** (ignition spikes filtered via 1.15× mean threshold) compared against UCL. Real-time detection runs during the cycle; end-of-cycle backup uses the same median calculation.
+> - **Removed** redundant `dryer_humidity_high` alert (replaced by `fault_dryer_incomplete_drying`).
+> - **Removed** gap-based belt snap inference that fired on `min_current < LCL` during pause gaps.
+> - `motor_readings` only contains running data (`current >= 0.25`), so idle/pause gaps cannot false-trigger consecutive counters.
 
 ---
 
@@ -71,27 +80,32 @@ Applying "8 consecutive points in Zone C" or "6 consecutive points monotonically
 
 **Replacement:** State-aware, cycle-aggregated evaluation.
 - For cyclic parameters, we **detect cycles first**, then **compare cycle statistics** (peak, minimum, average, end-value) against baselines.
-- Evaluation only occurs during **stable states** (e.g., compressor has been ON for ≥10 minutes).
+- Evaluation only occurs during **stable states** (e.g., non-inverter compressor has been ON for ≥1 hour, inverter at ≥5 min high-effort).
 
 ### 2.2 State-Aware Evaluation Windows
 
-**HVAC Compressor State Machine:**
+**HVAC Compressor Window Tracker (v3 — Last-3 Averaged):**
+
 ```
-IDLE: current < 0.4 A for >60 s
-  ↓ current rises above 0.4 A
-STARTING: current > 0.4 A, <10 min elapsed
-  ↓ 10 min continuous ON
-STABLE_ON: current > 0.4 A, ≥10 min continuous ← evaluate faults here only
-  ↓ current drops below 0.4 A
-STOPPING: current < 0.4 A, <60 s
-  ↓ 60 s elapsed
-IDLE
+IDLE: current < 0.25 A
+  ↓ current rises above 0.25 A
+RUNNING (non-inverter): buffer last 6 readings
+  ↓ current drops below 0.25 A  OR  runtime ≥ 1 hour
+EVALUATE average of last 6 readings → continue RUNNING (re-evaluate every hour)
+
+IDLE: current < 0.25 A or T_return ≤ 26.5°C
+  ↓ current > 0.25 A AND T_return > 26.5°C
+HIGH-EFFORT (inverter): buffer last 6 readings
+  ↓ current drops below 0.25 A  OR  runtime ≥ 5 min
+EVALUATE average of last 6 readings → return to IDLE
 ```
 
-Why 10 minutes? HVAC compressors have long thermal time constants. From production data, compressor ON periods are ~10–15 minutes. After 10 minutes:
-- Evaporator coil is fully chilled and stable.
-- ΔT has reached its maximum and plateaued.
-- Current has stabilized (inverter) or is at steady state (non-inverter).
+**Why last-6 averaged evaluation?**
+- A single reading can be noisy or anomalous. Averaging the last 6 readings (~1 minute of data at 10s publish interval) at the evaluation point smooths out sensor jitter while still capturing the true performance at that moment.
+- **Non-inverter:** Evaluate at 1 hour of continuous compressor run, then re-evaluate every additional hour if the compressor is still running. If the compressor turns off earlier, evaluate at the last running reading before turn-off.
+- **Inverter:** Evaluate at 5 minutes of high-effort run (Treturn > 26.5°C). No maintaining-state detection — the 5-minute window captures the compressor at its hardest-working moment.
+- **Compressor fault (current > UCL):** Triggers **immediately** on any single reading, outside the evaluation window. The 10-minute alert cooldown prevents spam.
+- **Critical escalation:** If Treturn is still ≥ 27°C after 1 hour of running (non-inverter) or at the 5-minute evaluation (inverter), the AC is effectively not cooling — this is a **critical** alert regardless of the specific fault type.
 
 **Dryer Cycle State Machine:**
 ```
@@ -106,11 +120,26 @@ RUNNING
 CYCLE_END ← evaluate lint blockage, clothes dryness here
 ```
 
-### 2.3 Spike Detection + Per-Cycle Median for Motor Baseline Extraction
+### 2.3 Dryer Evaluation — Last-6 Averaging at Cycle End
 
-**The Problem:** The SCT-013 on the main cable sees combined motor + ignitor current. We need the motor baseline (floor) to detect roller wear, but ignitor spikes contaminate simple averaging.
+At cycle end, the system computes **averages from the last 6 running readings** for:
+- `end_rh_avg` — average of last 6 RH values
+- `end_temp_avg` — average of last 6 exhaust temperature values
+- `end_current_avg` — average of last 6 motor current values
 
-**The Solution — Two-Layer Spike Extraction:**
+**Why last 6?** The dryer publishes every ~10 seconds, so 6 readings = ~1 minute of data at the tail end of the cycle. This smooths out transient RH/temp fluctuations while capturing the true end-of-cycle state.
+
+**Severity logic:**
+- `fault_dryer_lint_blockage`: Warning when end RH > UCL AND max temp > UCL. **Critical** when max temp > 100°C (burning risk).
+- `fault_dryer_incomplete_drying`: Warning when end RH > UCL. **Critical** when end RH > 90% (not drying at all).
+
+---
+
+### 2.4 Spike Detection + Consecutive Reading Fault Detection
+
+**The Problem:** The SCT-013 on the main cable sees combined motor + ignitor current. We need the motor baseline (floor) to detect roller wear, but ignitor spikes contaminate simple averaging. Additionally, the old per-cycle median approach could not distinguish a single abnormal dip from a genuine belt snap.
+
+**The Solution — Two-Layer Spike Extraction + Fault Detection:**
 
 **Layer 1: Dynamic State Machine** (reuse existing `dryer_analytics()` logic):
 ```
@@ -121,7 +150,7 @@ FALLING → current drops back to baseline → IDLE
 Each detected spike gives: `spike_start_time`, `spike_peak_value`, `spike_end_time`.
 
 **Prominence threshold:** `max(0.35 A, baseline_current_mean × 0.20)`
-- Lowered from 0.50 A to 0.35 A based on data validation (see §2.3.1).
+- Lowered from 0.50 A to 0.35 A based on data validation (see §2.4.1).
 - Catches gradual ramp-up spikes that the old threshold missed.
 
 **Layer 2: Hard Threshold Guard** (safety net):
@@ -130,14 +159,27 @@ Any reading > `mean × 1.15` (≈ 2.32 A for a 2.02 A baseline) is excluded from
 - Startup transients (2.63–3.06 A).
 - Any anomalous high readings.
 
-**Layer 3: Per-Cycle Median** (roller wear evaluation):
-Instead of a rolling buffer, compute **one median motor baseline per dryer cycle** using all non-spike, non-excluded readings within that cycle.
+**Layer 3: Fault Detection**
+- **Belt snap:** 3 consecutive running readings **below LCL**.
+- **Roller wear:** Motor baseline **median** (after filtering out ignition spikes via 1.15× mean threshold) compared against **UCL**.
 
-**Why per-cycle median?**
-- Eliminates within-cycle variation (cool-down phases, brief load changes).
-- Natural comparison of like-with-like (cycle-to-cycle).
-- Median is robust to outliers — a few missed spike edges or startup transients do not shift the median.
-- No circular buffer state to maintain.
+**Why belt snap uses 3 consecutive readings:**
+- A single noisy reading or brief transient cannot trigger a fault.
+- Ignition spikes are 1–2 readings wide and reset the consecutive counter when current drops back.
+- Pause gaps (current = 0, idle) are excluded because `_check_dryer_faults` only receives running data (`current >= 0.25`).
+- `motor_readings` in `DRYER_CYCLE_STATS` only accumulates running data, so end-of-cycle backup checks are also immune to idle gaps.
+
+**Why roller wear uses motor baseline median:**
+- Ignition spikes (1–2 readings, ~+50% above baseline) are filtered out by the `1.15× mean` threshold before computing the median.
+- The median of the remaining readings represents the **true motor-only current**, unaffected by brief transients.
+- Comparing the median against UCL captures sustained mechanical load increase (worn rollers = higher friction = consistently higher motor current across the entire cycle).
+
+**Real-time vs End-of-Cycle:**
+- **Real-time** (`_check_dryer_faults`):
+  - Belt snap: counter increments on every running reading below LCL. Alert fires when counter reaches 3.
+  - Roller wear: motor baseline median is recomputed from `motor_readings` on each running reading (spikes filtered via 1.15× mean threshold). Alert fires when median > UCL.
+- **End-of-cycle backup** (`_finalize_dryer_cycle`): If the real-time path didn't fire, the cycle's `motor_readings` array is checked. Belt snap: last 3 readings all < LCL. Roller wear: motor baseline median > UCL.
+- Each fault uses a `*_triggered` flag per cycle to prevent duplicate alerts.
 
 **Validation data:**
 | Cycle | Duration | Median | Mean | Min | Max |
@@ -150,7 +192,7 @@ Instead of a rolling buffer, compute **one median motor baseline per dryer cycle
 
 Even with startup transients up to 3.06 A, the per-cycle median remains stable at 2.000–2.030 A.
 
-#### 2.3.1 Data Validation — Prominence Threshold
+#### 2.4.1 Data Validation — Prominence Threshold
 Testing on 1,311 readings over 4 days:
 
 | Threshold | Positive Deltas Triggered | Verified Spikes | False Positives |
@@ -160,14 +202,13 @@ Testing on 1,311 readings over 4 days:
 
 All 22 additional events in the 0.35–0.50 A range are genuine spikes (jumping from ~2.0 A baseline to ~2.4–3.1 A). Lowering to 0.35 A catches them with no false positives.
 
-#### 2.3.2 Roller Wear Differentiation
-| Condition | Per-Cycle Median | Interpretation |
+#### 2.4.2 Roller Wear & Belt Snap Differentiation
+| Condition | Detection Method | Interpretation |
 |-----------|------------------|----------------|
-| Normal | 2.00 A | OK |
-| Roller wear (early, +15%) | 2.30 A | Below UCL — not yet triggered |
-| Roller wear (+20%) | 2.40 A | At UCL — triggers immediately |
-| Roller wear (severe, +25%) | 2.50 A | Above UCL — triggers reliably |
-| Belt snap | < `current_LCL` (typically ~1.6 A for 2.0 A baseline) | Immediate fault at cycle end |
+| Normal | 3 consecutive within LCL–UCL (belt snap); median within LCL–UCL (roller wear) | OK |
+| Roller wear (early, +15%) | Motor baseline median > UCL | Warning — sustained high load |
+| Roller wear (severe, +25%) | Motor baseline median > UCL | Warning — replace rollers soon |
+| Belt snap | 3 consecutive < LCL | Critical — motor lost mechanical load |
 
 ### 2.4 Baseline Input UX — Auto-Derived UCL/LCL
 
@@ -194,7 +235,7 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 | **Primary Trigger** | End-of-cycle exhaust RH > `rhexhaust_UCL`. |
 | **Confirmatory** | None. |
 | **Evaluation Point** | CYCLE_END only (transition from running to idle). |
-| **Severity** | Info |
+| **Severity** | Warning (end RH > UCL) / Critical (end RH > 90%) |
 | **Alert Type** | `fault_dryer_incomplete_drying` |
 
 **Physics:** Dryer completes cycle but clothes retain excessive moisture due to overloading, worn heating element, or short cycle. The exhaust humidity at cycle end reflects how much moisture was removed from the clothes.
@@ -203,17 +244,22 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 
 **Why This Check:** End-of-cycle RH exceeding UCL means the exhaust is more humid than normal at cycle end — the clothes didn't dry fully. Evaluated as `elif` after lint blockage so only one humidity alert fires per cycle.
 
-**Trigger Condition:** `end_RH > rhexhaust_UCL` at **CYCLE_END**.
+**Trigger Condition:**
+- **Warning:** `end_RH > rhexhaust_UCL` at **CYCLE_END**.
+- **Critical:** `end_RH > 90.0%` at **CYCLE_END**.
 
 **Code (`_finalize_dryer_cycle()`):**
 ```python
-    # --- Incomplete Drying (Info) ---
-    # Only check if lint blockage did not fire (guaranteed by elif)
-    elif rhexhaust_ucl is not None and end_rh_avg > rhexhaust_ucl:
+    if rhexhaust_ucl is not None and end_rh_avg > rhexhaust_ucl:
+        if end_rh_avg > 90.0:
+            severity = 'critical'
+            msg = f"Severely incomplete drying - end RH {end_rh_avg:.1f}% exceeds 90%"
+        else:
+            severity = 'warning'
+            msg = f"Clothes not fully dried - end RH {end_rh_avg:.1f}% exceeds UCL"
         _insert_fault_alert(
             appliance_id, 'fault_dryer_incomplete_drying',
-            f"Clothes not fully dried - end RH {end_rh_avg:.1f}% exceeds UCL {rhexhaust_ucl:.1f}%",
-            end_rh_avg, rhexhaust_ucl, now, cur, conn)
+            msg, end_rh_avg, rhexhaust_ucl, severity, now, cur, conn)
 ```
 
 ---
@@ -223,9 +269,9 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 |-----------|--------|
 | **Description** | Support rollers under the drum are worn, increasing mechanical friction. |
 | **Root Cause** | Normal wear, lack of lubrication, or debris accumulation. |
-| **Primary Trigger** | Per-cycle median motor baseline (spike-excluded) > `current_UCL` at **cycle end**. |
+| **Primary Trigger** | Motor baseline median (spikes filtered via 1.15× mean threshold) > `current_UCL`. |
 | **Confirmatory** | None. |
-| **Evaluation Point** | During RUNNING state (excluding ignition windows). |
+| **Evaluation Point** | During RUNNING state (real-time) or at CYCLE_END (backup). |
 | **Severity** | Warning |
 | **Alert Type** | `fault_dryer_roller_wear` |
 
@@ -233,26 +279,38 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 
 **Research Base:** Bodily et al. confirmed that motor current trending upward indicates bearing/roller degradation or belt slippage. IEEE 841-2001 recommends ±20% current deviation bands for abnormal mechanical loading detection. MCSA literature (Kia et al. 2009, Bellini et al. 2008) establishes that mechanical load changes manifest as sustained changes in the stator current fundamental component.
 
-**Why This Check:** The per-cycle median of spike-excluded readings filters out gas ignition spikes and captures the true motor load. A +20% worn motor (median ≈ UCL) triggers immediately at cycle end because wear is persistent across cycles. A 10-minute cooldown per fault type prevents alert spam.
+**Why This Check:** A single high reading could be an ignition spike or transient. The motor baseline median filters out spikes (via `1.15× mean` threshold) and returns the true motor-only current. If the median exceeds UCL, the motor is consistently drawing more current across the entire cycle — indicating increased mechanical friction from worn rollers. A 10-minute cooldown per fault type prevents alert spam.
 
-**Trigger Condition:** `median_current > current_UCL` at **cycle end** (fires immediately).
+**Trigger Condition:** Motor baseline median (after filtering readings > `1.15× mean`) > `current_UCL`.
 
-**Code (`_finalize_dryer_cycle()`):**
+**Code (`_check_dryer_faults()` — real-time):**
 ```python
-    # Compute motor baseline median
-    median_current = 0.0
-    if motor_readings:
-        motor_readings_sorted = sorted(motor_readings)
-        n = len(motor_readings_sorted)
-        median_current = motor_readings_sorted[n // 2] if n % 2 == 1 else (motor_readings_sorted[n // 2 - 1] + motor_readings_sorted[n // 2]) / 2.0
-
-    # --- Roller Wear (Warning) - per-cycle median > UCL (fires immediately) ---
     current_ucl = baselines.get('current', {}).get('ucl')
-    if current_ucl is not None and median_current > current_ucl:
-        _insert_fault_alert(
-            appliance_id, 'fault_dryer_roller_wear',
-            f"Barrel roller worn out - motor baseline {median_current:.3f}A exceeds UCL {current_ucl:.3f}A",
-            median_current, current_ucl, now, cur, conn)
+    if current_ucl is not None and not stats.get('roller_wear_triggered', False):
+        motor_readings = stats.get('motor_readings', [])
+        if len(motor_readings) >= 3:
+            filter_threshold = (sum(motor_readings) / len(motor_readings)) * 1.15
+            median_current = _compute_motor_baseline_median(motor_readings, filter_threshold=filter_threshold)
+            if median_current > current_ucl:
+                _insert_fault_alert(
+                    appliance_id, 'fault_dryer_roller_wear',
+                    f"Barrel roller worn out - motor baseline median {median_current:.3f}A exceeded UCL {current_ucl:.3f}A",
+                    median_current, current_ucl, 'warning', now, cur, conn)
+                stats['roller_wear_triggered'] = True
+```
+
+**Code (`_finalize_dryer_cycle()` — end-of-cycle backup):**
+```python
+    current_ucl = baselines.get('current', {}).get('ucl')
+    if current_ucl is not None and not stats.get('roller_wear_triggered', False):
+        if motor_readings:
+            filter_threshold = (sum(motor_readings) / len(motor_readings)) * 1.15
+            median_current = _compute_motor_baseline_median(motor_readings, filter_threshold=filter_threshold)
+            if median_current > current_ucl:
+                _insert_fault_alert(
+                    appliance_id, 'fault_dryer_roller_wear',
+                    f"Barrel roller worn out - motor baseline median {median_current:.3f}A exceeded UCL {current_ucl:.3f}A during cycle",
+                    median_current, current_ucl, 'warning', now, cur, conn)
 ```
 
 ---
@@ -262,29 +320,47 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 |-----------|--------|
 | **Description** | Drive belt connecting motor to drum has broken or slipped off. |
 | **Root Cause** | Age, overloading, or misalignment. |
-| **Primary Trigger** | Per-cycle motor current < `current_LCL` for **>30 seconds** while `in_cycle = True`. |
-| **Confirmatory** | Current drops near zero while the dryer is supposedly running (current ≥ 0.4 A threshold was met, then collapsed). |
-| **Evaluation Point** | During RUNNING state. |
+| **Primary Trigger** | 3 consecutive running motor readings < `current_LCL`. |
+| **Confirmatory** | Current stays low while the dryer is running (not a brief dip). |
+| **Evaluation Point** | During RUNNING state (real-time) or at CYCLE_END (backup). |
 | **Severity** | Critical |
 | **Alert Type** | `fault_dryer_belt_snapped` |
 
-**Physics:** The drive belt connecting the motor to the drum breaks or slips off. The motor loses all mechanical load and spins freely. Current collapses because there is no drum resistance to work against.
+**Physics:** The drive belt connecting the motor to the drum breaks or slips off. The motor loses all mechanical load and spins freely. Current drops because there is no drum resistance to work against.
 
 **Research Base:** MCSA literature (Kia et al. 2009, Bellini et al. 2008) establishes that loss of mechanical load manifests as a sustained decrease in the stator current fundamental component. A sudden current drop below the normal operating range is the definitive signature of belt failure or loss of load.
 
-**Why This Check:** The raw telemetry current includes gas ignition spikes, making point-in-time checks noisy. The per-cycle motor baseline median (spike-excluded) provides a clean measure of true motor load. If the median drops below LCL, the motor has lost its mechanical load. Belt snap is evaluated at cycle end using the median — no multi-cycle confirmation needed.
+**Why This Check:** A single low reading could be a sensor glitch or brief load change. Requiring 3 consecutive readings below LCL confirms the motor has truly lost its mechanical load. When a belt snaps, the dryer may continue trying to run for a few seconds before shutting off, producing multiple low-current readings. If the dryer shuts off immediately, the end-of-cycle backup checks the last 3 running readings of the cycle.
 
-**Trigger Condition:** Per-cycle motor baseline `median < current_LCL` at **CYCLE_END**. Also triggered immediately if a running cycle aborts via >60s gap with `min_current < current_LCL` (early-warning for abrupt failures).
+**Trigger Condition:** 3 consecutive running readings with `current < current_LCL`.
 
-**Code (`_finalize_dryer_cycle()`):**
+**Code (`_check_dryer_faults()` — real-time):**
 ```python
-    # --- Belt Snap (Critical) - per-cycle median < LCL ---
     current_lcl = baselines.get('current', {}).get('lcl')
-    if current_lcl is not None and median_current < current_lcl:
-        _insert_fault_alert(
-            appliance_id, 'fault_dryer_belt_snapped',
-            f"Belt snapped - motor baseline {median_current:.3f}A below LCL {current_lcl:.3f}A",
-            median_current, current_lcl, now, cur, conn)
+    if current_lcl is not None:
+        if current < current_lcl:
+            stats['consecutive_below_lcl'] = stats.get('consecutive_below_lcl', 0) + 1
+        else:
+            stats['consecutive_below_lcl'] = 0
+
+        if stats['consecutive_below_lcl'] >= 3 and not stats.get('belt_snap_triggered', False):
+            _insert_fault_alert(
+                appliance_id, 'fault_dryer_belt_snapped',
+                f"Belt snapped - motor current dropped below LCL {current_lcl:.3f}A for 3 consecutive readings (last: {current:.3f}A)",
+                current, current_lcl, 'critical', now, cur, conn)
+            stats['belt_snap_triggered'] = True
+```
+
+**Code (`_finalize_dryer_cycle()` — end-of-cycle backup):**
+```python
+    current_lcl = baselines.get('current', {}).get('lcl')
+    if current_lcl is not None and not stats.get('belt_snap_triggered', False):
+        last_3 = motor_readings[-3:] if len(motor_readings) >= 3 else motor_readings
+        if len(last_3) >= 3 and all(r < current_lcl for r in last_3):
+            _insert_fault_alert(
+                appliance_id, 'fault_dryer_belt_snapped',
+                f"Belt snapped - last 3 motor readings ({last_3[-3]:.3f}A, {last_3[-2]:.3f}A, {last_3[-1]:.3f}A) all below LCL {current_lcl:.3f}A",
+                last_3[-1], current_lcl, 'critical', now, cur, conn)
 ```
 
 ---
@@ -297,7 +373,7 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 | **Primary Trigger** | End-of-cycle exhaust RH > `rhexhaust_UCL` **AND** end-of-cycle exhaust temp > `texhaust_UCL`. |
 | **Confirmatory** | None (lint blockage is purely end-of-cycle RH + temp). |
 | **Evaluation Point** | CYCLE_END only. |
-| **Severity** | Critical |
+| **Severity** | Warning (temp > UCL) / Critical (temp > 100°C) |
 | **Alert Type** | `fault_dryer_lint_blockage` |
 
 **Physics:** Lint accumulation in the exhaust duct restricts airflow. Hot, moist air cannot escape efficiently. At cycle end, clothes remain wet (high exhaust RH) and the exhaust duct overheats (high exhaust temp) because the heat is trapped inside the system.
@@ -327,122 +403,155 @@ For **all other parameters**, UCL/LCL remain manual inputs (existing v2 architec
 
 ## 4. Monitored Faults — Split HVAC
 
-### 4.1 Dirty Indoor Filter
+### 4.1 Fault Evaluation Matrix
+
+All HVAC faults are diagnosed from the **average of the last 6 readings at the evaluation point** using three metrics:
+- **Delta-T** — temperature split (Return − Supply), larger is better
+- **Current** — compressor electrical draw
+- **Treturn** — return air temperature (used for severity escalation)
+
+### 4.1 Fault Type Matrix (WHAT is wrong)
+
+| Delta-T_avg vs. LCL | Current_avg vs. Limits | Fault Type |
+|---------------------|------------------------|------------|
+| ≥ LCL | any | ✅ Good condition |
+| < LCL | < LCL | `fault_hvac_low_refrigerant` |
+| < LCL | LCL–UCL | `fault_hvac_dirty_filter` |
+| < LCL | > UCL | `fault_hvac_compressor_fault` |
+
+### 4.2 Severity Escalation (HOW BAD is it)
+
+| Runtime | Treturn_avg | Severity |
+|---------|-------------|----------|
+| < 1 hour (non-inverter) / < 5 min (inverter) | any | Warning (if fault detected) |
+| ≥ 1 hour (non-inverter) / ≥ 5 min (inverter) | < 27°C | Warning (cooling still happening, but degraded) |
+| ≥ 1 hour (non-inverter) / ≥ 5 min (inverter) | ≥ 27°C | **Critical** (room still hot — no effective cooling) |
+
+**Why this two-tier system works:**
+- **Low refrigerant:** Less refrigerant mass → evaporator cannot absorb enough heat → temperature split shrinks (Delta-T drops). The compressor senses reduced suction pressure and draws **less** current (offloads).
+- **Dirty filter:** Restricted airflow → less total heat transfer across the coil → temperature split shrinks (Delta-T drops). The compressor still tries to pump against the restriction, so current stays **normal**.
+- **Outdoor problem (capacitor/condenser):** Condenser cannot reject heat effectively → high-side pressure rises → compressor works harder → less indoor cooling → Delta-T drops **AND** current rises.
+
+**Research Base:** Sun et al. (2013) identified temperature differential (ΔT) as the strongest discriminator for refrigerant charge and airflow faults. Bonvini et al. (2014) validated that **current draw anomalies combined with normal thermal readings** indicate condenser-side faults, while **thermal anomalies with normal current** indicate refrigerant-side faults. The Delta-T + current matrix directly implements this finding.
+
+---
+
+### 4.2 Dirty Indoor Filter
 | Attribute | Detail |
 |-----------|--------|
 | **Description** | Air filter is clogged, restricting airflow across the evaporator coil. |
 | **Root Cause** | Neglected filter replacement; high dust environments. |
-| **Primary Trigger** | Minimum coil temp during STABLE_ON < `tcoil_LCL` at **STABLE_ON cycle end**. |
+| **Primary Trigger** | Delta-T_avg < LCL **AND** current_avg within LCL–UCL. |
 | **Confirmatory** | None. |
-| **Evaluation Point** | STABLE_ON only (≥10 min continuous compressor ON). |
-| **Severity** | Warning |
+| **Evaluation Point** | Non-inverter: 1 hour, then every additional hour. Inverter: 5 min high-effort. |
+| **Severity** | Warning (Treturn < 27°C) / **Critical** (Treturn ≥ 27°C after 1 hr non-inverter, or at 5 min inverter) |
 | **Alert Type** | `fault_hvac_dirty_filter` |
 
-**Physics:** A clogged indoor filter restricts airflow across the evaporator coil. With less warm air passing over the coil, the refrigerant cannot absorb its design heat load. The evaporating temperature drops below specification, causing the coil surface to **supercool** (get colder than normal). This is the same mechanism that causes evaporator icing in severely blocked systems.
+**Physics:** A clogged indoor filter restricts airflow across the evaporator coil. With less warm air passing over the coil, the refrigerant cannot absorb its design heat load. The supply air temperature rises because the coil cannot chill it sufficiently. The compressor continues to draw normal current because the mechanical load hasn't changed — only the heat exchange has degraded.
 
-**Research Base:** Sun et al. (2013) identified coil temperature and ΔT as the strongest discriminators for airflow restriction faults. Bonvini et al. (2014) validated that restricted airflow primarily manifests as a **current draw anomaly with normal thermal parameters** — the compressor works against reduced suction pressure.
+**Why This Check:** Restricted airflow reduces total heat transfer → smaller temperature split (Delta-T drops). The compressor electrical load is unchanged because the mechanical resistance hasn't changed. This is the only cell in the matrix where Delta-T is low but current is normal.
 
-**Why This Check:** During normal compressor-ON operation, the coil reaches its coldest point near LCL. Supercooling from restricted airflow pushes it **below** this bound. We check `min_tcoil < LCL` because the coil gets colder, not warmer.
+**Trigger Condition:** `deltat_avg < deltat_lcl` **AND** `current_lcl ≤ current_avg ≤ current_ucl` at evaluation.
 
-**Trigger Condition:** `min_tcoil < tcoil_LCL` at **STABLE_ON cycle end** (fires immediately).
-
-**Code (`_evaluate_hvac_cycle()`):**
+**Code (`_evaluate_hvac_window()`):**
 ```python
-    # --- Dirty Filter (Warning) - min coil temp < LCL (fires immediately) ---
-    # Physics: restricted airflow -> less heat load -> refrigerant supercools -> coil colder
-    tcoil_lcl = baselines.get('tcoil', {}).get('lcl')
-    if tcoil_lcl is not None and min_tcoil < tcoil_lcl:
+    deltat_avg = sum(r['deltat'] for r in reading_buffer) / len(reading_buffer)
+    current_avg = sum(r['current'] for r in reading_buffer) / len(reading_buffer)
+    treturn_avg = sum(r['treturn'] for r in reading_buffer) / len(reading_buffer)
+    current = snapshot.get('current', 0.0)
+    deltat_lcl = baselines.get('deltat', {}).get('lcl')
+    current_lcl = baselines.get('current', {}).get('lcl')
+    current_ucl = baselines.get('current', {}).get('ucl')
+
+    if deltat_avg >= deltat_lcl:
+        return  # Good condition
+
+    severity = 'critical' if (runtime >= 600 and treturn_avg >= 27.0) else 'warning'
+
+    if current_avg < current_lcl:
+        # Low refrigerant (see §4.3)
+        _insert_fault_alert(
+            appliance_id, 'fault_hvac_low_refrigerant',
+            f"Low refrigerant - Delta-T {deltat_avg:.1f}C below LCL {deltat_lcl:.1f}C with low current {current_avg:.2f}A",
+            deltat_avg, deltat_lcl, severity, now, cur, conn)
+    elif current_avg > current_ucl:
+        # Outdoor problem (see §4.4)
+        _insert_fault_alert(
+            appliance_id, 'fault_hvac_compressor_fault',
+            f"Outdoor problem - Delta-T {deltat_avg:.1f}C below LCL {deltat_lcl:.1f}C with high current {current_avg:.2f}A",
+            current_avg, current_ucl, severity, now, cur, conn)
+    else:
+        # Dirty filter — Delta-T low, current normal
         _insert_fault_alert(
             appliance_id, 'fault_hvac_dirty_filter',
-            f"Dirty indoor filter - min coil temp {min_tcoil:.2f}C below LCL {tcoil_lcl:.2f}C",
-            min_tcoil, tcoil_lcl, now, cur, conn)
+            f"Dirty indoor filter - Delta-T {deltat_avg:.1f}C below LCL {deltat_lcl:.1f}C with normal current {current_avg:.2f}A",
+            deltat_avg, deltat_lcl, severity, now, cur, conn)
 ```
 
 ---
 
-### 4.2 Low Refrigerant
+### 4.3 Low Refrigerant
 | Attribute | Detail |
 |-----------|--------|
 | **Description** | Refrigerant charge is below specification due to leak or improper installation. |
 | **Root Cause** | Micro-leaks in coil or lines; improper initial charge; Schrader valve leaks. |
-| **Primary Trigger** | Minimum coil temp during STABLE_ON > `tcoil_UCL` (coil warmer than normal). |
-| **Confirmatory** | Peak ΔT during STABLE_ON < `((deltat_UCL + deltat_mean) / 2)`. |
-| **Evaluation Point** | STABLE_ON only. |
-| **Severity** | Critical |
+| **Primary Trigger** | Snapshot T_supply > `tsupply_UCL` **AND** snapshot current < `current_LCL`. |
+| **Confirmatory** | None. |
+| **Evaluation Point** | Non-inverter: cycle end. Inverter: high-effort window end. |
+| **Severity** | Warning (temp > UCL) / Critical (temp > 100°C) |
 | **Alert Type** | `fault_hvac_low_refrigerant` |
 
 **Physics:** Low refrigerant charge means less refrigerant mass in the evaporator coil. The refrigerant evaporates too early in the coil path. By the time it reaches the end of the coil, it's all vapor and absorbing little heat. Result:
-- **ΔT drops**: The coil cannot chill the air enough → supply air is warmer → temperature split (return − supply) shrinks.
-- **Coil warms up**: The coil surface temperature rises because there's not enough liquid refrigerant left to absorb heat.
+- **Delta-T drops**: The coil cannot chill the air enough → temperature split shrinks.
+- **Current drops**: The compressor senses reduced suction pressure (less refrigerant to compress) and draws less current. The motor offloads because there is simply less mass to pump.
 
-**Research Base:** Sun et al. (2013) demonstrated that deviations in temperature differential (ΔT) and coil temperature are the strongest discriminators for refrigerant charge faults. Bonvini et al. (2014) validated that **thermal anomalies with normal current** indicate refrigerant-side faults (undercharge, leak).
+**Research Base:** Sun et al. (2013) demonstrated that deviations in temperature differential (ΔT) are the strongest discriminators for refrigerant charge faults. Bonvini et al. (2014) validated that **thermal anomalies with normal current** indicate refrigerant-side faults. In the snapshot matrix, "normal current" is replaced by "low current" because reduced refrigerant mass directly reduces compressor load.
 
-**Why This Check:** During normal stable operation, the evaporator coil should be cold. With low refrigerant, there's not enough liquid refrigerant to absorb heat, so the coil surface temperature rises (`min_tcoil > UCL`). The confirmatory `peak_deltat < ((UCL + mean) / 2)` catches the reduced temperature split caused by insufficient cooling capacity.
+**Why This Check:** Low refrigerant is the only condition that produces **both** small temperature split **and** low compressor current. The compressor has less work to do because there is less refrigerant to pump, while the reduced cooling capacity shrinks the Delta-T.
 
-**Trigger Condition:** `min_tcoil > tcoil_UCL` **OR** `peak_deltat < ((deltat_UCL + deltat_mean) / 2)` at **STABLE_ON cycle end**. Alert fires immediately on first detection.
+**Trigger Condition:** `deltat_avg < deltat_lcl` **AND** `current_avg < current_lcl` at evaluation.
 
-**Code (`_evaluate_hvac_cycle()`):**
+**Code (`_evaluate_hvac_window()`):**
 ```python
-    # --- Low Refrigerant (Critical) ---
-    # Primary: min coil temp > UCL (coil warmer than normal)
-    # Confirmatory: peak dT fails to reach upper half of envelope (< (UCL + mean) / 2)
-    deltat_ucl = baselines.get('deltat', {}).get('ucl')
-    deltat_mean = baselines.get('deltat', {}).get('mean')
-    deltat_threshold = (deltat_ucl + deltat_mean) / 2.0 if deltat_ucl is not None and deltat_mean is not None else None
-    tcoil_ucl = baselines.get('tcoil', {}).get('ucl')
-
-    low_ref_triggered = False
-    if tcoil_ucl is not None and min_tcoil > tcoil_ucl:
-        low_ref_triggered = True
-    if deltat_threshold is not None and peak_deltat < deltat_threshold:
-        low_ref_triggered = True
-
-    if low_ref_triggered:
-        if tcoil_ucl is not None and min_tcoil > tcoil_ucl:
-            msg = f"Low refrigerant - min coil temp {min_tcoil:.2f}C above UCL {tcoil_ucl:.2f}C"
-            val, thresh = min_tcoil, tcoil_ucl
-        else:
-            msg = f"Low refrigerant - peak dT {peak_deltat:.2f}C below threshold {deltat_threshold:.2f}C"
-            val, thresh = peak_deltat, deltat_threshold
+    if current_avg < current_lcl:
+        severity = 'critical' if (runtime >= 600 and treturn_avg >= 27.0) else 'warning'
         _insert_fault_alert(
-            appliance_id, 'fault_hvac_low_refrigerant', msg,
-            val, thresh, now, cur, conn)
+            appliance_id, 'fault_hvac_low_refrigerant',
+            f"Low refrigerant - Delta-T {deltat_avg:.1f}C below LCL {deltat_lcl:.1f}C with low current {current_avg:.2f}A",
+            deltat_avg, deltat_lcl, severity, now, cur, conn)
 ```
 
 ---
 
-### 4.3 Compressor Electrical Fault / Hard Start
+### 4.4 Outdoor Problem (Capacitor / Condenser)
 | Attribute | Detail |
 |-----------|--------|
-| **Description** | Compressor draws excessive current due to mechanical strain or electrical fault. |
-| **Root Cause** | Failing compressor bearings, refrigerant overcharge, condenser blockage, starter relay failure. |
-| **Primary Trigger** | Average current during STABLE_ON > `current_UCL` at **STABLE_ON cycle end**. |
-| **Confirmatory** | Coil temp and ΔT may be normal or abnormal depending on root cause. |
-| **Evaluation Point** | STABLE_ON only. |
-| **Severity** | Critical |
+| **Description** | Compressor or condenser is struggling due to electrical or mechanical fault. |
+| **Root Cause** | Failing run capacitor, dirty condenser, refrigerant overcharge, failing compressor bearings. |
+| **Primary Trigger** | Snapshot T_supply > `tsupply_UCL` **AND** snapshot current > `current_UCL`. |
+| **Confirmatory** | None. |
+| **Evaluation Point** | Non-inverter: cycle end. Inverter: high-effort window end. |
+| **Severity** | Warning (temp > UCL) / Critical (temp > 100°C) |
 | **Alert Type** | `fault_hvac_compressor_fault` |
 
-**Physics:** During stable operation, compressor current should be relatively constant. Sustained elevation above UCL indicates the compressor is working harder than normal — failing bearings, refrigerant overcharge, condenser blockage, or starter relay failure.
+**Physics:** When the condenser cannot reject heat effectively (dirty coils, failing fan, bad capacitor), or when the compressor has internal mechanical friction (worn bearings), the high-side pressure rises. The compressor must work harder to push refrigerant against this elevated pressure. Result:
+- **Delta-T drops**: Less heat is rejected outdoors, so the system cannot absorb as much heat indoors → smaller temperature split.
+- **Current rises**: The compressor motor draws more power to overcome the increased mechanical load.
 
-**Research Base:** Sun et al. (2013) found that current draw deviations with normal thermal readings indicate condenser-side faults. Bonvini et al. (2014) validated that current anomalies combined with normal thermal parameters point to mechanical or electrical compressor issues.
+**Research Base:** Sun et al. (2013) found that current draw deviations with normal thermal readings indicate condenser-side faults. Bonvini et al. (2014) validated that current anomalies combined with normal thermal parameters point to mechanical or electrical compressor issues. In the snapshot matrix, "normal thermal" is replaced by "low Delta-T" because both thermal and electrical performance degrade simultaneously.
 
-**Why This Check:** Current is the most direct measure of compressor electrical load. Evaluating at STABLE_ON cycle end filters out brief startup surges. Unlike refrigerant or airflow faults which primarily affect thermal parameters, compressor electrical faults directly elevate current draw.
+**Why This Check:** An outdoor problem is the only condition that produces **both** small temperature split **and** high compressor current. The compressor is working harder but achieving less cooling — the hallmark of a condenser-side or compressor-side fault.
 
-**Trigger Condition:** `avg_current > current_UCL` at **STABLE_ON cycle end**. Alert fires immediately on first detection.
+**Trigger Condition:** `deltat_avg < deltat_lcl` **AND** `current_avg > current_ucl` at evaluation.
 
-**Code (`_evaluate_hvac_cycle()`):**
+**Code (`_evaluate_hvac_window()`):**
 ```python
-    # --- Compressor Fault (Critical) - avg current > UCL ---
-    current_ucl = baselines.get('current', {}).get('ucl')
-    if current_ucl is not None and avg_current > current_ucl:
+    elif current_avg > current_ucl:
+        severity = 'critical' if (runtime >= 600 and treturn_avg >= 27.0) else 'warning'
         _insert_fault_alert(
             appliance_id, 'fault_hvac_compressor_fault',
-            f"Compressor electrical fault - avg current {avg_current:.2f}A exceeds UCL {current_ucl:.2f}A",
-                avg_current, current_ucl, now, cur, conn)
-            cf['cycle_count'] = 0
-    elif current_ucl is not None:
-        if 'fault_hvac_compressor_fault' in fat:
-            fat['fault_hvac_compressor_fault']['cycle_count'] = 0
+            f"Outdoor problem - Delta-T {deltat_avg:.1f}C below LCL {deltat_lcl:.1f}C with high current {current_avg:.2f}A",
+            current_avg, current_ucl, severity, now, cur, conn)
 ```
 
 ---
@@ -462,12 +571,14 @@ The original Zone A/B/C framework is **not applicable** to cyclic appliance data
 
 | Appliance | Parameter | Cycle Statistic | Why This Statistic |
 |-----------|-----------|-----------------|-------------------|
-| **Dryer** | Motor current | Per-cycle median (spike-excluded) | Median ignores ignition spikes and cool-down phases; captures true motor load |
+| **Dryer** | Motor current | Belt snap: 3 consecutive readings < LCL. Roller wear: motor baseline median (spikes filtered via 1.15× mean threshold) vs UCL. | Belt snap: consecutive readings confirm sustained loss of load. Roller wear: median captures true motor current after removing ignition spikes. |
 | **Dryer** | Exhaust RH | End-of-cycle value (last 2 min average) | ORNL finding: end-RH is definitive dryness indicator |
 | **Dryer** | Exhaust temp | End-of-cycle value (last 2 min average) | Trapped heat at cycle end indicates blockage |
-| **HVAC** | ΔT | Per-STABLE_ON-cycle **peak** | Peak occurs after thermal equilibrium; compares like-with-like across cycles |
-| **HVAC** | Coil temp | Per-STABLE_ON-cycle **minimum** | Minimum coil temp indicates maximum cooling capacity |
-| **HVAC** | Current | Per-STABLE_ON-cycle **average** | Average filters out brief startup transients |
+| **HVAC** | ΔT | Average of **last 6 readings** at evaluation point | Smooths sensor noise while capturing true performance |
+| **HVAC** | Current | Average of **last 6 readings** at evaluation point | Used together with Delta-T_avg in the fault matrix |
+| **HVAC** | T_return | Average of **last 6 readings** at evaluation point | Used for **severity escalation** (critical if ≥ 27°C after 1 hr non-inverter, or at 5 min inverter) |
+| **HVAC** | T_return | Kept on chart for **visual context only** | No longer used for fault detection |
+| **HVAC** | T_coil | Kept on chart for **visual context only** | No longer used for fault detection |
 
 ### 5.3 Cooldown & Resolution
 - **Alert Cooldown:** 10 minutes per fault type per appliance. Prevents alert spam.
@@ -487,9 +598,9 @@ If the user has not manually configured SPC baselines, fault detection is **comp
 | Barrel Roller Worn Out | `current` |
 | Belt Snapped | `current` |
 | Lint Blockage | `texhaust`, `rhexhaust` |
-| Dirty Indoor Filter | `tcoil` |
-| Low Refrigerant | `deltat`, `tcoil` |
-| Compressor Electrical Fault | `current` |
+| Dirty Indoor Filter | `deltat`, `current` |
+| Low Refrigerant | `deltat`, `current` |
+| Outdoor Problem (Capacitor/Condenser) | `deltat`, `current` |
 
 ---
 
@@ -507,26 +618,28 @@ When the user configures SPC baselines in the dashboard, display these instructi
 ### Split HVAC
 | Parameter | Instruction |
 |-----------|-------------|
-| **ΔT (Return − Supply)** | *"Set UCL to the highest ΔT and LCL to the lowest ΔT observed during stable inverter modulation. The system auto-derives the low-refrigerant threshold from these bounds."* |
-| **Coil Temperature** | *"Set UCL to the highest coil temp and LCL to the lowest coil temp observed during stable inverter modulation."* |
-| **Compressor Current** | *"Set UCL to the highest current and LCL to the lowest current observed during stable inverter modulation."* |
+| **ΔT (Return − Supply)** | *"Set UCL to the highest and LCL to the lowest temperature split observed during normal cooling. Delta-T LCL is the critical threshold — any cycle with maximum Delta-T below this value triggers fault evaluation."* |
+| **Compressor Current** | *"Set UCL to the highest current and LCL to the lowest current observed during normal operation. Used together with Delta-T in the fault matrix: low current + low Delta-T = low refrigerant; high current + low Delta-T = outdoor problem."* |
 
 ---
 
 ## 8. Implementation Notes
 
 ### 8.1 Backend Integration (`app.py`)
-1. New function `check_fault_alerts(appliance_id, reading_data, dev_type)` is called **after** `check_spc_alerts()` in `on_mqtt_message()`.
+1. New function `check_fault_alerts(appliance_id, reading_data, dev_type)` is called in `on_mqtt_message()` for every running reading.
 2. Function fetches `spc_manual_baselines` for the appliance.
 3. If `baseline_configured` is false or required metrics are missing, return immediately.
 4. Maintain in-memory trackers:
    - `FAULT_ALERT_TRACKER = {appliance_id: {fault_type: {cycle_count, last_trigger, active}}}`
-   - `HVAC_CYCLE_TRACKER = {appliance_id: {state, stable_on_start, peak_deltat, min_tcoil, avg_current}}`
+   - `HVAC_CYCLE_TRACKER = {appliance_id: {state, start_time, reading_buffer, last_evaluation_runtime}}`
+     - `state`: `IDLE` or `RUNNING`
+     - `reading_buffer`: list of last 6 readings (dict with `deltat`, `current`, `treturn`)
+     - `last_evaluation_runtime`: seconds since start when last evaluation occurred (0 = never evaluated this cycle)
    - `DRYER_CYCLE_STATS = {appliance_id: {cycle_start, spike_peaks[], motor_readings[]}}` (accumulates per-cycle data)
 5. On trigger, insert into `alerts` table with `alert_type = 'fault_*'` and 10-minute cooldown.
 
 ### 8.2 Frontend Integration (`dashboard.html`)
-1. Fault alerts appear in the existing Alerts Panel alongside `spc_ucl_breach` / `spc_lcl_breach`.
+1. Fault alerts appear in the Alerts Panel. No other alert types are shown (SPC breach alerts removed).
 2. Critical faults: red left border (`#EF4444`) + `#FEF2F2` background.
 3. Warning/Info faults: orange/blue left border + matching background.
 4. No acknowledge button required (v2 alerts panel is read-only).
@@ -536,8 +649,6 @@ When the user configures SPC baselines in the dashboard, display these instructi
 ESP32 publishes running telemetry
     ↓
 Backend inserts into dryer_readings / hvac_readings
-    ↓
-check_spc_alerts() → SPC breach alerts
     ↓
 check_fault_alerts() → Pattern-based fault alerts (baseline-gated)
     ↓
@@ -571,9 +682,7 @@ Only **actionable fault alerts** are sent to Discord. Raw data-point alerts are 
 | `fault_hvac_dirty_filter` | ✅ Yes | Actionable maintenance advice |
 | `fault_hvac_low_refrigerant` | ✅ Yes | Critical — immediate action required |
 | `fault_hvac_compressor_fault` | ✅ Yes | Critical — immediate action required |
-| `spc_ucl_breach` | ❌ No | Raw data point spam — not actionable |
-| `spc_lcl_breach` | ❌ No | Raw data point spam — not actionable |
-| `dryer_humidity_high` | ❌ No | Replaced by `fault_dryer_incomplete_drying` (SPC-based, more precise) |
+| `dryer_humidity_high` | ❌ No | **Removed** — replaced by `fault_dryer_incomplete_drying` (SPC-based, more precise) |
 
 ### Discord Embed Format
 Fault alerts use a **maintenance-ticket style** embed instead of raw data dumps:
