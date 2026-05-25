@@ -76,9 +76,14 @@ Because v3 stores **all** telemetry (not just running), database size will grow 
 - **Card display:** Template now only shows `sub_type` for HVAC (`'HVAC' in a.type`), hiding it for dryers.
 - **DB update:** Set `sub_type = 'inverter'` for "AC WS 1" (189), "1 - AC01" (197), "5 - AC Home 01" (202).
 
-### 2026-05-15 — Humidity Calibration Clamp Reverted
-- **Change:** Removed `clamp_to=(0, 100)` from all humidity `apply_calibration()` calls and reverted the function to its original 3-parameter signature.
-- **Reason:** Calibrated humidity values from linear regression can legitimately exceed 100% when operating conditions fall outside the calibration range. User will consult their advisor before deciding on a final approach.
+### 2026-05-17 — Humidity Calibration Fully Removed
+- **Change:** All humidity `apply_calibration()` calls removed. RH values now use **raw sensor values** throughout (dashboard, charts, exports, SPC, fault detection).
+- **Reason:** Linear regression calibration for humidity was unreliable — operating conditions frequently produced values outside the 0–100% physical range. Raw values were adopted as the definitive approach after advisor consultation.
+- **Impact:** Dashboard, charts, exports, and SPC baselines all use raw RH. `rhreturn_slope`, `rhreturn_intercept`, `rhsupply_slope`, `rhsupply_intercept` columns are deprecated and unused.
+
+### 2026-05-15 — Humidity Calibration Clamp Reverted (Superseded)
+- ~~Removed `clamp_to=(0, 100)` from humidity `apply_calibration()` calls.~~
+- **Superseded by 2026-05-17 entry above** — humidity calibration has been fully removed, not just unclamped.
 
 ### 2026-05-16 — Monthly Energy Consumption Pie Chart
 - **Pie chart** at top of dashboard showing monthly energy grouped by appliance type (HVAC = blue, Dryer = orange).

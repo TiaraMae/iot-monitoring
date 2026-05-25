@@ -333,6 +333,12 @@ FAULT_DISCORD_MAP = {
         'cause': 'Neglected filter replacement; high dust environments.',
         'action': 'Replace or clean the indoor air filter.',
     },
+    'fault_hvac_compressor_degradation': {
+        'title': '🟠 Compressor Performance Degradation',
+        'description': 'Compressor is drawing more current than normal but cooling output is below baseline.',
+        'cause': 'Worn compressor valves, aging compressor, or gradual refrigerant loss reducing efficiency.',
+        'action': 'Schedule HVAC technician to inspect compressor amp draw and refrigerant charge.',
+    },
     'fault_hvac_low_refrigerant': {
         'title': '🔴 Low Refrigerant',
         'description': 'Refrigerant charge is below specification.',
@@ -370,6 +376,7 @@ def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=
                     'fault_dryer_incomplete_drying': 0x3B82F6,  # blue
                     'fault_dryer_roller_wear': 0xF59E0B,        # amber
                     'fault_hvac_dirty_filter': 0xF59E0B,        # amber
+                    'fault_hvac_compressor_degradation': 0xF59E0B,  # amber
                 }
                 embed_color = warning_colors.get(alert_type, 0xF59E0B)
             embed = {
@@ -1026,8 +1033,9 @@ def _evaluate_hvac_window(appliance_id, reading_buffer, baselines, runtime, now,
     deltat_lcl = baselines.get('deltat', {}).get('lcl')
     current_lcl = baselines.get('current', {}).get('lcl')
     current_ucl = baselines.get('current', {}).get('ucl')
+    current_mean = baselines.get('current', {}).get('mean')
 
-    if deltat_lcl is None or current_lcl is None or current_ucl is None:
+    if deltat_lcl is None or current_lcl is None or current_ucl is None or current_mean is None:
         return  # Baselines not fully configured
 
     if deltat_avg >= deltat_lcl:
@@ -1041,6 +1049,9 @@ def _evaluate_hvac_window(appliance_id, reading_buffer, baselines, runtime, now,
         severity = 'warning'
 
     # Step 2: Determine fault type from current matrix
+    # Upper warning zone threshold = mean + 1σ (where σ = (UCL-mean)/3)
+    current_warn = current_mean + (current_ucl - current_mean) / 3.0
+
     if current_avg < current_lcl:
         _insert_fault_alert(
             appliance_id, 'fault_hvac_low_refrigerant',
@@ -1051,6 +1062,11 @@ def _evaluate_hvac_window(appliance_id, reading_buffer, baselines, runtime, now,
             appliance_id, 'fault_hvac_compressor_fault',
             f"Outdoor problem - Delta-T {deltat_avg:.1f}C below LCL {deltat_lcl:.1f}C with high current {current_avg:.2f}A",
             current_avg, current_ucl, severity, now, cur, conn)
+    elif current_avg > current_warn:
+        _insert_fault_alert(
+            appliance_id, 'fault_hvac_compressor_degradation',
+            f"Compressor degradation - Delta-T {deltat_avg:.1f}C below LCL {deltat_lcl:.1f}C with elevated current {current_avg:.2f}A (baseline mean {current_mean:.2f}A)",
+            current_avg, current_mean, severity, now, cur, conn)
     else:
         _insert_fault_alert(
             appliance_id, 'fault_hvac_dirty_filter',
@@ -1847,6 +1863,12 @@ def export_excel(appliance_id):
         date_filter += " AND r.time >= %s"
         query_params.append(start_date)
     if end_date:
+        # Pad end by 1s to match dryer_analytics / hvac_analytics inclusive behavior
+        try:
+            end_dt = datetime.fromisoformat(end_date)
+            end_date = (end_dt + timedelta(seconds=1)).isoformat()
+        except ValueError:
+            pass
         date_filter += " AND r.time <= %s"
         query_params.append(end_date)
     current_filter = " AND r.imotor >= 0.25" if (filtered and "Dryer" in dev_type) else ""
