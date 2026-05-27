@@ -96,8 +96,23 @@ Because v3 stores **all** telemetry (not just running), database size will grow 
 ### 2026-05-12
 - **Delta RH chart (chart6)** added for HVAC — shows `abs(RHreturn - RHsupply)` with pink `#EC4899` line.
 
+### 2026-05-26 — Dryer Incomplete Drying Alert Fix
+- **Root cause:** With "running only" firmware, the ESP32 stops sending when current drops below ~0.25A. The old code only called `check_fault_alerts()` on running messages, so the `current < 0.15` cycle-end check was never reached. If the cycle was the last of the day, no subsequent message arrived to trigger gap-based finalization, and the alert was never evaluated.
+- **Fix (3 parts):**
+  1. **Global timeout check** — After every MQTT message, ALL in-cycle dryers are scanned. Idle >120s triggers `_finalize_dryer_cycle()`.
+  2. **Fault checks on all dryer messages** — `check_fault_alerts()` runs on both running and idle messages. Prepares for "keep on sending data" firmware.
+  3. **Guard real-time checks during idle** — Spike state machine and belt snap detection only run when `current >= 0.25`. Idle messages reset fault trackers to prevent false positives.
+
+### 2026-05-26 — Session Security & Rate Limiting
+- **Flask-Limiter** added: login 30/min, signup 5/min, default 200/min.
+- **Session hardening:** Secure, HttpOnly, SameSite=Lax cookies; 12-hour session lifetime.
+- **Null-safe sensor handling:** Missing DHT/BME readings emit `null`; backend handles gracefully.
+
+### 2026-05-26 — Gauge Pressure UI Layout
+- Dryer latest-data grid changed to 3-column layout. Gauge pressure and absolute pressure now wrap neatly below exhaust temp / RH / current.
+
 ### 2026-05-17
-- **Baseline removal feature** — New `🗑️ Remove Baseline` button appears when baseline exists. `DELETE /api/device/<id>/baseline_config` clears all baseline rows and sets `baseline_configured = FALSE`. Frontend wipes SPC lines from charts and refreshes UI state.
+- **Baseline removal feature** — New ` Remove Baseline` button appears when baseline exists. `DELETE /api/device/<id>/baseline_config` clears all baseline rows and sets `baseline_configured = FALSE`. Frontend wipes SPC lines from charts and refreshes UI state.
 - **Discord alert testing documented** — Fault alerts can be tested by setting tight UCL/LCL baselines (e.g., Current UCL = 2.01 for a 2.0 A motor baseline) so normal running data immediately crosses thresholds. This fires real Discord alerts with the maintenance-ticket embed format. See AGENTS.md §11 for examples, limitations (10-min cooldown, DB pollution), and cleanup instructions.
 - **Idle point styling removed** — `updateChart` no longer applies gray tiny-dot styling to idle points. Idle and running points now render identically. The filtered/unfiltered toggle still controls visibility.
 - **Dryer cycle RH refined** — `start_rh` computed from first 6 RH readings (was single point). `end_rh_avg` computed from last 6 RH readings (was last 10). Both live fault detection and historical analytics updated.
