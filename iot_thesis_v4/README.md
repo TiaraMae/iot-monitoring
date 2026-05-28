@@ -1,28 +1,47 @@
-# IoT Monitoring System v3 — Backend-Driven CF/Deductor
+# IoT Monitoring System v4 — Production-Ready Deployment
 
-This is the **third-generation** backend and frontend for the IoT-Based Monitoring and Alert System for Split HVAC and Gas Dryers.
+This is the **fourth-generation** backend and frontend for the IoT-Based Monitoring and Alert System for Split HVAC and Gas Dryers.
 
-## What's New in v3
+v4 is identical in functionality to v3 but has been hardened for production deployment and public repository sharing:
+- **No hardcoded credentials** — all sensitive values require environment variables
+- **Full TLS validation** — ESP32 firmware uses ISRG Root X1 CA certificate instead of `setInsecure()`
+- **Deployment scripts included** — Ubuntu server setup, nginx config, systemd service, firewall rules
+- **Clean firmware for GitHub** — `_Clean` variant with placeholder credentials committed; real version excluded via `.gitignore`
 
-- **Backend Owns CF/Deductor:** The backend stores calibration factor (CF) and deductor per appliance in the `appliances` table. When a sensor node boots or reconnects, the backend sends `setcf:*` and `setdeductor:*` via MQTT control topic.
-- **Sensor Node Computes Current:** The ESP32-C3 receives CF and deductor from the backend, persists them in NVS flash memory, and computes `CurrentA = max(0, (rawMv/1000)*cf - deductor)` locally. This eliminates hardcoded sensor constants in firmware — new appliance types can be added in the backend without reflashing.
-- **All Telemetry Stored:** Every 10-second telemetry window (running or idle) is stored in PostgreSQL. The old "running-only insert gate" is removed.
-- **Filtered/Unfiltered Data Toggle:** A radio toggle in the dashboard lets users switch between filtered (running only, default) and unfiltered (all data including idle gaps). Idle points are styled as small gray dots on charts.
-- **Export with Idle Option:** The Excel export modal has an "Include idle data" checkbox.
-- **Threshold Standardization:** All current thresholds across backend and firmware are consistently **0.25 A**.
-- **Removed Data Auto Variant:** The separate `Update_SensorNode_Data_Auto.ino` firmware is no longer needed; the standard firmware sends continuous data natively.
+## What's New in v4 (vs v3)
+
+- **No Hardcoded Defaults:** `MQTT_HOST`, `MQTT_USER`, and `MQTT_PASS` in `app.py` require environment variables. Missing values raise `RuntimeError` instead of falling back to hardcoded credentials.
+- **Full TLS Certificate Validation:** ESP32 firmware embeds the ISRG Root X1 CA certificate and uses `setCACert()` instead of `setInsecure()`. This validates the HiveMQ Cloud server certificate chain.
+- **Production Deployment Scripts:** `deployment/` directory contains:
+  - `setup-ubuntu.sh` — automated server provisioning
+  - `nginx-iot-monitor.conf` — reverse proxy with HTTPS and rate limiting
+  - `iot-backend.service` — systemd service for Gunicorn
+  - `setup-firewall.sh` — UFW rules (22/80/443/8883)
+  - `.env.production` — environment template with placeholders
+- **Clean Firmware for GitHub:** `Update_SensorNode_Clean/` contains sanitized firmware with placeholder credentials. The real `Update_SensorNode/` is excluded via `.gitignore`.
+- **Backend Owns CF/Deductor:** (Retained from v3) The backend stores calibration factor (CF) and deductor per appliance. Node receives them via MQTT and computes `CurrentA` locally.
+- **All Telemetry Stored:** (Retained from v3) Every 10-second window is stored in PostgreSQL. Filtered/unfiltered toggle controls display.
+- **Threshold Standardization:** All current thresholds are consistently **0.25 A**.
 
 ## Architecture
 
 ```
-iot_thesis_v3/
-├── app.py                  # Flask backend (MQTT, DB, auth, SPC, API)
+iot_thesis_v4/
+├── app.py                  # Flask backend (no hardcoded defaults, env-only)
 ├── templates/
-│   ├── dashboard.html      # Main SPA frontend (filtered toggle, idle styling)
+│   ├── dashboard.html      # Main SPA frontend
 │   ├── login.html          # User login
 │   └── signup.html         # User registration
-└── Update_SensorNode/
-    └── Update_SensorNode.ino  # Firmware: receives CF/deductor, computes CurrentA
+├── Update_SensorNode/      # Real firmware with credentials (local only, gitignored)
+├── Update_SensorNode_Clean/  # Sanitized firmware for GitHub
+│   └── Update_SensorNode_Clean.ino
+├── deployment/             # Production deployment scripts
+│   ├── .env.production     # Production env template (placeholders)
+│   ├── nginx-iot-monitor.conf
+│   ├── iot-backend.service
+│   ├── setup-firewall.sh
+│   └── setup-ubuntu.sh
+└── requirements.txt        # Includes gunicorn
 ```
 
 ## Database
@@ -56,7 +75,24 @@ Unchanged from v2. See v2 `README.md` or `AGENTS.md` for the full metric tables.
 
 ## Data Retention Note
 
-Because v3 stores **all** telemetry (not just running), database size will grow approximately **3–5×** faster than v2. Consider implementing a retention policy for long-term production use.
+Because v4 stores **all** telemetry (not just running), database size will grow approximately **3–5×** faster than v2. Consider implementing a retention policy for long-term production use.
+
+## Deployment
+
+v4 includes production deployment scripts for Ubuntu. See `deployment/setup-ubuntu.sh` for automated provisioning.
+
+**Quick start:**
+1. Copy `deployment/.env.production` to `.env` and fill in real credentials
+2. Run `deployment/setup-ubuntu.sh` as root
+3. The script installs PostgreSQL, nginx, Certbot, and configures the firewall
+4. Flask runs under Gunicorn via systemd; nginx reverse-proxies ports 80/443
+
+**Ports:**
+- 22 — SSH
+- 80 — HTTP (redirects to HTTPS)
+- 443 — HTTPS (dashboard)
+- 8883 — MQTTS outbound to HiveMQ Cloud
+- 5432 — PostgreSQL (localhost only)
 
 ## Recent Fixes
 

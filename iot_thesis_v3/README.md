@@ -96,6 +96,17 @@ Because v3 stores **all** telemetry (not just running), database size will grow 
 ### 2026-05-12
 - **Delta RH chart (chart6)** added for HVAC — shows `abs(RHreturn - RHsupply)` with pink `#EC4899` line.
 
+### 2026-05-26 — Credential Sanitization for GitHub
+- **Real firmware excluded:** All `Update_SensorNode/` and `esp32dryertest/` folders with hardcoded WiFi/MQTT credentials added to `.gitignore`.
+- **Clean versions pushed:** `_Clean` folders created for all 6 firmware variants with placeholder credentials (`YOUR_WIFI_SSID`, `YOUR_WIFI_PASSWORD`, `YOUR_MQTT_BROKER`, `YOUR_MQTT_USERNAME`, `YOUR_MQTT_PASSWORD`).
+- **v4 backend sanitized:** Hardcoded MQTT defaults (`d57bf828...`, `esp32user`) removed from `app.py`. All MQTT values now require environment variables.
+
+### 2026-05-26 — Atmospheric Pressure Simplification
+- **EMA removed:** Atmospheric pressure baseline no longer uses exponential moving average.
+- **Simple update:** Updates to latest raw idle reading every 2 minutes with 15-second settling guard.
+- **Null-safe:** Guards against `None` raw_pressure. Hard reset on first idle after cycle end.
+- **DB persistence:** Baseline stored in `appliances.atmospheric_pressure` and survives restarts.
+
 ### 2026-05-26 — Dryer Incomplete Drying Alert Fix
 - **Root cause:** With "running only" firmware, the ESP32 stops sending when current drops below ~0.25A. The old code only called `check_fault_alerts()` on running messages, so the `current < 0.15` cycle-end check was never reached. If the cycle was the last of the day, no subsequent message arrived to trigger gap-based finalization, and the alert was never evaluated.
 - **Fix (3 parts):**
@@ -110,6 +121,10 @@ Because v3 stores **all** telemetry (not just running), database size will grow 
 
 ### 2026-05-26 — Gauge Pressure UI Layout
 - Dryer latest-data grid changed to 3-column layout. Gauge pressure and absolute pressure now wrap neatly below exhaust temp / RH / current.
+
+### 2026-05-26 — Excel Export Enhancement
+- **New column:** "Raw Absolute Pressure (hPa)" added to dryer exports.
+- **Renamed:** "Pressure" → "Gauge Pressure" for clarity.
 
 ### 2026-05-17
 - **Baseline removal feature** — New ` Remove Baseline` button appears when baseline exists. `DELETE /api/device/<id>/baseline_config` clears all baseline rows and sets `baseline_configured = FALSE`. Frontend wipes SPC lines from charts and refreshes UI state.

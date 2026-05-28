@@ -109,8 +109,9 @@ iot-monitoring/
 │
 ├── gas_dryer_test/           # Standalone PCB validation testbed
 │   ├── esp32dryertest.py     # Simple Flask backend for BME + SCT testing
-│   └── esp32dryertest/       # Arduino firmware (BME280 + SCT)
-│       └── esp32dryertest.ino
+│   ├── esp32dryertest/       # Arduino firmware (BME280 + SCT) — local only, credentials
+│   └── esp32dryertest_Clean/ # Sanitized firmware for GitHub (placeholders)
+│       └── esp32dryertest_Clean.ino
 │
 ├── iot_thesis/               # Original production application v1 (auto-baseline)
 │   ├── app.py                # Flask backend (MQTT, DB, API, auth, SPC)
@@ -119,8 +120,9 @@ iot-monitoring/
 │   │   ├── dashboard.html    # Main monitoring dashboard
 │   │   ├── login.html
 │   │   └── signup.html
-│   └── Update_SensorNode/    # Production ESP32 firmware (shared with v2)
-│       └── Update_SensorNode.ino
+│   ├── Update_SensorNode/    # Production ESP32 firmware — local only, credentials
+│   └── Update_SensorNode_Clean/  # Sanitized firmware for GitHub (placeholders)
+│       └── Update_SensorNode_Clean.ino
 │
 ├── iot_thesis_v2/            # Second generation v2 (manual SPC + fault alerts)
 │   ├── app.py                # Flask backend (manual baseline, fault detection, Discord)
@@ -128,21 +130,38 @@ iot-monitoring/
 │   │   ├── dashboard.html    # Inline baseline config, 4-chart layout
 │   │   ├── login.html
 │   │   └── signup.html
-│   ├── Update_SensorNode/    # Cleaned firmware (baseline:set only)
-│   ├── Update_SensorNode_Data_Auto/  # Continuous telemetry variant (no idle discard)
+│   ├── Update_SensorNode/    # Cleaned firmware (baseline:set only) — local only
+│   ├── Update_SensorNode_Clean/  # Sanitized for GitHub
+│   ├── Update_SensorNode_Data_Auto/  # Continuous telemetry variant — local only
+│   ├── Update_SensorNode_Data_Auto_Clean/  # Sanitized for GitHub
 │   ├── AGENTS.md
 │   ├── FAULTALERT.md
 │   └── README.md
 │
-└── iot_thesis_v3/            # Active deployment v3 (backend-driven CF/deductor)
-    ├── app.py                # Flask backend (MQTT, DB, auth, SPC, API)
+├── iot_thesis_v3/            # Active deployment v3 (backend-driven CF/deductor)
+│   ├── app.py                # Flask backend (MQTT, DB, auth, SPC, API)
+│   ├── templates/            # Jinja2 HTML templates
+│   │   ├── dashboard.html    # Main SPA (filtered/unfiltered toggle)
+│   │   ├── login.html
+│   │   └── signup.html
+│   ├── Update_SensorNode/    # Firmware: receives CF/deductor — local only
+│   ├── Update_SensorNode_Clean/  # Sanitized for GitHub
+│   ├── AGENTS.md
+│   └── README.md
+│
+└── iot_thesis_v4/            # Production-ready v4 (cleaned credentials + deployment)
+    ├── app.py                # Flask backend (no hardcoded defaults, env-only)
     ├── templates/            # Jinja2 HTML templates
-    │   ├── dashboard.html    # Main SPA (filtered/unfiltered toggle)
-    │   ├── login.html
-    │   └── signup.html
-    ├── Update_SensorNode/    # Firmware: receives CF/deductor, computes CurrentA
-    ├── AGENTS.md
-    └── README.md
+    ├── Update_SensorNode/    # Firmware: full TLS cert validation — local only
+    ├── Update_SensorNode_Clean/  # Sanitized for GitHub
+    ├── deployment/           # Ubuntu server deployment scripts
+    │   ├── .env.production   # Production env template (placeholders)
+    │   ├── nginx-iot-monitor.conf  # Reverse proxy + HTTPS config
+    │   ├── setup-ubuntu.sh   # Full automated server setup
+    │   ├── setup-firewall.sh # UFW rules
+    │   └── iot-backend.service  # systemd service file
+    ├── README.md
+    └── requirements.txt
 ```
 
 > **Note:** PCB design files, full documentation, and additional hardware assets will be added to this repository in future updates.
@@ -926,17 +945,20 @@ Collapsible panel with:
 
 ## Security Notice
 
-> ** Credential Rotation Required**
+> **Credentials Sanitized for Public Repository**
 >
-> During initial development, sensitive credentials (MQTT passwords, database passwords, API keys) were temporarily hardcoded in source files. These have been refactored to use environment variables with safe fallback defaults.
+> All hardcoded credentials have been removed from the source code:
+> - **Arduino firmware:** Real credential versions are stored locally and excluded from Git via `.gitignore`. Only `_Clean` variants with placeholder values (`YOUR_WIFI_SSID`, `YOUR_MQTT_BROKER`, etc.) are committed to GitHub.
+> - **Backend (v4):** All hardcoded MQTT defaults removed. `MQTT_HOST`, `MQTT_USER`, and `MQTT_PASS` now require environment variables. No fallback credentials exist.
+> - **Deployment scripts:** `.env.production` uses placeholders. Real values must be filled in during deployment.
 >
-> **If this repository is or will become public, you MUST rotate the following credentials immediately:**
-> - HiveMQ Cloud MQTT password
-> - PostgreSQL `postgres` user password
-> - Neon Cloud database password (if used)
-> - Flask secret key
+> **If you are forking this repository:** Create a local `.env` file with your own credentials. Never commit `.env` to Git.
 >
-> Rotate these values in your respective cloud dashboards and update your local `.env` file accordingly. The fallback values in the code should be treated as compromised.
+> **Note:** If this repository was ever public before sanitization, the following credentials should be considered compromised and rotated:
+> - HiveMQ Cloud MQTT password (`IoTTHESIS1`)
+> - Any previously hardcoded WiFi passwords
+>
+> Rotate these in your respective dashboards if applicable.
 
 ---
 
@@ -958,13 +980,24 @@ Collapsible panel with:
 | 12 | **3D Enclosure** | Low | STL files for sensor node housing |
 | 13 | **DB Migration Scripts** | Low | Formalize schema creation and versioned migrations |
 | 14 | **CI/CD** | Low | GitHub Actions for linting and basic tests |
+| 15 | **Network Deployment** | High | Public IP / subdomain / SSL via SGU network admin |
+| 16 | **Reverse Proxy** | Medium | nginx (or Caddy/IIS) for HTTPS on ports 80/443 |
 
 ### Completed Recently
+- **Credential Sanitization for GitHub** — Created `_Clean` folders for all 6 Arduino firmware versions with placeholder credentials. Real credential versions excluded via `.gitignore`. Pushed only clean versions to GitHub.
+- **v4 Backend Sanitization** — Removed all hardcoded MQTT defaults from `app.py`. `MQTT_HOST`, `MQTT_USER`, and `MQTT_PASS` now require environment variables with no fallbacks.
+- **v4 Production Deployment** — Added `deployment/` directory with Ubuntu setup scripts, nginx reverse proxy config, systemd service, firewall rules, and `.env.production` template.
+- **v4 ESP32 Security** — Replaced `setInsecure()` with `setCACert(ISRG_Root_X1)` for full TLS certificate validation against HiveMQ Cloud.
+- **Session Security & Rate Limiting (v3)** — Flask-Limiter added (login 30/min, signup 5/min). Session cookies hardened with Secure, HttpOnly, SameSite=Lax, 12-hour lifetime.
+- **Atmospheric Pressure Simplification** — Removed EMA calculation. Baseline updates to latest raw idle reading every 2 minutes with 15s settling guard. Null-safe handling added.
+- **Dryer Incomplete Drying Alert Fix (3 parts)** — Part A: global timeout check finalizes stale cycles after every MQTT message. Part B: fault checks run on all dryer messages. Part C: spike/belt-snap checks gated by `current >= 0.25`.
+- **Dryer Gauge Pressure UI** — Grid changed to `repeat(3, 1fr)` so gauge pressure and absolute pressure wrap neatly below exhaust temp/RH/current.
+- **Excel Export Enhancement** — Added "Raw Absolute Pressure (hPa)" column. Renamed "Pressure" → "Gauge Pressure".
 - **v3 Backend-Driven CF/Deductor** — Backend stores CF and deductor per appliance; node receives them via MQTT and computes `CurrentA` locally. Eliminates hardcoded sensor constants in firmware.
-- **v3 Continuous Telemetry** — All 10-second windows (running + idle) are stored in PostgreSQL. Filtered/unfiltered toggle lets users view idle gaps as gray dots on charts.
+- **v3 Continuous Telemetry** — All 10-second windows (running + idle) are stored in PostgreSQL. Filtered/unfiltered toggle lets users view idle gaps.
 - **v3 Delta RH Chart** — New 6th chart for HVAC showing `abs(RHreturn - RHsupply)` with SPC bands.
-- **v3 Dashboard Fixes** — chart6 destroy on filter toggle, cache-busting on history fetch, Delta RH section visibility when switching dryer→HVAC, dryer pushToCharts argument mapping fix, export modal sync with history range, "Include idle data" checkbox fix.
-- **v3 Inverter/Non-Inverter Pairing Fix** — Form field name `subtype` → `sub_type` aligned with backend. Card template now only shows sub_type for HVAC. DB updated for devices intended as inverter.
+- **v3 Dashboard Fixes** — chart6 destroy on filter toggle, cache-busting on history fetch, Delta RH section visibility, dryer pushToCharts mapping fix, export modal sync, "Include idle data" checkbox fix.
+- **v3 Inverter/Non-Inverter Pairing Fix** — Form field `subtype` → `sub_type` aligned with backend.
 - Web-triggered baseline only (removed physical button baseline)
 - Data gating: only running data inserted; idle updates `last_seen` only
 - Dryer end-of-cycle humidity alert system with configurable thresholds
@@ -980,24 +1013,24 @@ Collapsible panel with:
 - **Rebaseline button visibility** — only shown after baseline exists
 - **Excel export fixes** — empty data handling, old pairing data isolation
 - **Analytics & live data isolation** — filter by `appliances.created_at`
-- **Chart tooltip timestamp fix** — per-chart `timeLabels` prevent phantom timestamps when SPC lines render
-- **SPC line in-place updates** — avoids Chart.js metadata invalidation on baseline render
-- **`dryer_readings.time` timezone fix** — migrated from `TIMESTAMP` to `TIMESTAMPTZ` to prevent browser UTC misinterpretation
-- **Backend future-timestamp guard** — clamps incoming readings to `now + 1 min`; hardened staleness check detects future-dated rows
-- **BME280 diagnostic sketch** — `BME280_Test.ino` created for hardware debugging; tests I2C bus, detects lockups, tries both 0x76/0x77 addresses
-- **BME280 hardware failure confirmed & fixed** — Original sensor died (no response at 0x76 or 0x77). Replaced with 3.3V-native module; sensor now working correctly.
-- **Dryer cycle detection fix** — Gap threshold 600s → 120s (v3), `cycle_start` fixed at 0.4A (was `thresh_min * 0.8`), noise filter 3.0 min → 1.0 min. Fixes merged-cycle bug where multiple dryer runs were incorrectly grouped into one long cycle.
-- **BME280 invalid readings fix** — Removed false stuck detection and `recoverI2C()`. Simplified to proven gas-dryer-test config with 10 ms spacing between register reads, 3-attempt NaN retry, and auto-soft-reset on 5 consecutive NaN.
-- **BME280 null telemetry** — Invalid readings emit `null` instead of `0.0`; dashboard shows "—" for missing data.
-- **Dryer analytics motor current fix** — Collects all readings regardless of peak state; filters spikes at runtime with `filter_threshold = average * 1.15`. Motor baseline median now stable (~3.1 A).
-- **Dryer ignition count fix** — Added hysteresis (`_peak_max - 0.1`) and hard floor (`_peak_max > mean_current + 0.15`) to prevent over-counting gas ignitions. Applied to v1 and v2.
-- **Live vs Historical Ignition Unification (v2)** — Live `_check_dryer_faults()` and historical `dryer_analytics()` used completely different spike detection algorithms, causing live to under-count. Unified to identical 3-state logic with cycle-end confirmation.
-- **Prominence Threshold Fixed to 0.4A (v2)** — Replaced dynamic `max(0.35, mean*0.20)` with fixed 0.4A threshold. Cycle 2 now counts 4 spikes (was 3).
-- **Frontend Cache Fix (v2)** — Added cache-busting (`_t=Date.now()`) to analytics fetch and `updateDataTable()` refresh on live mode switch. Prevents stale cached data from showing different counts.
-- **Cycle-End Ordering Bug Fix (v2)** — Fixed `dryer_analytics()` gap/current-drop paths where `_confirm_peak()` was called AFTER `ignition_count` was computed, causing pending spikes to be missed. All 3 finalization paths now confirm before counting.
-- **BME280 Infinite Reset Loop Fix + Hardening (v2 Firmware)** — Added error check on `bme.begin()` and stabilization delays. Reduced I2C clock to 100kHz. Increased inter-register delays to 50ms. Added stuck-value detection (15 identical readings **while running** → soft reset), out-of-range detection (15 consecutive impossible readings → soft reset), and 5-second reset cooldown across all paths. Diagnostic logging of actual T/H/P values. Prevents infinite reset loops when wires are loose.
-- **LED TX Flash Removed (v2 Firmware)** — Removed LED toggle from `publishEventJson()` and `publishTelemetry()`. LED state machine is now the single source of truth; LED stays perfectly solid ON during running state with no flicker during MQTT transmissions.
-- **Energy kWh Integration** — Proper kWh calculation using `current × voltage × dt` for both HVAC daily totals and dryer per-cycle consumption. Added `appliances.voltage` column (default 220V).
+- **Chart tooltip timestamp fix** — per-chart `timeLabels` prevent phantom timestamps
+- **SPC line in-place updates** — avoids Chart.js metadata invalidation
+- **`dryer_readings.time` timezone fix** — migrated from `TIMESTAMP` to `TIMESTAMPTZ`
+- **Backend future-timestamp guard** — clamps incoming readings to `now + 1 min`
+- **BME280 diagnostic sketch** — `BME280_Test.ino` for hardware debugging
+- **BME280 hardware failure confirmed & fixed** — Replaced dead sensor with 3.3V-native module
+- **Dryer cycle detection fix** — Gap threshold 600s → 120s, `cycle_start` fixed at 0.4A
+- **BME280 invalid readings fix** — Simplified config, 3-attempt NaN retry, auto-soft-reset
+- **BME280 null telemetry** — Invalid readings emit `null`; dashboard shows "—"
+- **Dryer analytics motor current fix** — Runtime spike filtering, stable baseline (~3.1 A)
+- **Dryer ignition count fix** — Hysteresis + hard floor to prevent over-counting
+- **Live vs Historical Ignition Unification (v2)** — Unified spike detection algorithms
+- **Prominence Threshold Fixed to 0.4A (v2)** — Fixed threshold replaces dynamic calculation
+- **Frontend Cache Fix (v2)** — Cache-busting on analytics fetch
+- **Cycle-End Ordering Bug Fix (v2)** — Confirm peaks before counting
+- **BME280 Infinite Reset Loop Fix + Hardening (v2 Firmware)** — I2C clock reduced, stuck-value detection, reset cooldown
+- **LED TX Flash Removed (v2 Firmware)** — LED state machine is single source of truth
+- **Energy kWh Integration** — Proper kWh calculation using `current × voltage × dt`
 - **HVAC Analytics Daily Report** — Daily averages with integrated daily energy consumption (kWh). Backend detects cycles per day and sums energy across all cycles within that day.
 - **Dryer Analytics Energy Column** — Per-cycle energy (kWh) replacing raw current sum, using actual time deltas between readings.
 - **Date/Time Input Auto-Format** — Custom text inputs with digits-only typing and automatic `-` / `:` insertion. Parses `DD-MM-YYYY HH:MM:SS` to ISO for backend queries.
