@@ -7,14 +7,14 @@
 #include "esp_adc_cal.h"
 
 // --- WiFi ---
-const char* ssid = "SGU-Guest"; 
-const char* password = "Springbloom@2026"; 
+const char* ssid = "YOUR_WIFI_SSID"; 
+const char* password = "YOUR_WIFI_PASSWORD"; 
 
 // --- MQTT HiveMQ ---
-const char mqtt_server[] = "d57bf82836a7485d9b67b270c681fe6e.s1.eu.hivemq.cloud";
+const char mqtt_server[] = "YOUR_MQTT_BROKER";
 const int mqtt_port = 8883;
-const char mqtt_user[] = "esp32dryertest";
-const char mqtt_pass[] = "Esp32dryertest";
+const char mqtt_user[] = "YOUR_MQTT_USERNAME";
+const char mqtt_pass[] = "YOUR_MQTT_USERNAME";
 
 // --- Pins ---
 #define PINI2CSDA 8
@@ -130,7 +130,7 @@ void flushBuffer() {
   }
   buffer_count = 0; 
   buffer_overflow = false;
-  Serial.println("✅ Buffer flushed");
+  Serial.println("Buffer flushed");
 }
 
 void setup() {
@@ -153,7 +153,7 @@ void setup() {
   // I2C & BME
   Wire.begin(PINI2CSDA, PINI2CSCL);
   if (!bme.begin(0x76)) {
-    Serial.println("❌ BME FAIL");
+    Serial.println("BME FAIL");
     while(1) {
       digitalWrite(LED_PIN, HIGH);
       delay(100);
@@ -161,7 +161,7 @@ void setup() {
       delay(200);
     }
   }
-  Serial.println("✅ BME OK");
+  Serial.println("BME OK");
 
   bme.setSampling(Adafruit_BME280::MODE_NORMAL,
                   Adafruit_BME280::SAMPLING_X2,
@@ -180,7 +180,7 @@ void setup() {
     Serial.print(".");
   }
   wifi_ok = true;
-  Serial.println("\n✅ WiFi: " + WiFi.localIP().toString());
+  Serial.println("\nWiFi: " + WiFi.localIP().toString());
 
   // MQTT Setup
   net.setInsecure();
@@ -195,7 +195,7 @@ void setup() {
     Serial.print(".");
   }
   mqtt_ok = true;
-  Serial.println("\n✅ MQTT OK!");
+  Serial.println("\nMQTT OK!");
 
   // Subscribe AFTER connecting
   mqttClient.subscribe(sub_topic);
@@ -204,7 +204,7 @@ void setup() {
   mqttClient.beginMessage(pub_topic);
   mqttClient.print("{\"device\":\"BME_DRYER_01\",\"t_exhaust\":0,\"rh_exhaust\":0,\"p_exhaust\":0,\"current\":0,\"ago_ms\":0}"); 
   mqttClient.endMessage();
-  Serial.println("📡 Sent boot ping to test backend connection...");
+  Serial.println("Sent boot ping to test backend connection...");
 
   buffer_count = 0;
   buffer_head = 0;
@@ -259,7 +259,7 @@ void loop() {
 
   // --- STATE CHANGE ---
   if (is_appliance_running && !was_appliance_running) {
-    Serial.println("🔥 Dryer turned ON! Probing backend...");
+    Serial.println("Dryer turned ON! Probing backend...");
     if (mqtt_ok) {
       mqttClient.beginMessage(pub_topic);
       mqttClient.print("{\"device\":\"BME_DRYER_01\",\"t_exhaust\":0,\"rh_exhaust\":0,\"p_exhaust\":0,\"current\":0,\"ago_ms\":0}"); 
@@ -274,7 +274,7 @@ void loop() {
       mqttClient.beginMessage(pub_topic);
       mqttClient.print("{\"device\":\"BME_DRYER_01\",\"t_exhaust\":0,\"rh_exhaust\":0,\"p_exhaust\":0,\"current\":0,\"ago_ms\":0}"); 
       mqttClient.endMessage();
-      Serial.println("📡 Sent idle ping to backend...");
+      Serial.println("Sent idle ping to backend...");
       lastPing = millis();
     }
   }
@@ -287,17 +287,17 @@ void loop() {
   static unsigned long last_reconnect_attempt = 0;
   if (!wifi_ok) {
     if (millis() - last_reconnect_attempt > 10000) {
-      Serial.println("🔄 Wi-Fi disconnected. Attempting reconnect...");
+      Serial.println("Wi-Fi disconnected. Attempting reconnect...");
       WiFi.disconnect();
       WiFi.begin(ssid, password);
       last_reconnect_attempt = millis();
     }
   } else if (!mqtt_ok) {
     if (millis() - last_reconnect_attempt > 10000) {
-      Serial.println("🔄 MQTT disconnected. Attempting reconnect...");
+      Serial.println("MQTT disconnected. Attempting reconnect...");
       if (mqttClient.connect(mqtt_server, mqtt_port)) {
         mqttClient.subscribe(sub_topic);
-        Serial.println("✅ MQTT Reconnected!");
+        Serial.println("MQTT Reconnected!");
         lastHeartbeat = millis(); 
         backend_ack = true;
       }
@@ -334,7 +334,7 @@ void loop() {
        static int idle_counter = 0;
        idle_counter++;
        if (idle_counter >= SAMPLES_NEEDED) {
-           Serial.printf("💤 Dryer Idle | Current SCT-013 Reading: %.3fA\n", current_val);
+           Serial.printf("Dryer Idle | Current SCT-013 Reading: %.3fA\n", current_val);
            idle_counter = 0;
        }
     }
@@ -365,9 +365,9 @@ void loop() {
 
           if (all_ok) {
             flushBuffer(); 
-            Serial.printf("✅ LIVE AVG T:%.1f°C RH:%.1f%% P:%.0fhPa I:%.2fA\n", avg_t, avg_rh, avg_p, avg_current);
+            Serial.printf("LIVE AVG T:%.1f°C RH:%.1f%% P:%.0fhPa I:%.2fA\n", avg_t, avg_rh, avg_p, avg_current);
           } else {
-            Serial.printf("💾 OFFLINE BUFFERING [%d/%d stored in RAM] -> T:%.1f°C I:%.2fA\n", 
+            Serial.printf("OFFLINE BUFFERING [%d/%d stored in RAM] -> T:%.1f°C I:%.2fA\n", 
                           buffer_count, MAX_BUFFER, avg_t, avg_current);
             
             if (mqtt_ok) {
@@ -375,7 +375,7 @@ void loop() {
                // Send zeros for probe so it doesn't duplicate in the DB
                mqttClient.print("{\"device\":\"BME_DRYER_01\",\"t_exhaust\":0,\"rh_exhaust\":0,\"p_exhaust\":0,\"current\":0,\"ago_ms\":0}"); 
                mqttClient.endMessage();
-               Serial.println("📡 Sent probe to test if Python backend is awake...");
+               Serial.println("Sent probe to test if Python backend is awake...");
             }
           }
 
@@ -383,11 +383,11 @@ void loop() {
           sum_t = 0.0; sum_rh = 0.0; sum_p = 0.0; sum_current = 0.0;
         }
       } else {
-        Serial.println("❌ BME read NAN");
+        Serial.println("BME read NAN");
       }
     } else {
       if (bme_sample_count > 0) {
-        Serial.println("🛑 Appliance stopped. Discarding partial samples.");
+        Serial.println("Appliance stopped. Discarding partial samples.");
         bme_sample_count = 0;
         sum_t = 0.0; sum_rh = 0.0; sum_p = 0.0; sum_current = 0.0;
       }

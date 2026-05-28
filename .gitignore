@@ -83,6 +83,21 @@ build/
 *.tmp
 
 # ========================================
+# Binary Archives
+# ========================================
+*.zip
+
+# ========================================
+# Arduino Firmware — Real (credentials, local only)
+# ========================================
+iot_thesis/Update_SensorNode/Update_SensorNode.ino
+iot_thesis_v2/Update_SensorNode/
+iot_thesis_v2/Update_SensorNode_Data_Auto/
+iot_thesis_v3/Update_SensorNode/
+iot_thesis_v4/Update_SensorNode/
+gas_dryer_test/esp32dryertest/
+
+# ========================================
 # Agent Documentation (internal)
 # ========================================
 AGENTS.md

@@ -16,16 +16,16 @@
 // =========================
 // WIFI CONFIG
 // =========================
-const char* WIFI_SSID = "TERAMADE";
-const char* WIFI_PASS = "goodjob01";
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
 
 // =========================
 // MQTT CONFIG
 // =========================
-const char* mqtt_server = "d57bf82836a7485d9b67b270c681fe6e.s1.eu.hivemq.cloud";
+const char* mqtt_server = "YOUR_MQTT_BROKER";
 const int mqtt_port = 8883;
-const char* mqtt_user = "esp32user";
-const char* mqtt_pass = "IoTTHESIS1";
+const char* mqtt_user = "YOUR_MQTT_USERNAME";
+const char* mqtt_pass = "YOUR_MQTT_PASSWORD";
 
 // =========================
 // PORT PIN MAP
@@ -974,9 +974,9 @@ void setup() {
   Wire.begin(PINI2CSDA, PINI2CSCL);
   Wire.setClock(100000L);
   if (!bme.begin(0x76, &Wire)) {
-    Serial.println("❌ BME280 not found at 0x76");
+    Serial.println("BME280 not found at 0x76");
   } else {
-    Serial.println("✅ BME280 OK");
+    Serial.println("BME280 OK");
     delay(100);
     bme.setSampling(Adafruit_BME280::MODE_NORMAL,
                     Adafruit_BME280::SAMPLING_X2,
@@ -1163,9 +1163,8 @@ void loop() {
 
   if (sampleCount >= MAX_SAMPLES) {
     float avgCurrent = validCurrentA > 0 ? sumCurrentA / validCurrentA : 0.0;
-    // Data Auto: send telemetry continuously once calibration/pairing is complete
-    bool shouldSend = calibrationAcked;
-    if (shouldSend) {
+    // Only send telemetry when appliance is running AND calibration is done (use true average, not last sample)
+    if (calibrationAcked && avgCurrent >= 0.25) {
       String basePayload = buildTelemetryPayload();
       resetAverages();
 

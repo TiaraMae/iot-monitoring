@@ -11,20 +11,57 @@
 #include <math.h>
 #include <esp_adc_cal.h>
 #include <Preferences.h>
+#include <esp_task_wdt.h>
 
 // =========================
 // WIFI CONFIG
 // =========================
-const char* WIFI_SSID = "S23";
-const char* WIFI_PASS = "goodjob01";
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASS = "YOUR_WIFI_PASSWORD";
 
 // =========================
 // MQTT CONFIG
 // =========================
-const char* mqtt_server = "d57bf82836a7485d9b67b270c681fe6e.s1.eu.hivemq.cloud";
+const char* mqtt_server = "YOUR_MQTT_BROKER";
 const int mqtt_port = 8883;
-const char* mqtt_user = "esp32user";
-const char* mqtt_pass = "IoTTHESIS1";
+const char* mqtt_user = "YOUR_MQTT_USERNAME";
+const char* mqtt_pass = "YOUR_MQTT_PASSWORD";
+
+// ISRG Root X1 CA Certificate (Let's Encrypt / HiveMQ Cloud)
+// Required for WiFiClientSecure to validate the broker TLS certificate
+// Source: https://letsencrypt.org/certs/isrgrootx1.pem
+const char* ca_cert =
+"-----BEGIN CERTIFICATE-----\n"
+"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\n"
+"-----END CERTIFICATE-----\n";
 
 // =========================
 // PORT PIN MAP
@@ -84,10 +121,11 @@ Preferences prefs;
 String applianceType = "unpaired";   // unpaired, HVAC, Dryer
 bool isPaired = false;
 
+float nodeCf = 0.0;        // Calibration factor from backend
+float nodeDeductor = 0.0;  // Deductor from backend
+
 bool calibrationAcked = false;
 bool calibrationSavePending = false;
-
-bool baselineInProgress = false;
 
 bool maintenanceRequestPending = false;
 
@@ -103,7 +141,38 @@ float sumDHT1T = 0, sumDHT1H = 0;
 float sumDHT2T = 0, sumDHT2H = 0;
 float sumDS18B20T = 0;
 float sumBME280T = 0, sumBME280H = 0, sumBME280P = 0;
-float sumCurrentA = 0;
+float sumCurrentA = 0.0;
+
+// Per-metric valid sample counters (decoupled from sampleCount timing)
+int validDHT1T = 0, validDHT1H = 0;
+int validDHT2T = 0, validDHT2H = 0;
+int validDS18B20T = 0;
+int validCurrentA = 0;
+
+// Last-known-good values for fallback when all samples in a window are invalid
+float lastGoodDHT1T = 0, lastGoodDHT1H = 0;
+float lastGoodDHT2T = 0, lastGoodDHT2H = 0;
+float lastGoodDS18B20T = 0;
+
+// DHT22 stuck-value detection (mirrors BME280 strategy)
+int dht1StuckCounter = 0, dht2StuckCounter = 0;
+unsigned long lastDhtResetMs = 0;
+// Per-window average tracking for stuck detection (checked every 10s, not every 2s)
+float prevWindowDHT1T = NAN, prevWindowDHT1H = NAN;
+float prevWindowDHT2T = NAN, prevWindowDHT2H = NAN;
+float currWindowDHT1T = NAN, currWindowDHT1H = NAN;
+float currWindowDHT2T = NAN, currWindowDHT2H = NAN;
+
+// =========================
+// BME280
+// =========================
+uint8_t bmeAddress = 0x76;
+int bmeValidSamples = 0;
+int bmeNanCounter = 0;
+int bmeStuckCounter = 0;
+float lastBt = NAN, lastBh = NAN, lastBp = NAN;
+int bmeOutOfRangeCounter = 0;
+unsigned long lastBmeResetMs = 0;
 
 // =========================
 // CONNECTION STATUS
@@ -119,7 +188,7 @@ unsigned long lastCheckinTime = 0;
 // LED STATE MACHINE
 // =========================
 unsigned long lastIdleBlink = 0;
-float lastAvgCurrent = 0.0;
+float lastAvgCurrent = 0.0;  // For LED state machine
 
 // =========================
 // CALIBRATION STATE
@@ -248,17 +317,14 @@ void publishEventJson(const String& json) {
   Serial.println(topic);
   Serial.println(json);
 
-  digitalWrite(PINLED, LOW);
   client.publish(topic.c_str(), json.c_str());
-  delay(30);
-  digitalWrite(PINLED, HIGH);
 }
 
-void publishTelemetry(const String& payload) {
+bool publishTelemetry(const String& payload) {
   if (!client.connected()) {
     Serial.println("TX TELEMETRY skipped: MQTT not connected");
     Serial.println(payload);
-    return;
+    return false;
   }
 
   String topic = "iot/nodes/" + deviceMac + "/telemetry";
@@ -266,10 +332,12 @@ void publishTelemetry(const String& payload) {
   Serial.println(topic);
   Serial.println(payload);
 
-  digitalWrite(PINLED, LOW);
-  client.publish(topic.c_str(), payload.c_str());
-  delay(30);
-  digitalWrite(PINLED, HIGH);
+  bool ok = client.publish(topic.c_str(), payload.c_str());
+
+  if (!ok) {
+    Serial.println("TX TELEMETRY FAILED: publish returned false");
+  }
+  return ok;
 }
 
 unsigned long lastConfigRequestTime = 0;
@@ -284,7 +352,6 @@ void requestBackendConfig() {
 void resetRuntimeFlowForPair() {
   calibrationAcked = false;
   calibrationSavePending = false;
-  baselineInProgress = false;
   maintenanceRequestPending = false;
   calibState = CALIBIDLE;
 }
@@ -303,6 +370,8 @@ void applyApplianceType(const String& newType) {
     prefs.begin("nodecfg", false);
     prefs.remove("paired");
     prefs.remove("type");
+    prefs.remove("cf");
+    prefs.remove("deductor");
     prefs.end();
 
     if (wasPaired) {
@@ -402,6 +471,26 @@ void callback(char* topic, byte* payload, unsigned int length) {
         return;
     }
 
+    // Calibration factor / deductor from backend
+    if (message.startsWith("setcf:")) {
+        String val = message.substring(6);
+        nodeCf = val.toFloat();
+        prefs.begin("nodecfg", false);
+        prefs.putFloat("cf", nodeCf);
+        prefs.end();
+        Serial.print("RX CF="); Serial.println(nodeCf);
+        return;
+    }
+    if (message.startsWith("setdeductor:")) {
+        String val = message.substring(12);
+        nodeDeductor = val.toFloat();
+        prefs.begin("nodecfg", false);
+        prefs.putFloat("deductor", nodeDeductor);
+        prefs.end();
+        Serial.print("RX DEDUCTOR="); Serial.println(nodeDeductor);
+        return;
+    }
+
     // --- STATE RESTORE HANDLERS ---
     if (message == "maintenancedenied") {
         Serial.println("MAINTENANCE DENIED -> status not ready");
@@ -428,7 +517,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
     // Calibration
     if (message == "startcalibration") {
         Serial.println("BACKEND CONFIRMED -> calibration start");
-        beepConfirmed();
+        beepShort(1, 120, 0);
         calibState = CALIBBASELINEWAIT;
         calibStartedAt = millis();
         calibLastCheckAt = 0;
@@ -460,26 +549,10 @@ void callback(char* topic, byte* payload, unsigned int length) {
         return;
     }
 
-    // Baseline (web-triggered only)
-    if (message == "baselinestartack") {
-        Serial.println("BACKEND CONFIRMED -> baseline recording started");
-        beepConfirmed();
-        calibState = CALIBIDLE;
-        baselineInProgress = true;
-        printWorkflow();
-        return;
-    }
-    if (message == "baselinesuccessack") {
-        Serial.println("BACKEND SUCCESS -> baseline recording complete");
+    // Baseline configured (v2 manual input)
+    if (message == "baseline:set") {
+        Serial.println("BACKEND -> baseline configuration acknowledged");
         beepSuccess();
-        baselineInProgress = false;
-        printWorkflow();
-        return;
-    }
-    if (message == "baselinefailack") {
-        Serial.println("BACKEND CANCEL/FAIL -> baseline recording rejected or cancelled");
-        beepLongFailTwice();
-        baselineInProgress = false;
         printWorkflow();
         return;
     }
@@ -495,7 +568,7 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
     // Busy / generic deny
     if (message == "actiondenied:busy") {
-        if (calibState == CALIBBASELINEWAIT || calibState == CALIBRUNNING || baselineInProgress || calibrationSavePending) {
+        if (calibState == CALIBBASELINEWAIT || calibState == CALIBRUNNING || calibrationSavePending) {
             Serial.println("BACKEND DENY -> Ignored (Device is already successfully busy)");
             return;
         }
@@ -521,17 +594,9 @@ void checkConnection() {
       ledState = !ledState;
       digitalWrite(PINLED, ledState);
     }
-  } else if (baselineInProgress) {
-    // Baselining: alternating fast (200ms) / slow (1000ms) blink
-    unsigned long blinkInterval = ledBlinkPhase ? 1000 : 200;
-    if (now - lastLedBlink >= blinkInterval) {
-      lastLedBlink = now;
-      ledState = !ledState;
-      digitalWrite(PINLED, ledState);
-      if (ledState == LOW) {
-        ledBlinkPhase = !ledBlinkPhase;
-      }
-    }
+  } else if (isRunningByCurrent(lastAvgCurrent)) {
+    // Running: solid ON
+    digitalWrite(PINLED, HIGH);
   } else if (WiFi.status() != WL_CONNECTED) {
     // WiFi down: fast blink (200ms)
     if (now - lastLedBlink >= 200) {
@@ -546,7 +611,7 @@ void checkConnection() {
       ledState = !ledState;
       digitalWrite(PINLED, ledState);
     }
-  } else if (lastAvgCurrent >= 0.4) {
+  } else if (isRunningByCurrent(lastAvgCurrent)) {
     // Running: solid LED
     digitalWrite(PINLED, HIGH);
   } else {
@@ -561,7 +626,7 @@ void checkConnection() {
 
   // --- CONNECTION DOWN BUZZER (every 10s) ---
   if ((WiFi.status() != WL_CONNECTED || !client.connected()) &&
-      (calibState == CALIBIDLE) && !baselineInProgress) {
+      (calibState == CALIBIDLE)) {
     if (now - lastConnBuzzer >= 10000) {
       lastConnBuzzer = now;
       beepShort(1, 120, 0);
@@ -613,18 +678,26 @@ void checkConnection() {
 // =========================
 // SENSOR READS
 // =========================
-double readCurrentIrms() {
+float readCurrentIrms() {
+  if (nodeCf <= 0.0 || nodeDeductor < 0.0) {
+    Serial.println("CURRENT READ SKIPPED: CF/deductor not set");
+    return 0.0;
+  }
+
   unsigned long startMillis = millis();
   long sum = 0;
   double sumSquared = 0;
   int count = 0;
 
   while (millis() - startMillis < 200) {
+    if (count % 25 == 0) {
+      delay(1);
+      esp_task_wdt_reset();
+    }
     long raw = analogRead(PINSCTADC);
     sum += raw;
     sumSquared += (double)raw * (double)raw;
     count++;
-    delay(1);
   }
 
   if (count == 0) return 0.0;
@@ -636,10 +709,16 @@ double readCurrentIrms() {
 
   float rmsADC = sqrt(variance);
   uint32_t trueVoltageMv = esp_adc_cal_raw_to_voltage((uint32_t)rmsADC, &adc1_chars);
-  float cf = (applianceType == "Dryer") ? 37.0 : 11.0;
-  float deductor = (applianceType == "Dryer") ? 0.111 : 0.033;
-  float currentVal = (trueVoltageMv / 1000.0) * cf - deductor;
-  return (currentVal > 0.0) ? currentVal : 0.0;
+
+  float rawAmps = (trueVoltageMv / 1000.0) * nodeCf;
+  float finalAmps = rawAmps - nodeDeductor;
+  if (finalAmps < 0) finalAmps = 0.0;
+
+  return finalAmps;
+}
+
+bool isRunningByCurrent(float currentA) {
+  return currentA >= 0.25;
 }
 
 SensorPair readHvacSensors() {
@@ -845,7 +924,6 @@ void handleButtons() {
     } else if (btn2State == 1 && now - btn2PressedAt >= 5000) {
       // 5-second threshold reached — send calibration request (HVAC only)
       btn2State = 2;
-      beepRequest();
       Serial.println("BUTTON 2 -> 5s threshold reached (calibration)");
       
       if (!isPaired) {
@@ -879,21 +957,47 @@ String buildTelemetryPayload() {
   payload += "\"calstate\":\"" + workflowLabel() + "\",";
 
   if (applianceType == "Dryer") {
-    payload += "\"BME280Temp\":" + jnum(sumBME280T / MAX_SAMPLES, 1) + ",";
-    payload += "\"BME280Hum\":" + jnum(sumBME280H / MAX_SAMPLES, 1) + ",";
-    payload += "\"BME280Pres\":" + jnum(sumBME280P / MAX_SAMPLES, 1) + ",";
+    if (bmeValidSamples > 0) {
+      payload += "\"BME280Temp\":" + jnum(sumBME280T / bmeValidSamples, 1) + ",";
+      payload += "\"BME280Hum\":" + jnum(sumBME280H / bmeValidSamples, 1) + ",";
+      payload += "\"BME280Pres\":" + jnum(sumBME280P / bmeValidSamples, 2) + ",";
+    } else {
+      payload += "\"BME280Temp\":null,";
+      payload += "\"BME280Hum\":null,";
+      payload += "\"BME280Pres\":null,";
+    }
   } else {
-    payload += "\"DHT1Temp\":" + jnum(sumDHT1T / MAX_SAMPLES, 1) + ",";
-    payload += "\"DHT1Hum\":" + jnum(sumDHT1H / MAX_SAMPLES, 1) + ",";
-    payload += "\"DHT2Temp\":" + jnum(sumDHT2T / MAX_SAMPLES, 1) + ",";
-    payload += "\"DHT2Hum\":" + jnum(sumDHT2H / MAX_SAMPLES, 1) + ",";
-    payload += "\"DS18B20Temp\":" + jnum(sumDS18B20T / MAX_SAMPLES, 1) + ",";
+    float avgDHT1T = validDHT1T > 0 ? sumDHT1T / validDHT1T : lastGoodDHT1T;
+    float avgDHT1H = validDHT1H > 0 ? sumDHT1H / validDHT1H : lastGoodDHT1H;
+    float avgDHT2T = validDHT2T > 0 ? sumDHT2T / validDHT2T : lastGoodDHT2T;
+    float avgDHT2H = validDHT2H > 0 ? sumDHT2H / validDHT2H : lastGoodDHT2H;
+    float avgDS18B20T = validDS18B20T > 0 ? sumDS18B20T / validDS18B20T : lastGoodDS18B20T;
+
+    // Store averages for per-window stuck detection
+    currWindowDHT1T = avgDHT1T;
+    currWindowDHT1H = avgDHT1H;
+    currWindowDHT2T = avgDHT2T;
+    currWindowDHT2H = avgDHT2H;
+
+    payload += "\"DHT1Temp\":" + jnum(avgDHT1T, 1) + ",";
+    payload += "\"DHT1Hum\":" + jnum(avgDHT1H, 1) + ",";
+    payload += "\"DHT2Temp\":" + jnum(avgDHT2T, 1) + ",";
+    payload += "\"DHT2Hum\":" + jnum(avgDHT2H, 1) + ",";
+    payload += "\"DS18B20Temp\":" + jnum(avgDS18B20T, 1) + ",";
+
+    // Update last-known-good values for next window's fallback
+    // Protect from poisoning by stuck values — only update if sensor is not flagged stuck
+    if (validDHT1T > 0 && dht1StuckCounter < 3) lastGoodDHT1T = avgDHT1T;
+    if (validDHT1H > 0 && dht1StuckCounter < 3) lastGoodDHT1H = avgDHT1H;
+    if (validDHT2T > 0 && dht2StuckCounter < 3) lastGoodDHT2T = avgDHT2T;
+    if (validDHT2H > 0 && dht2StuckCounter < 3) lastGoodDHT2H = avgDHT2H;
+    if (validDS18B20T > 0) lastGoodDS18B20T = avgDS18B20T;
   }
 
-  payload += "\"CurrentA\":" + jnum(sumCurrentA / MAX_SAMPLES, 3);
-  // Always include running/idle status
-  float avgCurrent = sumCurrentA / MAX_SAMPLES;
-  payload += ",\"status\":\"" + String(avgCurrent >= 0.4 ? "running" : "idle") + "\"";
+  float avgCurrentA = validCurrentA > 0 ? sumCurrentA / validCurrentA : 0.0;
+  payload += "\"CurrentA\":" + String(avgCurrentA, 3);
+  // Always include running/idle status based on computed current
+  payload += ",\"status\":\"" + String(isRunningByCurrent(avgCurrentA) ? "running" : "idle") + "\"";
   payload += "}";
 
   return payload;
@@ -901,11 +1005,18 @@ String buildTelemetryPayload() {
 
 void resetAverages() {
   sampleCount = 0;
+  bmeValidSamples = 0;
+
   sumDHT1T = sumDHT1H = 0;
   sumDHT2T = sumDHT2H = 0;
   sumDS18B20T = 0;
   sumBME280T = sumBME280H = sumBME280P = 0;
-  sumCurrentA = 0;
+  sumCurrentA = 0.0;
+
+  validDHT1T = validDHT1H = 0;
+  validDHT2T = validDHT2H = 0;
+  validDS18B20T = 0;
+  validCurrentA = 0;
 }
 
 // =========================
@@ -920,12 +1031,20 @@ void setup() {
   prefs.begin("nodecfg", true);
   bool savedPaired = prefs.getBool("paired", false);
   String savedType = prefs.getString("type", "unpaired");
+  float savedCf = prefs.getFloat("cf", 0.0);
+  float savedDeductor = prefs.getFloat("deductor", 0.0);
   prefs.end();
   if (savedPaired && (savedType == "HVAC" || savedType == "Dryer")) {
     isPaired = true;
     applianceType = savedType;
     Serial.print("RESTORED FROM NVS -> ");
     Serial.println(applianceType);
+  }
+  if (savedCf > 0.0 && savedDeductor >= 0.0) {
+    nodeCf = savedCf;
+    nodeDeductor = savedDeductor;
+    Serial.print("RESTORED CF="); Serial.print(nodeCf);
+    Serial.print(" DEDUCTOR="); Serial.println(nodeDeductor);
   }
 
   pinMode(PINBUTTON, INPUT_PULLUP);
@@ -940,31 +1059,44 @@ void setup() {
   analogSetPinAttenuation(PINSCTADC, ADC_11db);
   esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11, ADC_WIDTH_BIT_12, 1100, &adc1_chars);
 
+  // Connect WiFi first so backend sees us quickly
+  setupWifi();
+
   dht1.begin();
   dht2.begin();
   dsCoil.begin();
+  dsCoil.setWaitForConversion(false);
 
   Wire.begin(PINI2CSDA, PINI2CSCL);
+  Wire.setClock(100000L);
   if (!bme.begin(0x76, &Wire)) {
-    Serial.println("BME280 not found at 0x76.");
+    Serial.println("BME280 not found at 0x76");
   } else {
-    Serial.println("BME280 OK.");
+    Serial.println("BME280 OK");
+    delay(100);
+    bme.setSampling(Adafruit_BME280::MODE_NORMAL,
+                    Adafruit_BME280::SAMPLING_X2,
+                    Adafruit_BME280::SAMPLING_X16,
+                    Adafruit_BME280::SAMPLING_X1,
+                    Adafruit_BME280::FILTER_X16,
+                    Adafruit_BME280::STANDBY_MS_62_5);
+    delay(50);
   }
 
   dsCoil.requestTemperatures();
   (void)dsCoil.getTempCByIndex(0);
 
-  // Warm-up DHT
-  for (int i = 0; i < 10; i++) {
-    float t1 = dht1.readTemperature();
-    float t2 = dht2.readTemperature();
-    if (!isnan(t1) && !isnan(t2)) break;
-    delay(2000);
+  // Warm-up DHT only for HVAC (Dryer doesn't use them)
+  if (applianceType == "HVAC") {
+    for (int i = 0; i < 10; i++) {
+      float t1 = dht1.readTemperature();
+      float t2 = dht2.readTemperature();
+      if (!isnan(t1) && !isnan(t2)) break;
+      delay(2000);
+    }
   }
 
-  setupWifi();
-
-  espClient.setInsecure();
+  espClient.setCACert(ca_cert);
   espClient.setTimeout(20);
 
   client.setServer(mqtt_server, mqtt_port);
@@ -976,10 +1108,12 @@ void setup() {
 }
 
 void loop() {
+  esp_task_wdt_reset();
   checkConnection();
 
   if (client.connected()) {
     client.loop();
+    delay(1);
   }
 
   handleButtons();
@@ -994,71 +1128,230 @@ void loop() {
     lastSampleTime = now;
 
     if (applianceType == "Dryer") {
-      float bt = bme.readTemperature();
-      float bh = bme.readHumidity();
-      float bp = bme.readPressure() / 100.0F;
+      auto softResetBME280 = [&]() {
+        Serial.println("BME280 soft reset");
+        Wire.beginTransmission(bmeAddress);
+        Wire.write(0xE0);
+        Wire.write(0xB6);
+        Wire.endTransmission();
+        delay(50);
+        bme.begin(bmeAddress, &Wire);
+        delay(100);
+        bme.setSampling(Adafruit_BME280::MODE_NORMAL,
+                        Adafruit_BME280::SAMPLING_X2,
+                        Adafruit_BME280::SAMPLING_X16,
+                        Adafruit_BME280::SAMPLING_X1,
+                        Adafruit_BME280::FILTER_X16,
+                        Adafruit_BME280::STANDBY_MS_62_5);
+        delay(50);
+        bmeNanCounter = 0;
+        bmeStuckCounter = 0;
+        bmeOutOfRangeCounter = 0;
+        lastBt = NAN;
+        lastBh = NAN;
+        lastBp = NAN;
+        lastBmeResetMs = millis();
+      };
 
-      sumBME280T += isnan(bt) ? 0 : bt;
-      sumBME280H += isnan(bh) ? 0 : bh;
-      sumBME280P += isnan(bp) ? 0 : bp;
+      // Soft-reset BME280 if it has been returning NaN for 5 consecutive samples
+      if (bmeNanCounter >= 5) {
+        if (millis() - lastBmeResetMs >= 5000) {
+          Serial.println("BME280 NaN x5 -> soft reset");
+          softResetBME280();
+        } else {
+          Serial.println("BME280 NaN x5 -> reset skipped (cooldown)");
+        }
+      }
+
+      float bt = NAN, bh = NAN, bp = NAN;
+      for (int attempt = 0; attempt < 3; attempt++) {
+        bt = bme.readTemperature();
+        delay(50);
+        bh = bme.readHumidity();
+        delay(50);
+        bp = bme.readPressure() / 100.0F;
+        if (!isnan(bt) && !isnan(bh) && !isnan(bp)) break;
+        delay(50);
+      }
+
+      if (!isnan(bt) && !isnan(bh) && !isnan(bp)) {
+        // Stuck-value detection — only when running (idle readings are naturally stable)
+        if (isRunningByCurrent(lastAvgCurrent)) {
+          if (bt == lastBt && bh == lastBh && bp == lastBp) {
+            bmeStuckCounter++;
+            Serial.printf("BME280 stuck (%d/15): T=%.1f H=%.1f P=%.1f\n",
+                          bmeStuckCounter, bt, bh, bp);
+            if (bmeStuckCounter >= 15) {
+              if (millis() - lastBmeResetMs >= 5000) {
+                Serial.println("BME280 stuck x15 -> soft reset");
+                softResetBME280();
+              } else {
+                Serial.println("BME280 stuck x15 -> reset skipped (cooldown)");
+              }
+            }
+          } else {
+            bmeStuckCounter = 0;
+          }
+        } else {
+          bmeStuckCounter = 0;  // reset counter when idle
+        }
+
+        // Out-of-range / corrupted detection
+        if (bt > 85.0 || bp < 800.0 || bt < -40.0 || bp > 1100.0) {
+          bmeOutOfRangeCounter++;
+          Serial.printf("BME280 out of range (%d/15): T=%.1f H=%.1f P=%.1f\n",
+                        bmeOutOfRangeCounter, bt, bh, bp);
+          if (bmeOutOfRangeCounter >= 15) {
+            if (millis() - lastBmeResetMs >= 5000) {
+              Serial.println("BME280 out of range x15 -> soft reset");
+              softResetBME280();
+            } else {
+              Serial.println("BME280 out of range x15 -> reset skipped (cooldown)");
+            }
+            bmeOutOfRangeCounter = 0;
+          }
+        } else {
+          bmeOutOfRangeCounter = 0;
+        }
+
+        sumBME280T += bt;
+        sumBME280H += bh;
+        sumBME280P += bp;
+        bmeValidSamples++;
+        bmeNanCounter = 0;
+        lastBt = bt;
+        lastBh = bh;
+        lastBp = bp;
+      } else {
+        bmeNanCounter++;
+      }
     } else {
       float d1t = dht1.readTemperature();
       float d1h = dht1.readHumidity();
+      delay(1);
       float d2t = dht2.readTemperature();
       float d2h = dht2.readHumidity();
+      delay(1);
       dsCoil.requestTemperatures();
+      unsigned long dsWaitStart = millis();
+      while (millis() - dsWaitStart < 750) {
+        delay(1);
+        esp_task_wdt_reset();
+      }
       float dst = dsCoil.getTempCByIndex(0);
 
-      sumDHT1T += isnan(d1t) ? 0 : d1t;
-      sumDHT1H += isnan(d1h) ? 0 : d1h;
-      sumDHT2T += isnan(d2t) ? 0 : d2t;
-      sumDHT2H += isnan(d2h) ? 0 : d2h;
-      sumDS18B20T += (dst < -50 || dst > 120 || isnan(dst)) ? 0 : dst;
+      if (!isnan(d1t)) { sumDHT1T += d1t; validDHT1T++; }
+      if (!isnan(d1h)) { sumDHT1H += d1h; validDHT1H++; }
+      if (!isnan(d2t)) { sumDHT2T += d2t; validDHT2T++; }
+      if (!isnan(d2h)) { sumDHT2H += d2h; validDHT2H++; }
+      if (!isnan(dst) && dst > -50 && dst < 120) { sumDS18B20T += dst; validDS18B20T++; }
     }
 
-    double currentVal = readCurrentIrms();
-    if (!isnan(currentVal)) {
-      sumCurrentA += (currentVal > 0.0) ? currentVal : 0.0;
-      lastAvgCurrent = (currentVal > 0.0) ? currentVal : 0.0;  // Track latest reading for LED state machine
-    }
+    float currentVal = readCurrentIrms();
+    lastAvgCurrent = currentVal;  // Track instantaneous state for LED
+    sumCurrentA += currentVal;
+    validCurrentA++;
 
     sampleCount++;
   }
 
   if (sampleCount >= MAX_SAMPLES) {
-    // Only send telemetry when appliance is running
-    if (lastAvgCurrent >= 0.4) {
+    // Send telemetry continuously when calibration is done (running or idle)
+    if (calibrationAcked) {
       String basePayload = buildTelemetryPayload();
       resetAverages();
 
-      if (client.connected()) {
-        publishTelemetry(addAgeToPayload(basePayload, 0));
+      // DHT stuck-value detection — check once per averaged window (every 10s)
+      auto softResetDHT = [&]() {
+        Serial.println("DHT soft reset (re-initializing)");
+        dht1.begin();
+        dht2.begin();
+        delay(100);
+        dht1StuckCounter = 0;
+        dht2StuckCounter = 0;
+        prevWindowDHT1T = prevWindowDHT1H = prevWindowDHT2T = prevWindowDHT2H = NAN;
+        lastDhtResetMs = millis();
+      };
 
-        if (!offlineQueue.empty()) {
-          Serial.println("[BUFFER] Flushing " + String(offlineQueue.size()) + " buffered readings");
+      if (isRunningByCurrent(lastAvgCurrent)) {
+        if (!isnan(currWindowDHT1T) && !isnan(currWindowDHT1H) &&
+            !isnan(prevWindowDHT1T) && !isnan(prevWindowDHT1H) &&
+            fabs(currWindowDHT1T - prevWindowDHT1T) < 0.05 &&
+            fabs(currWindowDHT1H - prevWindowDHT1H) < 0.05) {
+          dht1StuckCounter++;
+          Serial.printf("DHT1 stuck (%d/3): T=%.1f H=%.1f\n", dht1StuckCounter, currWindowDHT1T, currWindowDHT1H);
+          if (dht1StuckCounter >= 3 && millis() - lastDhtResetMs >= 5000) {
+            softResetDHT();
+          }
+        } else {
+          dht1StuckCounter = 0;
         }
-        while (!offlineQueue.empty()) {
-          BufferedData item = offlineQueue.front();
-          unsigned long ageMs = millis() - item.timestamp;
-          publishTelemetry(addAgeToPayload(item.payload, ageMs));
-          offlineQueue.erase(offlineQueue.begin());
-          delay(120);
+
+        if (!isnan(currWindowDHT2T) && !isnan(currWindowDHT2H) &&
+            !isnan(prevWindowDHT2T) && !isnan(prevWindowDHT2H) &&
+            fabs(currWindowDHT2T - prevWindowDHT2T) < 0.05 &&
+            fabs(currWindowDHT2H - prevWindowDHT2H) < 0.05) {
+          dht2StuckCounter++;
+          Serial.printf("DHT2 stuck (%d/3): T=%.1f H=%.1f\n", dht2StuckCounter, currWindowDHT2T, currWindowDHT2H);
+          if (dht2StuckCounter >= 3 && millis() - lastDhtResetMs >= 5000) {
+            softResetDHT();
+          }
+        } else {
+          dht2StuckCounter = 0;
         }
       } else {
+        dht1StuckCounter = 0;
+        dht2StuckCounter = 0;
+      }
+
+      prevWindowDHT1T = currWindowDHT1T;
+      prevWindowDHT1H = currWindowDHT1H;
+      prevWindowDHT2T = currWindowDHT2T;
+      prevWindowDHT2H = currWindowDHT2H;
+
+      // Try to publish current payload; buffer it if publish fails or MQTT is down
+      bool published = false;
+      if (client.connected()) {
+        published = publishTelemetry(addAgeToPayload(basePayload, 0));
+      }
+      if (!published) {
         if ((int)offlineQueue.size() >= MAX_QUEUE_SIZE) {
           offlineQueue.erase(offlineQueue.begin());
         }
         offlineQueue.push_back({basePayload, millis()});
+        Serial.println("[BUFFER] Queued 1 reading (total: " + String(offlineQueue.size()) + ")");
+      }
+
+      // Flush buffered readings with stop-on-failure protection
+      if (!offlineQueue.empty() && client.connected()) {
+        Serial.println("[BUFFER] Flushing " + String(offlineQueue.size()) + " buffered readings");
+        size_t i = 0;
+        size_t flushed = 0;
+        const size_t MAX_FLUSH_PER_LOOP = 10;
+        while (i < offlineQueue.size() && flushed < MAX_FLUSH_PER_LOOP) {
+          BufferedData& item = offlineQueue[i];
+          unsigned long ageMs = millis() - item.timestamp;
+          bool ok = publishTelemetry(addAgeToPayload(item.payload, ageMs));
+          if (ok) {
+            offlineQueue.erase(offlineQueue.begin() + i);
+            flushed++;
+            delay(120);
+          } else {
+            Serial.println("[BUFFER] Flush halted at item " + String(i) + "/" + String(offlineQueue.size()) + " (publish failed)");
+            break;
+          }
+        }
+        Serial.println("[BUFFER] Flushed " + String(flushed) + "/" + String(flushed + offlineQueue.size()) + " readings");
       }
     } else {
-      // Idle: discard samples, do not send or buffer
+      // Not calibrated yet: discard samples
       resetAverages();
     }
   }
 
   // Periodic checkin when idle so backend doesn't mark us offline
   const unsigned long CHECKIN_INTERVAL_MS = 600000UL;  // 10 minutes
-  if (client.connected() && lastAvgCurrent < 0.4 && (millis() - lastCheckinTime >= CHECKIN_INTERVAL_MS)) {
+  if (client.connected() && !isRunningByCurrent(lastAvgCurrent) && (millis() - lastCheckinTime >= CHECKIN_INTERVAL_MS)) {
     publishCheckin();
   }
 }
