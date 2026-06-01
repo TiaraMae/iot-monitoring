@@ -23,6 +23,8 @@ from dotenv import load_dotenv
 
 from flask import Flask, request, jsonify, render_template, redirect, url_for, flash, send_file
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 app = Flask(__name__)
 load_dotenv()
@@ -30,6 +32,22 @@ load_dotenv()
 app.secret_key = os.getenv('FLASK_SECRET_KEY')
 if not app.secret_key:
     raise RuntimeError("FLASK_SECRET_KEY environment variable is required")
+
+# --- SESSION SECURITY ---
+app.config.update(
+    SESSION_COOKIE_SECURE=True,      # HTTPS only
+    SESSION_COOKIE_HTTPONLY=True,    # Prevent XSS access to cookie
+    SESSION_COOKIE_SAMESITE='Lax',   # CSRF protection
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+)
+
+# --- RATE LIMITING ---
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["200 per minute", "50 per second"],
+    storage_uri="memory://",
+)
 
 # --- CONFIGURATION ---
 MQTT_HOST = os.getenv("MQTT_HOST", "d57bf82836a7485d9b67b270c681fe6e.s1.eu.hivemq.cloud")
@@ -48,6 +66,7 @@ FAULT_ALERT_TRACKER = {}      # appliance_id -> {fault_type: {cycle_count, last_
 FAULT_ALERT_COOLDOWN = {}     # (appliance_id, fault_type) -> last_alert_timestamp
 DRYER_CYCLE_STATS = {}        # appliance_id -> {current_cycle: {start_time, motor_readings[], spike_peaks[], min_current}}
 HVAC_CYCLE_TRACKER = {}       # appliance_id -> {state, start_time, best_reading, peak_current, maintain_start}
+# DRYER_ATMOSPHERIC_TRACKER removed — atmospheric pressure is now user-set via API
 
 CLIENT_ID = f"FlaskBackend_{random.randint(10000, 99999)}"
 
@@ -116,6 +135,43 @@ def _run_startup_migrations():
             cur.execute("ALTER TABLE alerts ADD COLUMN severity VARCHAR(20) DEFAULT 'warning'")
             conn.commit()
             print("Migration applied: added 'severity' column to alerts")
+        # Add atmospheric_pressure to appliances
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'appliances' AND column_name = 'atmospheric_pressure'
+        """)
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE appliances ADD COLUMN atmospheric_pressure REAL")
+            conn.commit()
+            print("Migration applied: added 'atmospheric_pressure' column to appliances")
+        # Add abs_pressure to dryer_readings
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'dryer_readings' AND column_name = 'abs_pressure'
+        """)
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE dryer_readings ADD COLUMN abs_pressure REAL")
+            conn.commit()
+            print("Migration applied: added 'abs_pressure' column to dryer_readings")
+        # Add updated_at to appliances for pressure baseline tracking
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'appliances' AND column_name = 'updated_at'
+        """)
+        if not cur.fetchone():
+            cur.execute("ALTER TABLE appliances ADD COLUMN updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()")
+            conn.commit()
+            print("Migration applied: added 'updated_at' column to appliances")
+        # Allow NULL in spc_manual_baselines.lcl for pressure metric (mean + ucl only)
+        cur.execute("""
+            SELECT is_nullable FROM information_schema.columns
+            WHERE table_name = 'spc_manual_baselines' AND column_name = 'lcl'
+        """)
+        row = cur.fetchone()
+        if row and row[0] == 'NO':
+            cur.execute("ALTER TABLE spc_manual_baselines ALTER COLUMN lcl DROP NOT NULL")
+            conn.commit()
+            print("Migration applied: dropped NOT NULL constraint on 'lcl' column")
     except Exception as e:
         print(f"Startup migration error: {e}")
     finally:
@@ -142,6 +198,13 @@ def load_user(user_id):
     release_conn(conn)
     return User(row[0], row[1], row[2]) if row else None
 
+@login_manager.unauthorized_handler
+def unauthorized():
+    """Return 401 JSON for API requests instead of 302 redirect to prevent polling storms."""
+    if request.path.startswith('/api/'):
+        return jsonify({"error": "Unauthorized"}), 401
+    return redirect(url_for('login'))
+
 # --- CALIBRATION HELPERS ---
 def get_appliance_voltage(appliance_id):
     """Fetch appliance voltage (default 220.0 V for Indonesia)."""
@@ -158,6 +221,15 @@ def get_appliance_voltage(appliance_id):
     finally:
         cur.close()
         release_conn(conn)
+
+
+def _get_atmospheric_pressure(appliance_id, cur):
+    """Fetch user-set atmospheric pressure baseline from DB."""
+    if cur is None:
+        return None
+    cur.execute("SELECT atmospheric_pressure FROM appliances WHERE id = %s", (appliance_id,))
+    row = cur.fetchone()
+    return float(row[0]) if row and row[0] is not None else None
 
 
 def _compute_daily_energy(readings, voltage):
@@ -178,7 +250,7 @@ def _compute_daily_energy(readings, voltage):
                     energy_ws += cycle_readings[j-1][1] * voltage * dt
                 in_cycle = False
                 cycle_readings = []
-        if icompressor > 0.25 and not in_cycle:
+        if icompressor >= 0.25 and not in_cycle:
             in_cycle = True
             cycle_readings = [(time_val, icompressor)]
         elif in_cycle:
@@ -208,7 +280,7 @@ def _compute_energy_kwh(readings, voltage):
         prev_time, prev_current = readings[i-1]
         curr_time, curr_current = readings[i]
         gap = (curr_time - prev_time).total_seconds()
-        if gap <= 120 and prev_current > 0.25:
+        if gap <= 120 and prev_current >= 0.25:
             dt = gap
             energy_ws += prev_current * voltage * dt
     return round(energy_ws / 3_600_000, 4)
@@ -304,49 +376,55 @@ def get_appliance_name(appliance_id):
 # --- Discord fault alert templates: maintenance-ticket style ---
 FAULT_DISCORD_MAP = {
     'fault_dryer_incomplete_drying': {
-        'title': '🔵 Clothes Not Fully Dried',
+        'title': 'Clothes Not Fully Dried',
         'description': 'Dryer cycle completed but clothes retain excessive moisture.',
         'cause': 'Overloading, worn heating element, or short cycle.',
         'action': 'Reduce load size and run another cycle.',
     },
     'fault_dryer_roller_wear': {
-        'title': '🟠 Barrel Roller Worn Out',
+        'title': 'Barrel Roller Worn Out',
         'description': 'Motor is drawing more current than normal to maintain drum rotation.',
         'cause': 'Support rollers under the drum are worn, increasing mechanical friction.',
         'action': 'Inspect and replace drum support rollers.',
     },
     'fault_dryer_belt_snapped': {
-        'title': '🔴 Belt Snapped',
+        'title': 'Belt Snapped',
         'description': 'Drive belt connecting motor to drum has broken or slipped off.',
         'cause': 'Age, overloading, or misalignment.',
         'action': 'Replace drive belt immediately.',
     },
     'fault_dryer_lint_blockage': {
-        'title': '🔴 Lint Blockage Detected',
+        'title': 'Lint Blockage Detected',
         'description': 'Lint accumulation is restricting exhaust airflow.',
         'cause': 'Failure to clean lint filter or exhaust duct; exterior vent obstruction.',
         'action': 'Clean lint filter and inspect exhaust duct.',
     },
+    'fault_dryer_exhaust_ventilation_blockage': {
+        'title': 'Exhaust Ventilation Blockage',
+        'description': 'Exhaust airflow is severely restricted.',
+        'cause': 'Lint buildup, blocked duct, or exterior vent obstruction.',
+        'action': 'Clean lint filter, inspect exhaust duct, and check exterior vent.',
+    },
     'fault_hvac_dirty_filter': {
-        'title': '🟠 Dirty Indoor Filter',
+        'title': 'Dirty Indoor Filter',
         'description': 'Air filter is clogged, restricting airflow across the evaporator coil.',
         'cause': 'Neglected filter replacement; high dust environments.',
         'action': 'Replace or clean the indoor air filter.',
     },
     'fault_hvac_compressor_degradation': {
-        'title': '🟠 Compressor Performance Degradation',
+        'title': 'Compressor Performance Degradation',
         'description': 'Compressor is drawing more current than normal but cooling output is below baseline.',
         'cause': 'Worn compressor valves, aging compressor, or gradual refrigerant loss reducing efficiency.',
         'action': 'Schedule HVAC technician to inspect compressor amp draw and refrigerant charge.',
     },
     'fault_hvac_low_refrigerant': {
-        'title': '🔴 Low Refrigerant',
+        'title': 'Low Refrigerant',
         'description': 'Refrigerant charge is below specification.',
         'cause': 'Micro-leaks in coil or lines; improper initial charge; Schrader valve leaks.',
         'action': 'Contact HVAC technician to check for leaks and recharge.',
     },
     'fault_hvac_compressor_fault': {
-        'title': '🔴 Compressor Electrical Fault',
+        'title': 'Compressor Electrical Fault',
         'description': 'Compressor is drawing excessive current.',
         'cause': 'Failing compressor bearings, refrigerant overcharge, condenser blockage, or starter relay failure.',
         'action': 'Contact HVAC technician for compressor inspection.',
@@ -369,9 +447,9 @@ def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=
             # Severity-based color: critical = red, warning = amber/blue per fault type
             if severity == 'critical':
                 embed_color = 0xEF4444  # red
-                severity_prefix = "🚨 CRITICAL: "
+                severity_prefix = "CRITICAL: "
             else:
-                severity_prefix = "⚠️ WARNING: "
+                severity_prefix = "WARNING: "
                 warning_colors = {
                     'fault_dryer_incomplete_drying': 0x3B82F6,  # blue
                     'fault_dryer_roller_wear': 0xF59E0B,        # amber
@@ -384,9 +462,9 @@ def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=
                 "description": (
                     f"{message}\n\n"
                     f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📍 **Appliance:** {app_name or f'ID {appliance_id}'}\n"
-                    f"🔍 **Cause:** {fault_meta['cause']}\n"
-                    f"🔧 **Recommended Action:** {fault_meta['action']}"
+                    f"**Appliance:** {app_name or f'ID {appliance_id}'}\n"
+                    f"**Cause:** {fault_meta['cause']}\n"
+                    f"**Recommended Action:** {fault_meta['action']}"
                 ),
                 "color": embed_color,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -395,7 +473,7 @@ def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=
         else:
             # Generic fallback for any non-fault alert that still uses Discord
             embed = {
-                "title": f"🚨 {alert_type.replace('_', ' ').title()}",
+                "title": f"{alert_type.replace('_', ' ').title()}",
                 "description": message,
                 "color": 0x64748B,
                 "fields": [
@@ -427,7 +505,7 @@ def latest_row_for_appliance(appliance_id):
     dev_type, created_at = type_row[0], type_row[1]
     if "Dryer" in dev_type:
         cur.execute("""
-            SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor
+            SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor, dr.abs_pressure
             FROM dryer_readings dr
             JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
             JOIN appliances a ON a.id = sn.appliance_id
@@ -461,7 +539,7 @@ def latest_n_rows_for_appliance(appliance_id, limit, start=None, end=None, filte
     if start and end:
         if "Dryer" in dev_type:
             cur.execute(f"""
-                SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor
+                SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor, dr.abs_pressure
                 FROM dryer_readings dr
                 JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
                 WHERE sn.appliance_id = %s AND dr.time >= %s AND dr.time <= %s AND dr.time >= %s{current_filter}
@@ -478,7 +556,7 @@ def latest_n_rows_for_appliance(appliance_id, limit, start=None, end=None, filte
     else:
         if "Dryer" in dev_type:
             cur.execute(f"""
-                SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor
+                SELECT dr.time, dr.texhaust, dr.rh_exhaust, dr.pressure, dr.imotor, dr.abs_pressure
                 FROM dryer_readings dr
                 JOIN sensor_nodes sn ON dr.sensor_node_id = sn.id
                 WHERE sn.appliance_id = %s AND dr.time >= %s{current_filter}
@@ -614,7 +692,7 @@ def send_node_command(mac, command_str):
 
 # --- SPC BASELINE HELPERS ---
 HVAC_METRICS = ['deltat', 'current']
-DRYER_METRICS = ['texhaust', 'rhexhaust', 'current']
+DRYER_METRICS = ['texhaust', 'rhexhaust', 'current', 'pressure']
 
 def get_spc_baselines(appliance_id):
     """Fetch manual SPC baselines from spc_manual_baselines table."""
@@ -629,21 +707,37 @@ def get_spc_baselines(appliance_id):
     release_conn(conn)
     result = {}
     for r in rows:
-        result[r[0]] = {'ucl': float(r[1]), 'lcl': float(r[2]), 'mean': float(r[3])}
+        result[r[0]] = {
+            'ucl': float(r[1]),
+            'lcl': float(r[2]) if r[2] is not None else None,
+            'mean': float(r[3])
+        }
     return result
 
 def save_spc_baselines(appliance_id, baselines):
-    """baselines: dict of metric_name -> {ucl, lcl}"""
+    """baselines: dict of metric_name -> {ucl, lcl} or {mean} or {mean, ucl}"""
     conn = get_conn()
     if not conn: return False, "DB connection error"
     cur = conn.cursor()
     try:
         for metric, vals in baselines.items():
-            ucl = float(vals['ucl'])
-            lcl = float(vals['lcl'])
-            if ucl <= lcl:
-                return False, f"UCL must be greater than LCL for {metric}"
-            mean = (ucl + lcl) / 2.0
+            if metric == 'pressure':
+                # Pressure: user provides mean + ucl, no lcl
+                mean = float(vals['mean'])
+                ucl = float(vals['ucl'])
+                lcl = None
+            elif 'mean' in vals and 'ucl' not in vals and 'lcl' not in vals:
+                # Dryer current: mean only → auto ±20%
+                mean = float(vals['mean'])
+                ucl = mean * 1.20
+                lcl = mean * 0.80
+            else:
+                # Standard metrics: ucl + lcl
+                ucl = float(vals['ucl'])
+                lcl = float(vals['lcl'])
+                if ucl <= lcl:
+                    return False, f"UCL must be greater than LCL for {metric}"
+                mean = (ucl + lcl) / 2.0
             cur.execute("""
                 INSERT INTO spc_manual_baselines (appliance_id, metric_name, ucl, lcl, mean, updated_at)
                 VALUES (%s, %s, %s, %s, %s, NOW())
@@ -704,6 +798,7 @@ def _check_dryer_faults(appliance_id, reading_data, baselines, now, cur, conn):
     current = reading_data.get('current', 0.0)
     texhaust = reading_data.get('texhaust', 0.0)
     rhexhaust = reading_data.get('rhexhaust', 0.0)
+    gauge_pressure = reading_data.get('pressure')
     actual_time = reading_data.get('_actual_time', now)
 
     stats = DRYER_CYCLE_STATS.setdefault(appliance_id, {})
@@ -718,11 +813,12 @@ def _check_dryer_faults(appliance_id, reading_data, baselines, now, cur, conn):
             stats = DRYER_CYCLE_STATS[appliance_id] = {}
 
     # Start new cycle
-    if current > 0.25 and not stats.get('in_cycle', False):
+    if current >= 0.25 and not stats.get('in_cycle', False):
         stats = DRYER_CYCLE_STATS[appliance_id] = {
             'in_cycle': True,
             'start_time': actual_time,
             'last_time': actual_time,
+            'idle_start_time': None,
             'motor_readings': [current],
             'spike_peaks': [],
             'spike_state': 'IDLE',
@@ -731,6 +827,7 @@ def _check_dryer_faults(appliance_id, reading_data, baselines, now, cur, conn):
             'prev_current': current,
             'min_current': current,
             'max_temp': texhaust,
+            'max_gauge_pressure': gauge_pressure if gauge_pressure is not None else 0.0,
             'temp_history': [texhaust],
             'rh_history': [rhexhaust] if rhexhaust is not None else [],
             'consecutive_below_lcl': 0,
@@ -741,67 +838,83 @@ def _check_dryer_faults(appliance_id, reading_data, baselines, now, cur, conn):
     # During active cycle
     if stats.get('in_cycle', False):
         stats['last_time'] = actual_time
-        stats['max_temp'] = max(stats.get('max_temp', texhaust), texhaust)
+        if texhaust is not None:
+            stats['max_temp'] = max(stats.get('max_temp', texhaust) if stats.get('max_temp') is not None else texhaust, texhaust)
+        if gauge_pressure is not None:
+            stats['max_gauge_pressure'] = max(stats.get('max_gauge_pressure', gauge_pressure) if stats.get('max_gauge_pressure') is not None else gauge_pressure, gauge_pressure)
         stats.setdefault('temp_history', []).append(texhaust)
         if rhexhaust is not None:
             stats.setdefault('rh_history', []).append(rhexhaust)
         stats['min_current'] = min(stats.get('min_current', 999.0), current)
 
-        prev = stats.get('prev_current', 0.0)
-        prominence = 0.40
-        state = stats.get('spike_state', 'IDLE')
-        spike_max = stats.get('spike_max', 0.0)
-        spike_valley = stats.get('spike_valley', 0.0)
+        # Real-time fault checks ONLY on running data (current >= 0.25)
+        # Idle messages update stats but do not trigger fault detection.
+        if current >= 0.25:
+            # Running: clear idle timer and continue normal processing
+            if stats.get('idle_start_time') is not None:
+                stats['idle_start_time'] = None
 
-        # Spike state machine (matches historical dryer_analytics logic)
-        if current > prev:
-            if state == 'FALLING':
-                # Confirm previous peak before starting new rise
-                if spike_max > 0:
-                    prom = spike_max - spike_valley
-                    if prom >= prominence and spike_max > mean_current + 0.15:
-                        stats.setdefault('spike_peaks', []).append(spike_max)
-                spike_max = 0.0
-                spike_valley = 0.0
-            if state in ('IDLE', 'FALLING'):
-                spike_valley = prev
-            state = 'RISING'
-            if current > spike_max:
-                spike_max = current
-        elif current < prev:
-            if state == 'RISING' and (spike_max <= 0.1 or current < spike_max - 0.1):
-                state = 'FALLING'
+            # Collect motor readings for end-of-cycle baseline median (only running data)
+            stats.setdefault('motor_readings', []).append(current)
+            prev = stats.get('prev_current', 0.0)
+            prominence = 0.40
+            state = stats.get('spike_state', 'IDLE')
+            spike_max = stats.get('spike_max', 0.0)
+            spike_valley = stats.get('spike_valley', 0.0)
 
-        stats['spike_state'] = state
-        stats['spike_max'] = spike_max
-        stats['spike_valley'] = spike_valley
+            # Spike state machine (matches historical dryer_analytics logic)
+            if current > prev:
+                if state == 'FALLING':
+                    # Confirm previous peak before starting new rise
+                    if spike_max > 0:
+                        prom = spike_max - spike_valley
+                        if prom >= prominence and spike_max > mean_current + 0.15:
+                            stats.setdefault('spike_peaks', []).append(spike_max)
+                    spike_max = 0.0
+                    spike_valley = 0.0
+                if state in ('IDLE', 'FALLING'):
+                    spike_valley = prev
+                state = 'RISING'
+                if current > spike_max:
+                    spike_max = current
+            elif current < prev:
+                if state == 'RISING' and (spike_max <= 0.1 or current < spike_max - 0.1):
+                    state = 'FALLING'
 
-        # Collect all readings for motor baseline median calculation
-        stats.setdefault('motor_readings', []).append(current)
+            stats['spike_state'] = state
+            stats['spike_max'] = spike_max
+            stats['spike_valley'] = spike_valley
+
+            # --- Belt snap detection (real-time) ---
+            current_lcl = baselines.get('current', {}).get('lcl')
+            current_ucl = baselines.get('current', {}).get('ucl')
+
+            if current_lcl is not None:
+                if current < current_lcl:
+                    stats['consecutive_below_lcl'] = stats.get('consecutive_below_lcl', 0) + 1
+                else:
+                    stats['consecutive_below_lcl'] = 0
+
+                if stats['consecutive_below_lcl'] >= 3 and not stats.get('belt_snap_triggered', False):
+                    _insert_fault_alert(
+                        appliance_id, 'fault_dryer_belt_snapped',
+                        f"Belt snapped - motor current dropped below LCL {current_lcl:.3f}A for 3 consecutive readings (last: {current:.3f}A)",
+                        current, current_lcl, 'critical', now, cur, conn)
+                    stats['belt_snap_triggered'] = True
+        else:
+            # Idle message during cycle — track sustained idle, reset fault trackers
+            stats['consecutive_below_lcl'] = 0
+
+            # Start idle timer if this is the first idle reading
+            if stats.get('idle_start_time') is None:
+                stats['idle_start_time'] = actual_time
+
+            idle_duration = (actual_time - stats['idle_start_time']).total_seconds()
+            if idle_duration >= 120:
+                _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn)
+                return
 
         stats['prev_current'] = current
-
-        # --- Belt snap detection (real-time) ---
-        # Only runs on running data (final_amps >= 0.25), so idle/pause gaps are excluded
-        current_lcl = baselines.get('current', {}).get('lcl')
-        current_ucl = baselines.get('current', {}).get('ucl')
-
-        if current_lcl is not None:
-            if current < current_lcl:
-                stats['consecutive_below_lcl'] = stats.get('consecutive_below_lcl', 0) + 1
-            else:
-                stats['consecutive_below_lcl'] = 0
-
-            if stats['consecutive_below_lcl'] >= 3 and not stats.get('belt_snap_triggered', False):
-                _insert_fault_alert(
-                    appliance_id, 'fault_dryer_belt_snapped',
-                    f"Belt snapped - motor current dropped below LCL {current_lcl:.3f}A for 3 consecutive readings (last: {current:.3f}A)",
-                    current, current_lcl, 'critical', now, cur, conn)
-                stats['belt_snap_triggered'] = True
-
-    # Cycle end by current drop
-    if current < 0.15 and stats.get('in_cycle', False):
-        _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn)
 
 
 def _compute_motor_baseline_median(motor_readings, filter_threshold=None):
@@ -826,6 +939,10 @@ def _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn):
     if not stats or not stats.get('in_cycle', False):
         return
 
+    # Use the cycle's actual last reading time for alerts, not the current 'now'
+    # which may be the start of the next cycle when gap-triggered.
+    cycle_end_time = stats.get('last_time', now)
+
     # Gate on baseline configured and alerts enabled
     cur.execute("SELECT baseline_configured, alert_enabled FROM appliances WHERE id = %s", (appliance_id,))
     app_info = cur.fetchone()
@@ -848,40 +965,34 @@ def _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn):
         if prom >= prominence and spike_max > mean_current + 0.15:
             stats.setdefault('spike_peaks', []).append(spike_max)
 
-    # Compute begin-of-cycle RH (first 6 readings or first 1 min equivalent)
-    begin_rh_avg = 0.0
-    if rh_history:
-        first_rh = rh_history[:6] if len(rh_history) > 6 else rh_history
-        begin_rh_avg = sum(first_rh) / len(first_rh)
-
     # Compute end-of-cycle RH (last 6 readings)
     end_rh_avg = 0.0
     if rh_history:
         last_rh = rh_history[-6:] if len(rh_history) > 6 else rh_history
         end_rh_avg = sum(last_rh) / len(last_rh)
 
-    # Compute end-of-cycle temp (last 6 readings)
-    temp_history = stats.get('temp_history', [])
-    end_temp_avg = 0.0
-    if temp_history:
-        last_temp = temp_history[-6:] if len(temp_history) > 6 else temp_history
-        end_temp_avg = sum(last_temp) / len(last_temp)
+    max_gauge_pressure = stats.get('max_gauge_pressure', 0.0)
 
-    # --- Lint Blockage ---
+    # --- Exhaust Ventilation Blockage ---
     rhexhaust_ucl = baselines.get('rhexhaust', {}).get('ucl')
     texhaust_ucl = baselines.get('texhaust', {}).get('ucl')
+    pressure_ucl = baselines.get('pressure', {}).get('ucl')
     if rhexhaust_ucl is not None and texhaust_ucl is not None:
         if end_rh_avg > rhexhaust_ucl and max_temp > texhaust_ucl:
-            # Critical if burning risk (temp > 100C), otherwise warning
-            if max_temp > 100.0:
+            if pressure_ucl is not None and max_gauge_pressure > pressure_ucl:
                 severity = 'critical'
-                msg = f"🔥 BURNING RISK - Lint blockage detected! End RH {end_rh_avg:.1f}% > UCL {rhexhaust_ucl:.1f}% and exhaust temp {max_temp:.1f}C > UCL {texhaust_ucl:.1f}C (CRITICAL: temp > 100C)"
+                msg = (f"CRITICAL - Exhaust ventilation blockage detected: gauge pressure {max_gauge_pressure:.2f} hPa > UCL {pressure_ucl:.2f} hPa, "
+                       f"end RH {end_rh_avg:.1f}% > UCL {rhexhaust_ucl:.1f}%, max temp {max_temp:.1f}°C > UCL {texhaust_ucl:.1f}°C")
+                _insert_fault_alert(
+                    appliance_id, 'fault_dryer_exhaust_ventilation_blockage',
+                    msg, max_gauge_pressure, pressure_ucl, severity, cycle_end_time, cur, conn)
             else:
                 severity = 'warning'
-                msg = f"Lint blockage detected - end RH {end_rh_avg:.1f}% > UCL {rhexhaust_ucl:.1f}% and exhaust temp {max_temp:.1f}C > UCL {texhaust_ucl:.1f}C"
-            _insert_fault_alert(
-                appliance_id, 'fault_dryer_lint_blockage',
-                msg, end_rh_avg, rhexhaust_ucl, severity, now, cur, conn)
+                msg = (f"Warning - High exhaust RH and temperature: end RH {end_rh_avg:.1f}% > UCL {rhexhaust_ucl:.1f}%, "
+                       f"max temp {max_temp:.1f}°C > UCL {texhaust_ucl:.1f}°C")
+                _insert_fault_alert(
+                    appliance_id, 'fault_dryer_exhaust_ventilation_blockage',
+                    msg, end_rh_avg, rhexhaust_ucl, severity, cycle_end_time, cur, conn)
 
     # --- Incomplete Drying ---
     # Check even if lint blockage fired (independent alert)
@@ -894,7 +1005,7 @@ def _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn):
             msg = f"Clothes not fully dried - end RH {end_rh_avg:.1f}% exceeds UCL {rhexhaust_ucl:.1f}%"
         _insert_fault_alert(
             appliance_id, 'fault_dryer_incomplete_drying',
-            msg, end_rh_avg, rhexhaust_ucl, severity, now, cur, conn)
+            msg, end_rh_avg, rhexhaust_ucl, severity, cycle_end_time, cur, conn)
 
     # --- Belt Snap (end-of-cycle backup) ---
     current_lcl = baselines.get('current', {}).get('lcl')
@@ -904,7 +1015,7 @@ def _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn):
             _insert_fault_alert(
                 appliance_id, 'fault_dryer_belt_snapped',
                 f"Belt snapped - last 3 motor readings ({last_3[-3]:.3f}A, {last_3[-2]:.3f}A, {last_3[-1]:.3f}A) all below LCL {current_lcl:.3f}A",
-                last_3[-1], current_lcl, 'critical', now, cur, conn)
+                last_3[-1], current_lcl, 'critical', cycle_end_time, cur, conn)
 
     # --- Roller Wear (end-of-cycle backup) ---
     current_ucl = baselines.get('current', {}).get('ucl')
@@ -916,7 +1027,7 @@ def _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn):
                 _insert_fault_alert(
                     appliance_id, 'fault_dryer_roller_wear',
                     f"Barrel roller worn out - motor baseline median {median_current:.3f}A exceeded UCL {current_ucl:.3f}A during cycle",
-                    median_current, current_ucl, 'warning', now, cur, conn)
+                    median_current, current_ucl, 'warning', cycle_end_time, cur, conn)
 
     # Clear cycle stats
     DRYER_CYCLE_STATS[appliance_id] = {}
@@ -925,7 +1036,7 @@ def _finalize_dryer_cycle(appliance_id, baselines, now, cur, conn):
 def _check_hvac_faults(appliance_id, reading_data, baselines, now, cur, conn, is_inverter):
     """HVAC fault detection with last-6-reading window evaluation (~1 min of data).
     Non-inverter: evaluates at 1 hour, then re-evaluates every additional hour while running.
-    Inverter: evaluates at 5 minutes when Treturn > 26.5C.
+    Inverter: single evaluation at 15 minutes when Treturn > 26.5C.
     Compressor fault (current > UCL) triggers IMMEDIATELY on any single reading."""
     current = reading_data.get('current', 0.0)
     deltat = reading_data.get('deltat', 0.0)
@@ -938,6 +1049,9 @@ def _check_hvac_faults(appliance_id, reading_data, baselines, now, cur, conn, is
         'last_evaluation_runtime': 0,
     })
 
+    # Use sensor-corrected time for all HVAC timing (matches actual compressor runtime)
+    eval_time = reading_data.get('_actual_time', now)
+
     def _add_to_buffer():
         buf = tracker['reading_buffer']
         buf.append({'deltat': deltat, 'current': current, 'treturn': treturn})
@@ -947,19 +1061,20 @@ def _check_hvac_faults(appliance_id, reading_data, baselines, now, cur, conn, is
     def _runtime_seconds():
         if tracker['start_time'] is None:
             return 0
-        return (now - tracker['start_time']).total_seconds()
+        return (eval_time - tracker['start_time']).total_seconds()
 
-    def _evaluate_if_ready(min_runtime, force=False):
-        """Evaluate if we've passed min_runtime since start or last evaluation."""
+    def _evaluate_if_ready(min_runtime, force=False, reevaluate=True):
+        """Evaluate if we've passed min_runtime since start or last evaluation.
+        If reevaluate=False, only evaluates once (first time)."""
         runtime = _runtime_seconds()
         last_eval = tracker['last_evaluation_runtime']
         if not tracker['reading_buffer']:
             return
         if force or runtime >= min_runtime:
-            if last_eval == 0 or (runtime - last_eval) >= min_runtime:
+            if last_eval == 0 or (reevaluate and (runtime - last_eval) >= min_runtime):
                 _evaluate_hvac_window(
                     appliance_id, tracker['reading_buffer'], baselines,
-                    runtime, now, cur, conn)
+                    runtime, eval_time, cur, conn)
                 tracker['last_evaluation_runtime'] = runtime
 
     def _reset_tracker():
@@ -974,14 +1089,14 @@ def _check_hvac_faults(appliance_id, reading_data, baselines, now, cur, conn, is
         _insert_fault_alert(
             appliance_id, 'fault_hvac_compressor_fault',
             f"Outdoor problem - Current {current:.2f}A exceeded UCL {current_ucl:.2f}A",
-            current, current_ucl, 'critical', now, cur, conn)
+            current, current_ucl, 'critical', eval_time, cur, conn)
 
     if not is_inverter:
         # --- NON-INVERTER ---
-        if current > 0.25:
+        if current >= 0.25:
             if tracker['state'] == 'IDLE':
                 tracker['state'] = 'RUNNING'
-                tracker['start_time'] = now
+                tracker['start_time'] = eval_time
                 tracker['reading_buffer'] = [{'deltat': deltat, 'current': current, 'treturn': treturn}]
                 tracker['last_evaluation_runtime'] = 0
             elif tracker['state'] == 'RUNNING':
@@ -994,28 +1109,26 @@ def _check_hvac_faults(appliance_id, reading_data, baselines, now, cur, conn, is
                 if tracker['last_evaluation_runtime'] == 0 and tracker['reading_buffer']:
                     _evaluate_hvac_window(
                         appliance_id, tracker['reading_buffer'], baselines,
-                        _runtime_seconds(), now, cur, conn)
+                        _runtime_seconds(), eval_time, cur, conn)
             _reset_tracker()
     else:
         # --- INVERTER ---
-        is_high_effort = (current > 0.25 and treturn > 26.5)
+        is_high_effort = (current >= 0.25 and treturn > 26.5)
         if is_high_effort:
             if tracker['state'] == 'IDLE':
                 tracker['state'] = 'RUNNING'
-                tracker['start_time'] = now
+                tracker['start_time'] = eval_time
                 tracker['reading_buffer'] = [{'deltat': deltat, 'current': current, 'treturn': treturn}]
                 tracker['last_evaluation_runtime'] = 0
             elif tracker['state'] == 'RUNNING':
                 _add_to_buffer()
-                # Evaluate at 5 minutes
-                _evaluate_if_ready(min_runtime=300)
+                # Evaluate once at 15 minutes
+                _evaluate_if_ready(min_runtime=900, reevaluate=False)
         else:
             if tracker['state'] == 'RUNNING':
-                # Final evaluation before drop-off if never evaluated this cycle
-                if tracker['last_evaluation_runtime'] == 0 and tracker['reading_buffer']:
-                    _evaluate_hvac_window(
-                        appliance_id, tracker['reading_buffer'], baselines,
-                        _runtime_seconds(), now, cur, conn)
+                # Inverter: no early evaluation — only evaluate at 15 min.
+                # Short cycles (< 15 min) are intentionally skipped.
+                pass
             _reset_tracker()
 
 
@@ -1375,11 +1488,14 @@ def on_mqtt_message(client, userdata, msg):
                         tex = data.get("BME280Temp")
                         rhex = data.get("BME280Hum")
                         pres = data.get("BME280Pres")
+                        atmospheric = _get_atmospheric_pressure(appliance_id, cur)
+                        gauge_pressure = pres - atmospheric if pres is not None and atmospheric is not None else None
                         cur.execute("""
-                            INSERT INTO dryer_readings (sensor_node_id, texhaust, rh_exhaust, pressure, imotor, time)
-                            VALUES (%s, %s, %s, %s, %s, %s)
-                        """, (sensor_node_id, tex, rhex, pres, final_amps, actual_time))
-                        reading_values = {'texhaust': tex, 'rhexhaust': rhex, 'pressure': pres, 'current': final_amps}
+                            INSERT INTO dryer_readings
+                            (sensor_node_id, texhaust, rh_exhaust, pressure, abs_pressure, imotor, time)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """, (sensor_node_id, tex, rhex, gauge_pressure, pres, final_amps, actual_time))
+                        reading_values = {'texhaust': tex, 'rhexhaust': rhex, 'pressure': gauge_pressure, 'current': final_amps}
                     else:
                         t1 = data.get("DHT1Temp")
                         h1 = data.get("DHT1Hum")
@@ -1409,9 +1525,23 @@ def on_mqtt_message(client, userdata, msg):
                     cur.execute("UPDATE sensor_nodes SET last_seen = NOW() WHERE id = %s", (sensor_node_id,))
                     conn.commit()
 
-                    # --- Real-time fault alert checking (only on running data) ---
-                    if appliance_id and reading_values and final_amps >= 0.25:
-                        check_fault_alerts(appliance_id, reading_values, appliance_type, actual_time)
+                    # --- Check for timed-out cycles across ALL dryers ---
+                    # Handles "running only" logic where a dryer goes silent after cycle end
+                    # and no subsequent message arrives to trigger gap-based finalization.
+                    for aid, stats in list(DRYER_CYCLE_STATS.items()):
+                        if stats.get('in_cycle', False) and 'last_time' in stats:
+                            gap = (actual_time - stats['last_time']).total_seconds()
+                            if gap > 120:
+                                baselines = get_spc_baselines(aid)
+                                _finalize_dryer_cycle(aid, baselines, actual_time, cur, conn)
+
+                    # --- Real-time fault alert checking ---
+                    # Dryers need cycle management on ALL messages (running + idle)
+                    # so idle messages can trigger current-drop cycle end detection.
+                    # HVAC only checks on running data.
+                    if appliance_id and reading_values:
+                        if "Dryer" in appliance_type or final_amps >= 0.25:
+                            check_fault_alerts(appliance_id, reading_values, appliance_type, actual_time)
                 else:
                     UNPAIRED_CACHE[sensor_node_id] = {
                         "data": data,
@@ -1442,6 +1572,7 @@ def dashboard():
                            all_nodes=get_all_nodes_for_user(current_user.id))
 
 @app.route('/signup', methods=['GET', 'POST'])
+@limiter.limit("5 per minute")
 def signup():
     if request.method == 'GET':
         return render_template('signup.html')
@@ -1474,6 +1605,7 @@ def signup():
     return redirect(url_for('signup'))
 
 @app.route('/login', methods=['GET', 'POST'])
+@limiter.limit("30 per minute")
 def login():
     if request.method == 'GET':
         return render_template('login.html')
@@ -1677,9 +1809,10 @@ def api_device_latest(appliance_id):
         running_status = 'idle' if is_stale else ('running' if imotor >= 0.25 else 'idle')
         return jsonify({
             'time': time_val.isoformat(),
-            'Texhaust': apply_calibration(row_data[1], cal['t1_m'], cal['t1_c']),
-            'RHexhaust': apply_calibration(row_data[2], cal['h1_m'], cal['h1_c']),
-            'Pressure': round(row_data[3] or 0.0, 2),
+            'Texhaust': apply_calibration(row_data[1], cal['t1_m'], cal['t1_c']) if row_data[1] is not None else None,
+            'RHexhaust': apply_calibration(row_data[2], cal['h1_m'], cal['h1_c']) if row_data[2] is not None else None,
+            'Pressure': round(row_data[3], 2) if row_data[3] is not None else None,
+            'AbsPressure': round(row_data[5], 2) if row_data[5] is not None else None,
             'Imotor': imotor,
             'type': dev_type,
             'calibrated': True,
@@ -1739,16 +1872,16 @@ def api_device_latest_n(appliance_id):
     filtered = request.args.get('filtered', 'true').lower() != 'false'
     rows, dev_type = latest_n_rows_for_appliance(appliance_id, limit, start, end, filtered)
     cal = get_appliance_calibration(appliance_id)
-    if 't1_m' not in cal: return jsonify([])
     result = []
     for r in rows:
         time_val = r[0]
         if "Dryer" in dev_type:
             result.append({
                 'time': time_val.isoformat(),
-                'Texhaust': apply_calibration(r[1], cal['t1_m'], cal['t1_c']),
-                'RHexhaust': apply_calibration(r[2], cal['h1_m'], cal['h1_c']),
-                'Pressure': round(r[3] or 0.0, 2),
+                'Texhaust': apply_calibration(r[1], cal['t1_m'], cal['t1_c']) if r[1] is not None else None,
+                'RHexhaust': apply_calibration(r[2], cal['h1_m'], cal['h1_c']) if r[2] is not None else None,
+                'Pressure': round(r[3], 2) if r[3] is not None else None,
+                'AbsPressure': round(r[5], 2) if r[5] is not None else None,
                 'Imotor': max(0.0, r[4] or 0)
             })
         else:
@@ -1796,6 +1929,7 @@ def get_table_data(appliance_id):
                 'Texhaust': round(t1, 2),
                 'RHexhaust': round(h1, 2),
                 'Pressure': round(r[3] or 0.0, 2),
+                'AbsPressure': round(r[5] or 0.0, 2),
                 'Imotor': round(max(0.0, r[4] or 0), 2)
             })
         else:
@@ -1875,7 +2009,7 @@ def export_excel(appliance_id):
     current_filter_hvac = " AND r.icompressor >= 0.25" if (filtered and "Dryer" not in dev_type) else ""
     if "Dryer" in dev_type:
         query = f"""
-            SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor
+            SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor, r.abs_pressure
             FROM dryer_readings r
             JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
             JOIN appliances a ON a.id = sn.appliance_id
@@ -1901,21 +2035,21 @@ def export_excel(appliance_id):
     ws.title = "Sensor Data"
     header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
     header_font = Font(color="FFFFFF", bold=True)
-    ws.merge_cells('A1:D1')
+    ws.merge_cells('A1:F1')
     ws['A1'] = f"Device: {app_name}"
     ws['A1'].font = Font(size=14, bold=True)
-    ws.merge_cells('A2:D2')
+    ws.merge_cells('A2:F2')
     if "Dryer" in dev_type:
         ws['A2'] = f"Type: {dev_type}"
     else:
         ws['A2'] = f"Type: {dev_type} ({sub_type if sub_type else ''})"
-    ws.merge_cells('A3:D3')
+    ws.merge_cells('A3:F3')
     ws['A3'] = f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-    ws.merge_cells('A4:D4')
+    ws.merge_cells('A4:F4')
     ws['A4'] = f"Data Points: {len(readings)}"
     row_idx = 6
     if "Dryer" in dev_type:
-        headers = ["Timestamp", "Exhaust Temp (°C)", "Exhaust RH (%)", "Pressure (hPa)", "Current (A)"]
+        headers = ["Timestamp", "Exhaust Temp (°C)", "Exhaust RH (%)", "Gauge Pressure (hPa)", "Raw Absolute Pressure (hPa)", "Current (A)"]
     else:
         headers = ["Timestamp", "Return Temp (°C)", "Supply Temp (°C)", "Coil Temp (°C)", "Return RH (%)", "Supply RH (%)", "Current (A)", "Delta-T (°C)", "Delta-RH (%)"]
     for col, header in enumerate(headers, start=1):
@@ -1938,7 +2072,8 @@ def export_excel(appliance_id):
                 ws.cell(row=row_idx, column=2, value=round(t1, 2))
                 ws.cell(row=row_idx, column=3, value=round(h1, 2))
                 ws.cell(row=row_idx, column=4, value=round(r[3] or 0.0, 2))
-                ws.cell(row=row_idx, column=5, value=round(r[4] or 0, 2))
+                ws.cell(row=row_idx, column=5, value=round(r[5] or 0.0, 2))
+                ws.cell(row=row_idx, column=6, value=round(r[4] or 0, 2))
             else:
                 t2 = apply_calibration(r[3], cal['t2_m'], cal['t2_c'])
                 h2 = apply_calibration(r[4], cal['h2_m'], cal['h2_c'])
@@ -2186,12 +2321,18 @@ def api_baseline_config(appliance_id):
                     else:
                         ucl = float(ucl_raw)
                         lcl = float(lcl_raw)
+                    if ucl <= lcl:
+                        return jsonify({'error': f'UCL must be greater than LCL for {m}'}), 400
+                    baselines_to_save[m] = {'ucl': ucl, 'lcl': lcl}
+                elif "Dryer" in dev_type and m == 'pressure' and mean_raw and ucl_raw:
+                    # Pressure: mean + ucl, no lcl
+                    baselines_to_save[m] = {'mean': float(mean_raw), 'ucl': float(ucl_raw)}
                 else:
                     ucl = float(ucl_raw)
                     lcl = float(lcl_raw)
-                if ucl <= lcl:
-                    return jsonify({'error': f'UCL must be greater than LCL for {m}'}), 400
-                baselines_to_save[m] = {'ucl': ucl, 'lcl': lcl}
+                    if ucl <= lcl:
+                        return jsonify({'error': f'UCL must be greater than LCL for {m}'}), 400
+                    baselines_to_save[m] = {'ucl': ucl, 'lcl': lcl}
             except (ValueError, TypeError):
                 return jsonify({'error': f'Invalid values for {m}'}), 400
     if not baselines_to_save:
@@ -2268,6 +2409,43 @@ def api_thresholds(appliance_id):
         cur.close()
         release_conn(conn)
         return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+# --- API: PRESSURE BASELINE ---
+@app.route('/api/device/<int:appliance_id>/pressure_baseline', methods=['GET', 'POST'])
+@login_required
+def api_pressure_baseline(appliance_id):
+    conn = get_conn()
+    if not conn: return jsonify({'error': 'db'}), 500
+    cur = conn.cursor()
+    if request.method == 'GET':
+        cur.execute("SELECT atmospheric_pressure, updated_at FROM appliances WHERE id = %s", (appliance_id,))
+        row = cur.fetchone()
+        cur.close()
+        release_conn(conn)
+        if not row: return jsonify({'error': 'not found'}), 404
+        return jsonify({
+            "atmospheric_pressure": float(row[0]) if row[0] is not None else None,
+            "updated_at": row[1].isoformat() if row[1] else None
+        })
+    try:
+        data = request.get_json() or {}
+        pressure = data.get('atmospheric_pressure')
+        if pressure is None:
+            return jsonify({'error': 'atmospheric_pressure is required'}), 400
+        cur.execute("UPDATE appliances SET atmospheric_pressure = %s, updated_at = NOW() WHERE id = %s",
+                    (float(pressure), appliance_id))
+        conn.commit()
+        cur.execute("SELECT atmospheric_pressure, updated_at FROM appliances WHERE id = %s", (appliance_id,))
+        row = cur.fetchone()
+        cur.close()
+        release_conn(conn)
+        return jsonify({
+            "success": True,
+            "atmospheric_pressure": float(row[0]) if row[0] is not None else None,
+            "updated_at": row[1].isoformat() if row[1] else None
+        })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -2444,7 +2622,7 @@ def dryer_analytics(appliance_id):
         if not row or "Dryer" not in row[0]:
             return jsonify({'error': 'Not a dryer'}), 400
         cycle_start = 0.25
-        cycle_end = 0.15
+        cycle_end = 0.25
         baselines = get_spc_baselines(appliance_id)
         mean_current = baselines.get('current', {}).get('mean', 2.0)
         prominence_threshold = 0.40
@@ -2459,20 +2637,20 @@ def dryer_analytics(appliance_id):
                 pass
         if start and end:
             cur.execute("""
-                SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor
+                SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor, r.abs_pressure
                 FROM dryer_readings r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
                 JOIN appliances a ON a.id = sn.appliance_id
-                WHERE sn.appliance_id = %s AND r.time >= a.created_at AND r.time >= %s AND r.time <= %s AND r.imotor >= 0.25
+                WHERE sn.appliance_id = %s AND r.time >= a.created_at AND r.time >= %s AND r.time <= %s
                 ORDER BY r.time ASC
             """, (appliance_id, start, end))
         else:
             cur.execute("""
-                SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor
+                SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.imotor, r.abs_pressure
                 FROM dryer_readings r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
                 JOIN appliances a ON a.id = sn.appliance_id
-                WHERE sn.appliance_id = %s AND r.time >= a.created_at AND r.imotor >= 0.25
+                WHERE sn.appliance_id = %s AND r.time >= a.created_at
                 ORDER BY r.time ASC
             """, (appliance_id,))
         readings = cur.fetchall()
@@ -2492,6 +2670,7 @@ def dryer_analytics(appliance_id):
         _peak_max = 0.0
         _peak_valley = 0.0
         _peak_values = []
+        _idle_start_time = None
 
         def _confirm_peak():
             nonlocal _peak_state, _peak_max, _peak_valley
@@ -2504,7 +2683,7 @@ def dryer_analytics(appliance_id):
             _peak_valley = 0.0
 
         for i, r in enumerate(readings):
-            time_val, tex, rhex, press, imotor = r
+            time_val, tex, rhex, press, imotor, _abs_press = r
             imotor = float(imotor) if imotor is not None else 0.0
             tex = float(tex) if tex is not None else 0.0
             rhex = float(rhex) if rhex is not None else None
@@ -2537,10 +2716,13 @@ def dryer_analytics(appliance_id):
                         filter_threshold = (sum(motor_readings) / len(motor_readings)) * 1.15
                     median_val = _compute_motor_baseline_median(motor_readings, filter_threshold=filter_threshold)
                     current_cycle["motor_baseline_median"] = round(median_val, 3)
+                    pressures = [p for p in current_cycle["_pressures"] if p is not None]
+                    current_cycle["avg_pressure"] = round(sum(pressures) / len(pressures), 2) if pressures else None
                     del current_cycle["_rh_history"]
                     del current_cycle["_currents"]
                     del current_cycle["_times"]
                     del current_cycle["_motor_readings"]
+                    del current_cycle["_pressures"]
                     current_cycle["start_time"] = current_cycle["start_time"].isoformat()
                     current_cycle["end_time"] = current_cycle["end_time"].isoformat()
                     cycles.append(current_cycle)
@@ -2548,7 +2730,8 @@ def dryer_analytics(appliance_id):
                     current_cycle = {}
                     _prev_current = 0.0
                     _peak_values = []
-            if imotor > cycle_start and not in_cycle:
+                    _idle_start_time = None
+            if imotor >= cycle_start and not in_cycle:
                 in_cycle = True
                 current_cycle = {
                     "start_time": time_val,
@@ -2558,9 +2741,11 @@ def dryer_analytics(appliance_id):
                     "_rh_history": [],
                     "_currents": [],
                     "_times": [],
-                    "_motor_readings": []
+                    "_motor_readings": [],
+                    "_pressures": []
                 }
                 _prev_current = imotor
+                _idle_start_time = None
                 _confirm_peak()
                 _peak_values = []
             if in_cycle:
@@ -2570,56 +2755,78 @@ def dryer_analytics(appliance_id):
                     current_cycle["_rh_history"].append(rhex)
                 current_cycle["_currents"].append(imotor)
                 current_cycle["_times"].append(time_val)
-                current_cycle["_motor_readings"].append(imotor)
-                if imotor > _prev_current:
-                    if _peak_state in ("IDLE", "FALLING"):
-                        if _peak_state == "FALLING":
-                            _confirm_peak()
-                        _peak_valley = _prev_current
-                    _peak_state = "RISING"
-                    if imotor > _peak_max:
-                        _peak_max = imotor
-                elif imotor < _prev_current:
-                    if _peak_state == "RISING" and (_peak_max <= 0.1 or imotor < _peak_max - 0.1):
-                        _peak_state = "FALLING"
-                _prev_current = imotor
-            if imotor < cycle_end and in_cycle:
-                in_cycle = False
-                current_cycle["end_time"] = time_val
-                duration = current_cycle["end_time"] - current_cycle["start_time"]
-                current_cycle["duration_minutes"] = round(duration.total_seconds() / 60, 1)
-                valid_rh = [v for v in current_cycle["_rh_history"] if v is not None]
-                first_6 = valid_rh[:6] if len(valid_rh) > 6 else valid_rh
-                current_cycle["start_rh"] = round(sum(first_6) / len(first_6), 2) if first_6 else None
-                last_6 = valid_rh[-6:] if len(valid_rh) > 6 else valid_rh
-                current_cycle["end_rh_avg"] = round(sum(last_6) / len(last_6), 2) if last_6 else current_cycle.get("start_rh", 0)
-                currents = current_cycle["_currents"]
-                times = current_cycle["_times"]
-                energy_ws = 0.0
-                for j in range(1, len(currents)):
-                    dt = (times[j] - times[j-1]).total_seconds()
-                    energy_ws += currents[j-1] * voltage * dt
-                current_cycle["energy_kwh"] = round(energy_ws / 3_600_000, 4)
-                _confirm_peak()
-                current_cycle["current_spike_avg"] = round(sum(_peak_values) / len(_peak_values), 2) if _peak_values else 0.0
-                current_cycle["ignition_count"] = len(_peak_values)
-                motor_readings = current_cycle.get("_motor_readings", [])
-                filter_threshold = None
-                if motor_readings:
-                    filter_threshold = (sum(motor_readings) / len(motor_readings)) * 1.15
-                median_val = _compute_motor_baseline_median(motor_readings, filter_threshold=filter_threshold)
-                current_cycle["motor_baseline_median"] = round(median_val, 3)
-                del current_cycle["_rh_history"]
-                del current_cycle["_currents"]
-                del current_cycle["_times"]
-                del current_cycle["_motor_readings"]
-                current_cycle["start_time"] = current_cycle["start_time"].isoformat()
-                current_cycle["end_time"] = current_cycle["end_time"].isoformat()
-                cycles.append(current_cycle)
+                if press is not None:
+                    current_cycle["_pressures"].append(float(press) if press is not None else None)
 
-                current_cycle = {}
-                _prev_current = 0.0
-                _peak_values = []
+                if imotor >= cycle_start:
+                    # RUNNING: collect motor baseline, spike detection
+                    current_cycle["_motor_readings"].append(imotor)
+
+                    if imotor > _prev_current:
+                        if _peak_state in ("IDLE", "FALLING"):
+                            if _peak_state == "FALLING":
+                                _confirm_peak()
+                            _peak_valley = _prev_current
+                        _peak_state = "RISING"
+                        if imotor > _peak_max:
+                            _peak_max = imotor
+                    elif imotor < _prev_current:
+                        if _peak_state == "RISING" and (_peak_max <= 0.1 or imotor < _peak_max - 0.1):
+                            _peak_state = "FALLING"
+
+                    _prev_current = imotor
+                    _idle_start_time = None
+                else:
+                    # IDLE: track idle timer, skip motor/spike collection
+                    if _idle_start_time is None:
+                        _idle_start_time = time_val
+
+                    idle_duration = (time_val - _idle_start_time).total_seconds()
+                    if idle_duration >= 120:
+                        # Confirmed sustained idle — end cycle at LAST RUNNING reading
+                        in_cycle = False
+                        current_cycle["end_time"] = readings[i-1][0]
+                        duration = current_cycle["end_time"] - current_cycle["start_time"]
+                        current_cycle["duration_minutes"] = round(duration.total_seconds() / 60, 1)
+                        valid_rh = [v for v in current_cycle["_rh_history"] if v is not None]
+                        first_6 = valid_rh[:6] if len(valid_rh) > 6 else valid_rh
+                        current_cycle["start_rh"] = round(sum(first_6) / len(first_6), 2) if first_6 else None
+                        last_6 = valid_rh[-6:] if len(valid_rh) > 6 else valid_rh
+                        current_cycle["end_rh_avg"] = round(sum(last_6) / len(last_6), 2) if last_6 else current_cycle.get("start_rh", 0)
+                        currents = current_cycle["_currents"]
+                        times = current_cycle["_times"]
+                        energy_ws = 0.0
+                        for j in range(1, len(currents)):
+                            dt = (times[j] - times[j-1]).total_seconds()
+                            energy_ws += currents[j-1] * voltage * dt
+                        current_cycle["energy_kwh"] = round(energy_ws / 3_600_000, 4)
+                        _confirm_peak()
+                        current_cycle["current_spike_avg"] = round(sum(_peak_values) / len(_peak_values), 2) if _peak_values else 0.0
+                        current_cycle["ignition_count"] = len(_peak_values)
+                        motor_readings = current_cycle.get("_motor_readings", [])
+                        filter_threshold = None
+                        if motor_readings:
+                            filter_threshold = (sum(motor_readings) / len(motor_readings)) * 1.15
+                        median_val = _compute_motor_baseline_median(motor_readings, filter_threshold=filter_threshold)
+                        current_cycle["motor_baseline_median"] = round(median_val, 3)
+                        pressures = [p for p in current_cycle["_pressures"] if p is not None]
+                        current_cycle["avg_pressure"] = round(sum(pressures) / len(pressures), 2) if pressures else None
+                        del current_cycle["_rh_history"]
+                        del current_cycle["_currents"]
+                        del current_cycle["_times"]
+                        del current_cycle["_motor_readings"]
+                        del current_cycle["_pressures"]
+                        current_cycle["start_time"] = current_cycle["start_time"].isoformat()
+                        current_cycle["end_time"] = current_cycle["end_time"].isoformat()
+                        cycles.append(current_cycle)
+
+                        current_cycle = {}
+                        _prev_current = 0.0
+                        _peak_values = []
+                        _idle_start_time = None
+            # Note: immediate current-drop cycle end removed.
+            # Cycle end is now handled by sustained-idle logic inside the `if in_cycle:` block above,
+            # or by the gap > 120s check at the top of the loop.
         if in_cycle:
             in_cycle = False
             last_r = readings[-1]
@@ -2647,10 +2854,13 @@ def dryer_analytics(appliance_id):
                 filter_threshold = (sum(motor_readings) / len(motor_readings)) * 1.15
             median_val = _compute_motor_baseline_median(motor_readings, filter_threshold=filter_threshold)
             current_cycle["motor_baseline_median"] = round(median_val, 3)
+            pressures = [p for p in current_cycle["_pressures"] if p is not None]
+            current_cycle["avg_pressure"] = round(sum(pressures) / len(pressures), 2) if pressures else None
             del current_cycle["_rh_history"]
             del current_cycle["_currents"]
             del current_cycle["_times"]
             del current_cycle["_motor_readings"]
+            del current_cycle["_pressures"]
             current_cycle["start_time"] = current_cycle["start_time"].isoformat()
             current_cycle["end_time"] = current_cycle["end_time"].isoformat()
             cycles.append(current_cycle)
@@ -2658,6 +2868,7 @@ def dryer_analytics(appliance_id):
             current_cycle = {}
 
         cycles = [c for c in cycles if c.get("duration_minutes", 0) >= 1.0]
+        cycles.reverse()
 
         return jsonify(cycles)
     except Exception as e:
@@ -2940,7 +3151,7 @@ def api_discord_webhook_test():
         return jsonify({'error': 'No webhook URL provided'}), 400
     try:
         embed = {
-            "title": "✅ Test Alert",
+            "title": "Test Alert",
             "description": "Your Discord webhook is configured correctly! Alerts from your IoT monitoring system will appear here.",
             "color": 0x10B981,
             "timestamp": datetime.now(timezone.utc).isoformat(),
