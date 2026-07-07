@@ -212,7 +212,7 @@ iot-monitoring/
    - `DB_*` — Your local PostgreSQL credentials
    - `NEON_DATABASE_URL` — (Optional) For the dryer test backend only
 
-3. The application uses built-in fallback values if `.env` is not present, **but this is not recommended for production or public deployments**.
+3. All credentials are now loaded from environment variables. Running without a `.env` file will raise a `RuntimeError`.
 
 ### Running the Application
 
