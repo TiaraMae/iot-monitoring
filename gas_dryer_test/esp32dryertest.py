@@ -38,10 +38,16 @@ def get_local_ip():
 LOCAL_IP = get_local_ip()
 
 # === CONFIG ===
-MQTT_HOST = os.getenv("MQTT_HOST", "d57bf82836a7485d9b67b270c681fe6e.s1.eu.hivemq.cloud")
+MQTT_HOST = os.getenv("MQTT_HOST")
+if not MQTT_HOST:
+    raise RuntimeError("MQTT_HOST environment variable is required")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "8883"))
-MQTT_USER = os.getenv("MQTT_USER", "esp32dryertest")
-MQTT_PASS = os.getenv("MQTT_PASS", "Esp32dryertest")
+MQTT_USER = os.getenv("MQTT_USER")
+if not MQTT_USER:
+    raise RuntimeError("MQTT_USER environment variable is required")
+MQTT_PASS = os.getenv("MQTT_PASS")
+if not MQTT_PASS:
+    raise RuntimeError("MQTT_PASS environment variable is required")
 
 SUB_TOPIC = "dryer/BME_TEST_01/telemetry"
 ACK_TOPIC = "dryer/BME_TEST_01/ack"
@@ -51,11 +57,9 @@ LOCAL_TZ = timezone(timedelta(hours=7))
 
 # === DB ===
 def get_db_conn():
-    # NEON CLOUD DATABASE CONNECTION
-    NEON_URL = os.getenv(
-        "NEON_DATABASE_URL",
-        "postgresql://neondb_owner:npg_KldVwY87eSBi@ep-late-firefly-a1f2ll4t-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-    )
+    NEON_URL = os.getenv("NEON_DATABASE_URL")
+    if not NEON_URL:
+        raise RuntimeError("NEON_DATABASE_URL environment variable is required")
     return psycopg2.connect(NEON_URL)
 
 def init_db():

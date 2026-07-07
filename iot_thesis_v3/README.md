@@ -99,7 +99,7 @@ Because v3 stores **all** telemetry (not just running), database size will grow 
 ### 2026-05-26 — Credential Sanitization for GitHub
 - **Real firmware excluded:** All `Update_SensorNode/` and `esp32dryertest/` folders with hardcoded WiFi/MQTT credentials added to `.gitignore`.
 - **Clean versions pushed:** `_Clean` folders created for all 6 firmware variants with placeholder credentials (`YOUR_WIFI_SSID`, `YOUR_WIFI_PASSWORD`, `YOUR_MQTT_BROKER`, `YOUR_MQTT_USERNAME`, `YOUR_MQTT_PASSWORD`).
-- **v4 backend sanitized:** Hardcoded MQTT defaults (`d57bf828...`, `esp32user`) removed from `app.py`. All MQTT values now require environment variables.
+- **v4 backend sanitized:** Hardcoded MQTT defaults removed from `app.py`. All MQTT values now require environment variables.
 
 ### 2026-05-26 — Atmospheric Pressure Simplification
 - **EMA removed:** Atmospheric pressure baseline no longer uses exponential moving average.

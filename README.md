@@ -949,14 +949,13 @@ Collapsible panel with:
 >
 > All hardcoded credentials have been removed from the source code:
 > - **Arduino firmware:** Real credential versions are stored locally and excluded from Git via `.gitignore`. Only `_Clean` variants with placeholder values (`YOUR_WIFI_SSID`, `YOUR_MQTT_BROKER`, etc.) are committed to GitHub.
-> - **Backend (v4):** All hardcoded MQTT defaults removed. `MQTT_HOST`, `MQTT_USER`, and `MQTT_PASS` now require environment variables. No fallback credentials exist.
+> - **Backend (all versions):** All hardcoded MQTT defaults removed. `MQTT_HOST`, `MQTT_USER`, and `MQTT_PASS` now require environment variables. No fallback credentials exist.
+> - **Test backend (`gas_dryer_test`):** MQTT and Neon database connection strings now require environment variables. No fallback credentials exist.
 > - **Deployment scripts:** `.env.production` uses placeholders. Real values must be filled in during deployment.
 >
 > **If you are forking this repository:** Create a local `.env` file with your own credentials. Never commit `.env` to Git.
 >
-> **Note:** If this repository was ever public before sanitization, the following credentials should be considered compromised and rotated:
-> - HiveMQ Cloud MQTT password (`IoTTHESIS1`)
-> - Any previously hardcoded WiFi passwords
+> **Note:** If this repository was ever public before sanitization, any credentials that were previously hardcoded (HiveMQ Cloud MQTT password, WiFi passwords, database URLs, etc.) should be considered compromised and rotated. Git history retains deleted content, and public repositories may be crawled or cloned by third parties.
 >
 > Rotate these in your respective dashboards if applicable.
 

@@ -29,9 +29,13 @@ if not app.secret_key:
     raise RuntimeError("FLASK_SECRET_KEY environment variable is required")
 
 # --- CONFIGURATION ---
-MQTT_HOST = os.getenv("MQTT_HOST", "d57bf82836a7485d9b67b270c681fe6e.s1.eu.hivemq.cloud")
+MQTT_HOST = os.getenv("MQTT_HOST")
+if not MQTT_HOST:
+    raise RuntimeError("MQTT_HOST environment variable is required")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "8883"))
-MQTT_USER = os.getenv("MQTT_USER", "esp32user")
+MQTT_USER = os.getenv("MQTT_USER")
+if not MQTT_USER:
+    raise RuntimeError("MQTT_USER environment variable is required")
 MQTT_PASS = os.getenv("MQTT_PASS")
 if not MQTT_PASS:
     raise RuntimeError("MQTT_PASS environment variable is required")

@@ -36,6 +36,10 @@ env/
 .env
 .env.local
 .env.*.local
+.env.production
+
+# NOTE: Template files (.env.example, .env.production.example) are intentionally
+# tracked. They contain placeholders only and must never hold real credentials.
 
 # ========================================
 # Flask
