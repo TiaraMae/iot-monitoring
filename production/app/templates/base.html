@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}IoT Monitoring{% endblock %}</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #F8FAFC;
+            color: #1E293B;
+        }
+        .navbar {
+            background: #fff;
+            border-bottom: 1px solid #E2E8F0;
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .navbar-brand {
+            font-weight: 700;
+            color: #2563EB;
+            text-decoration: none;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        .flash {
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+        }
+        .flash.error { background: #FEE2E2; color: #991B1B; }
+        .flash.success { background: #DCFCE7; color: #065F46; }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <nav class="navbar">
+        <a href="/" class="navbar-brand">IoT Monitoring</a>
+        {% if current_user.is_authenticated %}
+        <form action="{{ url_for('auth.logout') }}" method="GET">
+            <button type="submit" style="background:none;border:none;color:#64748B;cursor:pointer;">Logout</button>
+        </form>
+        {% endif %}
+    </nav>
+    <div class="container">
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>

@@ -106,3 +106,7 @@ gas_dryer_test/esp32dryertest/
 # ========================================
 AGENTS.md
 **/AGENTS.md
+
+# Firmware secrets (local credentials, never commit)
+secrets.h
+

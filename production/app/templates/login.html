@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+
+{% block title %}Member Login - IoT Monitoring{% endblock %}
+
+{% block head %}
+<style>
+    .auth-card {
+        background: #fff;
+        max-width: 420px;
+        margin: 4rem auto;
+        padding: 2.5rem;
+        border-radius: 16px;
+        box-shadow: 0 10px 40px rgba(0,0,0,0.08);
+    }
+    .auth-card h2 { text-align: center; margin-bottom: 0.5rem; }
+    .auth-card .subtitle { text-align: center; color: #64748B; margin-bottom: 2rem; }
+    .form-group { margin-bottom: 1.25rem; }
+    label { display: block; margin-bottom: 0.4rem; font-weight: 500; font-size: 0.9rem; }
+    input[type="email"], input[type="password"], input[type="text"] {
+        width: 100%;
+        padding: 0.75rem 1rem;
+        border: 1px solid #E2E8F0;
+        border-radius: 8px;
+        font-size: 1rem;
+    }
+    input:focus { outline: none; border-color: #2563EB; }
+    .password-wrapper { position: relative; }
+    .password-wrapper input { padding-right: 2.75rem; }
+    .password-toggle {
+        position: absolute;
+        right: 0.75rem;
+        top: 50%;
+        transform: translateY(-50%);
+        background: none;
+        border: none;
+        cursor: pointer;
+        padding: 0.25rem;
+        color: #64748B;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .password-toggle:hover { color: #2563EB; }
+    .password-toggle svg { width: 1.25rem; height: 1.25rem; }
+    .btn {
+        width: 100%;
+        padding: 0.8rem;
+        border: none;
+        border-radius: 8px;
+        background: #2563EB;
+        color: #fff;
+        font-weight: 600;
+        font-size: 1rem;
+        cursor: pointer;
+    }
+    .btn:hover { background: #1D4ED8; }
+    .links { display: flex; justify-content: space-between; margin-top: 1rem; font-size: 0.85rem; }
+    .links a { color: #2563EB; text-decoration: none; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="auth-card">
+    <h2>Member Login</h2>
+    <p class="subtitle">Sign in to your IoT monitoring dashboard</p>
+    <form method="POST" action="{{ url_for('auth.login') }}">
+        <div class="form-group">
+            <label for="email">Email</label>
+            <input type="email" id="email" name="email" required placeholder="Enter your email">
+        </div>
+        <div class="form-group">
+            <label for="password">Password</label>
+            <div class="password-wrapper">
+                <input type="password" id="password" name="password" required placeholder="Enter your password">
+                <button type="button" class="password-toggle" id="toggle-password" aria-label="Show password">
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="icon-eye">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.036 12.322a1.012 1.012 0 010-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.574-3.007-9.963-7.178z" />
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    </svg>
+                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="icon-eye-off" style="display:none;">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M3.98 8.223A10.477 10.477 0 001.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.45 10.45 0 0112 4.5c4.756 0 8.773 3.162 10.065 7.498a10.523 10.523 0 01-4.293 5.774M6.228 6.228L3 3m3.228 3.228l3.65 3.65m7.894 7.894L21 21m-3.228-3.228l-3.65-3.65m0 0a3 3 0 10-4.243-4.243m4.242 4.242L6.228 6.228" />
+                    </svg>
+                </button>
+            </div>
+        </div>
+        <button type="submit" class="btn">LOGIN</button>
+    </form>
+    <div class="links">
+        <a href="{{ url_for('auth.signup') }}">Create account</a>
+        <a href="#">Forgot password?</a>
+    </div>
+</div>
+<script>
+(function() {
+    const input = document.getElementById('password');
+    const btn = document.getElementById('toggle-password');
+    const eye = btn.querySelector('.icon-eye');
+    const eyeOff = btn.querySelector('.icon-eye-off');
+    btn.addEventListener('click', function() {
+        const showing = input.type === 'text';
+        input.type = showing ? 'password' : 'text';
+        eye.style.display = showing ? '' : 'none';
+        eyeOff.style.display = showing ? 'none' : '';
+        btn.setAttribute('aria-label', showing ? 'Show password' : 'Hide password');
+    });
+})();
+</script>
+{% endblock %}

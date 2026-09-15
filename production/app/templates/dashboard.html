@@ -1,0 +1,2668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IoT Monitoring</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg: #F8FAFC;
+            --surface: #FFFFFF;
+            --text: #1E293B;
+            --text-muted: #64748B;
+            --primary: #2563EB;
+            --primary-hover: #1D4ED8;
+            --danger: #EF4444;
+            --success: #10B981;
+            --warning: #F59E0B;
+            --border: #E2E8F0;
+            --nav-active: #EFF6FF;
+            --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+            --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1);
+            --radius: 12px;
+            --sidebar-width: 260px;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; }
+        body { background: var(--bg); color: var(--text); display: flex; min-height: 100vh; overflow-x: hidden; }
+
+        /* --- SIDEBAR --- */
+        .sidebar {
+            width: var(--sidebar-width);
+            background: var(--surface);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            position: fixed;
+            height: 100vh;
+            z-index: 100;
+            transition: transform 0.3s;
+        }
+        .sidebar-header {
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--primary);
+        }
+        .nav-menu {
+            flex: 1;
+            padding: 1.5rem 1rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .nav-item {
+            padding: 0.8rem 1rem;
+            border-radius: 8px;
+            font-weight: 500;
+            color: var(--text-muted);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            transition: all 0.2s;
+        }
+        .nav-item:hover { background: var(--bg); color: var(--text); }
+        .nav-item.active { background: var(--nav-active); color: var(--primary); }
+        .nav-bottom { margin-top: auto; padding-top: 1rem; border-top: 1px solid var(--border); }
+
+        .main-wrapper {
+            flex: 1;
+            margin-left: var(--sidebar-width);
+            display: flex;
+            flex-direction: column;
+            width: calc(100% - var(--sidebar-width));
+        }
+        .navbar {
+            background: var(--surface);
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+            z-index: 90;
+        }
+        .hamburger {
+            display: none;
+            cursor: pointer;
+            font-size: 1.5rem;
+            background: none;
+            border: none;
+            color: var(--text);
+            line-height: 1;
+        }
+        .user-menu { display: flex; align-items: center; gap: 1rem; margin-left: auto; }
+        .user-name { font-weight: 500; font-size: 0.95rem; }
+        .btn-logout {
+            background: none; border: none; color: var(--text-muted); cursor: pointer;
+            font-weight: 500; font-size: 0.9rem;
+        }
+        .btn-logout:hover { color: var(--danger); }
+        .content-area {
+            padding: 2rem;
+            max-width: 1400px;
+            margin: 0 auto;
+            width: 100%;
+        }
+        .view-section { display: none; animation: fadeIn 0.3s; }
+        .view-section.active { display: block; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .page-header { margin-bottom: 2rem; }
+        .page-title { font-size: 1.5rem; font-weight: 600; }
+
+        /* --- CARDS --- */
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            box-shadow: var(--shadow-sm);
+            transition: transform 0.2s, box-shadow 0.2s, border-color 0.3s;
+            display: flex;
+            flex-direction: column;
+            cursor: pointer;
+            position: relative;
+            overflow: hidden;
+        }
+        .card:hover {
+            transform: translateY(-3px);
+            box-shadow: var(--shadow-md);
+            border-color: var(--primary);
+        }
+        .card.no-hover { cursor: default; }
+        .card.no-hover:hover { transform: none; box-shadow: var(--shadow-sm); border-color: var(--border); }
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1rem;
+            pointer-events: none;
+        }
+        .card-title { font-size: 1.15rem; font-weight: 600; }
+        .card-subtitle {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 4px;
+        }
+        .status-badge {
+            padding: 0.35rem 0.75rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            white-space: nowrap;
+        }
+        .status-normal { background: #DCFCE7; color: #065F46; border: 1px solid #A7F3D0; }
+        .status-warning { background: #FEF3C7; color: #92400E; border: 1px solid #FDE68A; }
+        .status-danger { background: #FEE2E2; color: #991B1B; border: 1px solid #FECACA; }
+        .status-info { background: #DBEAFE; color: #1E40AF; border: 1px solid #BFDBFE; }
+        .status-offline { background: #E2E8F0; color: #475569; border: 1px solid #CBD5E1; }
+        .status-calibrating { background: #FEF08A; color: #92400E; border: 1px solid #FCD34D; }
+        .card-data-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.75rem;
+            margin-top: auto;
+            padding-top: 1rem;
+            border-top: 1px solid var(--border);
+            pointer-events: none;
+        }
+        .data-point { display: flex; flex-direction: column; }
+        .data-label { font-size: 0.75rem; color: var(--text-muted); font-weight: 500; margin-bottom: 2px; }
+        .data-value { font-size: 1.1rem; font-weight: 600; }
+        .data-value.highlight { color: var(--primary); }
+
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        /* --- ENERGY SUMMARY --- */
+        .energy-summary-section {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            box-shadow: var(--shadow-sm);
+        }
+        .energy-summary-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+        .energy-summary-title { font-size: 1.25rem; font-weight: 600; }
+        .energy-summary-controls { display: flex; gap: 0.75rem; align-items: center; }
+        .energy-summary-body {
+            display: flex;
+            gap: 2rem;
+            align-items: flex-start;
+        }
+        .energy-chart-wrapper {
+            flex: 0 0 320px;
+            height: 320px;
+            position: relative;
+        }
+        .energy-summary-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            min-width: 0;
+        }
+        .energy-total-box {
+            background: var(--bg);
+            border-radius: 8px;
+            padding: 1rem;
+            text-align: center;
+        }
+        .energy-total-label { display: block; color: var(--text-muted); font-size: 0.875rem; }
+        .energy-total-value { display: block; font-size: 1.75rem; font-weight: 700; color: var(--primary); margin-top: 0.25rem; }
+        .energy-type-breakdown { display: flex; gap: 1rem; }
+        .energy-type-item {
+            flex: 1;
+            background: var(--bg);
+            border-radius: 8px;
+            padding: 0.75rem;
+            text-align: center;
+        }
+        .energy-type-item.hvac { border-left: 4px solid #2563EB; }
+        .energy-type-item.dryer { border-left: 4px solid #F59E0B; }
+        .energy-type-label { font-size: 0.75rem; color: var(--text-muted); text-transform: uppercase; }
+        .energy-type-value { font-size: 1.1rem; font-weight: 600; margin-top: 0.25rem; }
+        .energy-appliance-list { max-height: 160px; overflow-y: auto; }
+        .energy-appliance-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.4rem 0;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.875rem;
+        }
+        .energy-appliance-name { display: flex; align-items: center; gap: 0.5rem; }
+        .energy-dot {
+            width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0;
+        }
+
+        /* --- FLOOR PLAN --- */
+        .floor-plan-card { margin-bottom: 2rem; }
+        .floor-plan-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .floor-plan-title { font-size: 1.25rem; font-weight: 600; }
+        .floor-plan-canvas {
+            position: relative;
+            width: 100%;
+            height: 420px;
+            background: #fff;
+            border: 2px dashed #CBD5E1;
+            border-radius: var(--radius);
+            overflow: hidden;
+            user-select: none;
+        }
+        .floor-plan-canvas.editing { border-color: var(--primary); background: #F8FAFC; touch-action: none; }
+        .fp-block {
+            position: absolute;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            color: #fff;
+            font-size: 0.8rem;
+            font-weight: 600;
+            border-radius: 8px;
+            padding: 0.4rem;
+            cursor: grab;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.15);
+            transition: background-color 0.3s ease, box-shadow 0.2s ease;
+            overflow: hidden;
+            word-break: break-word;
+            line-height: 1.1;
+        }
+        .fp-block:active { cursor: grabbing; }
+        .fp-block.offline { background: #9CA3AF; }
+        .fp-block.idle { background: #3B82F6; }
+        .fp-block.running { background: #22C55E; }
+        .fp-block.warning { background: #EAB308; }
+        .fp-block.critical { background: #EF4444; }
+        .fp-block .fp-remove {
+            position: absolute;
+            top: 2px;
+            right: 4px;
+            font-size: 0.7rem;
+            line-height: 1;
+            color: rgba(255,255,255,0.9);
+            cursor: pointer;
+            display: none;
+        }
+        .floor-plan-canvas.editing .fp-block .fp-remove { display: block; }
+        .floor-plan-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.75rem;
+            margin-top: 1rem;
+        }
+        .fp-status { font-size: 0.8rem; margin-left: auto; color: var(--text-muted); }
+        .fp-actions { display: flex; gap: 0.5rem; align-items: center; }
+        .fp-dropdown { position: relative; display: inline-block; }
+        .fp-dropbtn { display: inline-flex; align-items: center; gap: 0.35rem; }
+        .fp-dropbtn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .fp-dropdown-content {
+            display: none; position: absolute; right: 0; top: calc(100% + 4px);
+            background: var(--surface); min-width: 180px; max-height: 220px; overflow-y: auto;
+            border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-md);
+            z-index: 20;
+        }
+        .fp-dropdown-content.show { display: block; }
+        .fp-dropdown-item {
+            padding: 0.55rem 0.85rem; font-size: 0.85rem; cursor: pointer;
+            border-bottom: 1px solid var(--border); white-space: nowrap;
+        }
+        .fp-dropdown-item:last-child { border-bottom: none; }
+        .fp-dropdown-item:hover { background: var(--bg); }
+
+        /* --- MODAL --- */
+        .detail-overlay {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            display: none;
+            justify-content: center;
+            align-items: center;
+            padding: 2rem;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .detail-overlay.active { display: flex; opacity: 1; }
+        .detail-panel {
+            background: var(--surface);
+            width: 100%;
+            max-width: 960px;
+            max-height: 90vh;
+            border-radius: var(--radius);
+            overflow: hidden;
+            box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1);
+            display: flex;
+            flex-direction: column;
+            transform: translateY(20px);
+            transition: transform 0.3s;
+        }
+        .detail-overlay.active .detail-panel { transform: translateY(0); }
+        .detail-header {
+            padding: 1.5rem 2rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-shrink: 0;
+        }
+        .detail-title { font-size: 1.25rem; font-weight: 600; }
+        .close-btn {
+            background: none; border: none; font-size: 1.5rem; color: var(--text-muted); cursor: pointer;
+        }
+        .close-btn:hover { color: var(--text); }
+        .detail-body {
+            padding: 2rem;
+            overflow-y: auto;
+            flex: 1;
+        }
+        .detail-actions {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+            background: var(--bg);
+            padding: 1rem;
+            border-radius: 8px;
+            border: 1px dashed var(--border);
+        }
+
+        /* SPC Charts */
+        .spc-chart-section { margin-bottom: 1.5rem; }
+        .spc-chart-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .spc-chart-wrapper {
+            position: relative;
+            height: 180px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 0.75rem;
+            overflow: hidden;
+        }
+        .spc-chart-wrapper canvas {
+            clip-path: inset(0);
+        }
+        .spc-legend {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            margin-top: 0.4rem;
+        }
+        .spc-legend span { display: flex; align-items: center; gap: 4px; }
+        .spc-legend-line { display: inline-block; width: 20px; height: 2px; }
+
+        /* Data Values below charts */
+        .readings-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+            gap: 1rem;
+            padding: 1rem;
+            background: var(--bg);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            margin-bottom: 1.5rem;
+        }
+        .reading-item { display: flex; flex-direction: column; }
+        .reading-label {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
+        }
+        .reading-value {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: var(--text);
+            margin-top: 2px;
+        }
+        .reading-value.hl { color: var(--primary); }
+        .reading-value.hl-warn { color: var(--warning); }
+        .detail-section-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 0.75rem;
+        }
+
+        /* Chart Mode Bar */
+        .chart-mode-bar {
+            margin-bottom: 1rem;
+            padding: 0.75rem;
+            background: var(--surface);
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+        }
+
+        /* Baseline Inputs under charts */
+        .baseline-inputs-row {
+            margin-top: 0.5rem;
+            padding: 0.75rem;
+            background: var(--bg);
+            border-radius: 8px;
+            border: 1px solid var(--border);
+        }
+
+        /* Data Table Section */
+        .data-table-section {
+            margin-top: 1.5rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid var(--border);
+        }
+        .data-table-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+        .data-table-header h3 {
+            font-size: 1.1rem;
+            font-weight: 600;
+        }
+        .data-table-wrapper {
+            overflow-x: auto;
+            max-height: 400px;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+        }
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+        .data-table thead {
+            position: sticky;
+            top: 0;
+            background: var(--bg);
+            z-index: 10;
+            border-bottom: 2px solid var(--border);
+        }
+        .data-table th {
+            padding: 0.75rem 1rem;
+            text-align: left;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .data-table td {
+            padding: 0.65rem 1rem;
+            border-bottom: 1px solid var(--border);
+            white-space: nowrap;
+        }
+        .data-table tbody tr:nth-child(even) { background: #F8FAFC; }
+        .data-table tbody tr:hover { background: #EFF6FF; }
+        .data-table td.numeric { text-align: right; }
+
+        /* Alerts */
+        .alert-item {
+            padding: 0.65rem 0.85rem;
+            margin-bottom: 0.5rem;
+            border-radius: var(--radius);
+            border: 1px solid var(--border);
+            font-size: 0.85rem;
+            background: var(--surface);
+        }
+        .alert-item.critical {
+            border-left: 3px solid var(--danger);
+            background: #FEF2F2;
+        }
+        .alert-item.warning {
+            border-left: 3px solid var(--warning);
+            background: #FFFBEB;
+        }
+        .alert-item.resolved {
+            border-left: 3px solid var(--success);
+            opacity: 0.75;
+        }
+        .alert-severity-badge {
+            display: inline-block;
+            color: white;
+            padding: 1px 6px;
+            border-radius: 4px;
+            font-size: 0.7rem;
+            font-weight: bold;
+            margin-right: 4px;
+        }
+
+        /* --- FORMS & BUTTONS --- */
+        .btn {
+            display: inline-flex; align-items: center; gap: 0.5rem;
+            padding: 0.6rem 1.2rem; border-radius: 8px;
+            font-weight: 500; font-size: 0.9rem;
+            cursor: pointer; border: none; transition: 0.2s;
+        }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: var(--primary-hover); }
+        .btn-primary:disabled { background: #93C5FD; cursor: not-allowed; }
+        .btn-danger { background: #FEF2F2; color: #DC2626; border: 1px solid #FECACA; }
+        .btn-danger:hover { background: #FEE2E2; }
+        .btn-secondary { background: var(--bg); color: var(--text); border: 1px solid var(--border); }
+        .btn-secondary:hover { background: var(--border); }
+        .btn-sm { padding: 0.35rem 0.6rem; font-size: 0.75rem; }
+        .form-group { margin-bottom: 1.25rem; }
+        .form-label { display: block; margin-bottom: 0.5rem; font-weight: 500; font-size: 0.9rem; }
+        .form-control {
+            width: 100%; padding: 0.75rem 1rem;
+            border: 1px solid var(--border); border-radius: 8px;
+            background: var(--surface); color: var(--text); font-size: 0.95rem;
+        }
+        .form-control:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+        .scanner-box {
+            background: var(--nav-active); border: 1px dashed var(--primary);
+            padding: 1.5rem; border-radius: var(--radius); text-align: center; margin-bottom: 1.5rem;
+        }
+        .wiring-guide {
+            background: #F8FAFC; border-left: 4px solid var(--warning);
+            padding: 1rem; border-radius: 4px; margin-top: 1rem; font-size: 0.9rem; display: none;
+        }
+        .wiring-guide ul { margin-left: 1.5rem; margin-top: 0.5rem; color: var(--text-muted); }
+        .empty-state { text-align: center; padding: 4rem 2rem; color: var(--text-muted); }
+        .alert { padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; font-weight: 500; }
+        .alert-success { background: #DCFCE7; color: #065F46; border: 1px solid #A7F3D0; }
+        .alert-error { background: #FEE2E2; color: #991B1B; border: 1px solid #FECACA; }
+        .spinner {
+            border: 3px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top: 3px solid white;
+            width: 16px;
+            height: 16px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+        .status-msg { font-size: 0.8rem; margin-top: 0.5rem; }
+        .status-msg.error { color: #991B1B; }
+        .status-msg.success { color: #065F46; }
+        .alert-item {
+            border-left: 4px solid var(--warning); background: #FFFBEB; padding: 0.75rem;
+            border-radius: 6px; margin-bottom: 0.5rem; font-size: 0.85rem;
+        }
+        .alert-item.critical { border-left-color: var(--danger); background: #FEF2F2; }
+        .help-text { font-size: 0.75rem; color: var(--text-muted); margin-top: 0.25rem; }
+
+        .sidebar-overlay {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5); z-index: 95;
+        }
+        @media (max-width: 768px) {
+            .sidebar { transform: translateX(-100%); }
+            .sidebar.open { transform: translateX(0); }
+            .main-wrapper { margin-left: 0; width: 100%; }
+            .hamburger { display: block; }
+            .sidebar-overlay.active { display: block; }
+            .dashboard-grid { grid-template-columns: 1fr; }
+            .detail-panel { height: 100%; max-height: 100vh; border-radius: 0; transform: translateY(100%); }
+            .detail-overlay { padding: 0; }
+            .energy-summary-body { flex-direction: column; align-items: center; }
+            .energy-chart-wrapper { flex: 0 0 auto; width: 280px; height: 280px; }
+            .energy-summary-header { flex-direction: column; align-items: flex-start; }
+            .content-area { padding: 1rem; }
+            .two-col { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <div id="sidebar-overlay" class="sidebar-overlay" onclick="toggleSidebar()"></div>
+    <aside id="sidebar" class="sidebar">
+        <div class="sidebar-header">
+            <span>IoT Monitoring</span>
+            <button class="hamburger" onclick="toggleSidebar()" style="font-size:1.2rem">&times;</button>
+        </div>
+        <div class="nav-menu">
+            <div class="nav-item active" onclick="switchView('dashboard', this)">
+                <span>Dashboard</span>
+            </div>
+            <div class="nav-item" onclick="switchView('add-device', this)">
+                <span>Add Device</span>
+            </div>
+            <div class="nav-bottom">
+                <div class="nav-item" onclick="showDiscordModal()">
+                    <span>Discord Registration</span>
+                </div>
+            </div>
+        </div>
+    </aside>
+
+    <div class="main-wrapper">
+        <nav class="navbar">
+            <button class="hamburger" onclick="toggleSidebar()">&#9776;</button>
+            <div class="user-menu">
+                <span class="user-name">Hello, {{ current_user.name }}</span>
+                <form action="{{ url_for('auth.logout') }}" method="GET" style="display:inline;">
+                    <button type="submit" class="btn-logout">Logout</button>
+                </form>
+            </div>
+        </nav>
+
+        <div class="content-area">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        <div class="alert alert-{{ category }}">{{ message }}</div>
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+
+            <!-- DASHBOARD VIEW -->
+            <div id="view-dashboard" class="view-section active">
+                <div class="page-header"><h1 class="page-title">Device Dashboard</h1></div>
+
+                {% if appliances %}
+                <div class="energy-summary-section" id="energy-summary-section">
+                    <div class="energy-summary-header">
+                        <h2 class="energy-summary-title">Monthly Energy Consumption</h2>
+                        <div class="energy-summary-controls">
+                            <select id="energy-month-select" class="form-control"></select>
+                            <button class="btn btn-primary" onclick="exportEnergySummary()">Export Excel</button>
+                        </div>
+                    </div>
+                    <div class="energy-summary-body">
+                        <div class="energy-chart-wrapper">
+                            <canvas id="energyPieChart"></canvas>
+                        </div>
+                        <div class="energy-summary-panel">
+                            <div class="energy-total-box">
+                                <span class="energy-total-label">Total Consumption</span>
+                                <span class="energy-total-value" id="energy-total-kwh">-- kWh</span>
+                            </div>
+                            <div class="energy-type-breakdown" id="energy-type-breakdown"></div>
+                            <div class="energy-appliance-list" id="energy-appliance-list"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="dashboard-grid" id="device-cards-grid">
+                    {% for a in appliances %}
+                    <div class="card" id="card-{{ a.id }}" data-id="{{ a.id }}" data-type="{{ a.type }}" onclick="openDeviceDetail({{ a.id }})">
+                        <div class="card-header">
+                            <div>
+                                <h3 class="card-title">{{ a.name }}</h3>
+                                <div class="card-subtitle">
+                                    {% if 'Dryer' in a.type %}GAS DRYER{% else %}HVAC{% if a.is_inverter %} (Inverter){% endif %}{% endif %}
+                                </div>
+                            </div>
+                            <div>
+                                {% if a.status == 'offset_calibration_needed' %}
+                                    <span class="status-badge status-danger" id="badge-{{ a.id }}">Calib. Needed</span>
+                                {% elif a.status == 'calibrating' %}
+                                    <span class="status-badge status-calibrating" id="badge-{{ a.id }}">Calibrating...</span>
+                                {% elif a.alert_status == 'critical' %}
+                                    <span class="status-badge status-danger" id="badge-{{ a.id }}">Critical</span>
+                                {% elif a.alert_status == 'warning' %}
+                                    <span class="status-badge status-warning" id="badge-{{ a.id }}">Warning</span>
+                                {% else %}
+                                    <span class="status-badge status-normal" id="badge-{{ a.id }}">Normal</span>
+                                {% endif %}
+                            </div>
+                        </div>
+                        <div class="card-data-grid">
+                            {% if 'Dryer' in a.type %}
+                                <div class="data-point"><span class="data-label">Exhaust Temp</span><span class="data-value" id="mini-t1-{{ a.id }}">-- °C</span></div>
+                                <div class="data-point"><span class="data-label">Current</span><span class="data-value highlight" id="mini-amp-{{ a.id }}">-- A</span></div>
+                            {% else %}
+                                <div class="data-point"><span class="data-label">Delta-T (Ret-Sup)</span><span class="data-value" id="mini-delta-{{ a.id }}">-- °C</span></div>
+                                <div class="data-point"><span class="data-label">Current</span><span class="data-value highlight" id="mini-amp-{{ a.id }}">-- A</span></div>
+                                <div class="data-point" style="align-items:flex-start; justify-content:flex-end;">
+                                    <span id="mini-run-status-{{ a.id }}" style="display:none;" class="status-badge"></span>
+                                </div>
+                            {% endif %}
+                        </div>
+                        {% if 'Dryer' in a.type %}
+                        <div style="margin-top:0.25rem; font-size:0.7rem;">
+                            <span id="mini-run-status-{{ a.id }}" style="display:none;" class="status-badge"></span>
+                        </div>
+                        {% endif %}
+                        <div id="offline-{{ a.id }}" style="display:none; position:absolute; bottom:0; left:0; right:0; background:var(--warning); color:white; text-align:center; font-size:0.75rem; padding:2px; border-radius:0 0 var(--radius) var(--radius);">Awaiting Sensor Data...</div>
+
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="empty-state">
+                    <h3>No Devices Paired Yet</h3>
+                    <p>Click "Add Device" in the left menu to pair your ESP32 node.</p>
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- ADD DEVICE VIEW -->
+            <div id="view-add-device" class="view-section">
+                <div class="page-header"><h1 class="page-title">Add New Appliance</h1></div>
+                <div class="card no-hover" style="max-width:800px; margin:0 auto;">
+                    <div class="scanner-box">
+                        <h3 style="margin-bottom:10px">Looking for New Sensor Nodes?</h3>
+                        <p style="font-size:0.9rem; color:var(--text-muted); margin-bottom:15px">Make sure your ESP32 is powered on. Click scan to discover unpaired MAC addresses.</p>
+                        <button type="button" class="btn btn-primary" onclick="scanNodes()" id="btn-scan">Scan for Unpaired Nodes</button>
+                        <div id="scan-results" style="margin-top:15px; display:none;">
+                            <select id="scanned-mac-select" class="form-control" style="max-width:300px; margin:0 auto; border-color:var(--primary);" onchange="handleMacSelection(this)">
+                                <option value="">-- Select Discovered MAC --</option>
+                            </select>
+                        </div>
+                    </div>
+                    <hr style="border:0; border-top:1px solid var(--border); margin:2rem 0;">
+
+                    <form action="{{ url_for('devices.pair_device') }}" method="POST" id="add-device-form">
+                        <input type="hidden" name="node_id" id="hidden-mac" required>
+                        <div class="form-group">
+                            <label class="form-label">Appliance Name</label>
+                            <input type="text" name="name" id="device-name-input" class="form-control" placeholder="e.g., Living Room AC" required onkeyup="checkFormValidity()">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label">Select Appliance Type</label>
+                            <select name="type" class="form-control" id="device-type-select" onchange="updateFormDetails()" required>
+                                <option value="">-- Select Type --</option>
+                                <option value="HVAC">HVAC (Air Conditioner)</option>
+                                <option value="Gas Dryer">Gas Dryer</option>
+                            </select>
+                        </div>
+
+                        <div id="dynamic-details" style="display:none;">
+                            <div class="form-group" id="ac-subtype" style="display:none;">
+                                <label class="form-label">HVAC Type</label>
+                                <select class="form-control" id="hvac-tech-select" onchange="updateInverterMapping()">
+                                    <option value="noninverter">Non-Inverter (Fixed Speed)</option>
+                                    <option value="inverter">Inverter (Variable Speed)</option>
+                                </select>
+                            </div>
+                            <input type="hidden" name="is_inverter" id="is-inverter-hidden" value="0">
+                            <div class="form-group">
+                                <label class="form-label">Select Current Sensor</label>
+                                <select name="current_sensor" class="form-control" id="current-sensor-select" onchange="updateSensorDependentUI()" required>
+                                    <option value="">-- Select Current Sensor --</option>
+                                    <option value="SCT013-015">SCT-013-015 (15 A clamp)</option>
+                                    <option value="ZHT103C">ZHT103C (5 A CT)</option>
+                                </select>
+                            </div>
+                            <div class="wiring-guide" id="wiring-guide">
+                                <strong>Hardware Wiring for <span id="wire-type-name"></span></strong>
+                                <ul id="wire-list"></ul>
+                                <p id="wire-note" style="margin-top:10px; font-size:0.85rem; color:#92400E; display:none;"><em></em></p>
+                            </div>
+                            <div style="margin-top:2rem;">
+                                <button type="submit" class="btn btn-primary" id="btn-save-device" disabled style="width:100%; justify-content:center; padding:0.8rem; font-size:1.05rem">Save & Link Appliance</button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- DEVICE DETAIL MODAL -->
+    <div id="detail-overlay" class="detail-overlay" onclick="if(event.target===this)closeDeviceDetail()">
+        <div class="detail-panel">
+            <div class="detail-header">
+                <div class="detail-title" id="detail-title">Device Name</div>
+                <div style="display:flex; align-items:center; gap:0.5rem;">
+                    <span id="detail-offline-status" class="status-badge status-danger" style="display:none;">Offline</span>
+                    <span id="detail-run-status" class="status-badge" style="display:none;"></span>
+                    <button class="close-btn" onclick="closeDeviceDetail()">&times;</button>
+                </div>
+            </div>
+            <div class="detail-body">
+                <div class="detail-actions" id="detail-action-bar" style="display:none;"></div>
+
+                <!-- Graph Mode Control Bar -->
+                <div id="chart-mode-bar" class="chart-mode-bar" style="display:none;">
+                    <div style="display:flex; align-items:center; gap:1rem; flex-wrap:wrap;">
+                        <label style="font-size:0.85rem; font-weight:600;">Graph Mode:</label>
+                        <select id="chart-mode-select" onchange="onChartModeChange()" class="form-control" style="width:auto; padding:0.35rem 0.75rem; font-size:0.85rem;">
+                            <option value="live">Live Auto-Update (Last 1080 pts)</option>
+                            <option value="history">History Range</option>
+                        </select>
+                        <div id="history-range-inputs" style="display:none; align-items:center; gap:0.5rem; flex-wrap:wrap;">
+                            <div style="display:flex; gap:0.3rem; align-items:center;">
+                                <input type="date" id="history-start-date" class="form-control" style="padding:0.35rem; font-size:0.8rem; width:auto;" />
+                                <input type="text" id="history-start-time" maxlength="8" placeholder="HH:MM:SS" oninput="autoFormatTime(this)" class="form-control" style="padding:0.35rem; font-size:0.8rem; width:80px; text-align:center;" />
+                                <select id="history-start-ampm" class="form-control" style="padding:0.35rem; font-size:0.8rem; width:auto;">
+                                    <option value="AM">AM</option>
+                                    <option value="PM">PM</option>
+                                </select>
+                            </div>
+                            <span style="color:var(--text-muted);">to</span>
+                            <div style="display:flex; gap:0.3rem; align-items:center;">
+                                <input type="date" id="history-end-date" class="form-control" style="padding:0.35rem; font-size:0.8rem; width:auto;" />
+                                <input type="text" id="history-end-time" maxlength="8" placeholder="HH:MM:SS" oninput="autoFormatTime(this)" class="form-control" style="padding:0.35rem; font-size:0.8rem; width:80px; text-align:center;" />
+                                <select id="history-end-ampm" class="form-control" style="padding:0.35rem; font-size:0.8rem; width:auto;">
+                                    <option value="AM">AM</option>
+                                    <option value="PM">PM</option>
+                                </select>
+                            </div>
+                            <button class="btn btn-primary" onclick="applyHistoryRange()" style="padding:0.35rem 0.75rem; font-size:0.8rem;">Apply</button>
+                        </div>
+                        <div style="display:flex; align-items:center; gap:0.5rem; margin-left:auto; flex-wrap:wrap;">
+                            <label style="font-size:0.85rem; font-weight:600;">Data:</label>
+                            <label style="display:flex; align-items:center; gap:0.3rem; font-size:0.8rem; cursor:pointer;">
+                                <input type="radio" name="data-filter" value="filtered" checked onchange="onFilterChange(this)"> Filtered
+                            </label>
+                            <label style="display:flex; align-items:center; gap:0.3rem; font-size:0.8rem; cursor:pointer;">
+                                <input type="radio" name="data-filter" value="unfiltered" onchange="onFilterChange(this)"> Unfiltered
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="detail-charts">
+                    <div id="chart-empty-hint" style="display:none; text-align:center; color:var(--text-muted); font-size:0.85rem; padding:0.75rem; border:1px dashed #d0d0d0; border-radius:6px; margin-bottom:0.5rem;"></div>
+                    <div class="spc-chart-section" id="chart-section-temps">
+                        <div class="spc-chart-title">Return &amp; Supply Air Temperature</div>
+                        <div class="spc-chart-wrapper"><canvas id="chart-temps"></canvas></div>
+                        <div class="spc-legend">
+                            <span><span class="spc-legend-line" style="background:#8B5CF6"></span>Return</span>
+                            <span><span class="spc-legend-line" style="background:#10B981"></span>Supply</span>
+                        </div>
+                    </div>
+                    <div class="spc-chart-section" id="chart-section-deltat">
+                        <div class="spc-chart-title">Delta-T (Return &minus; Supply)</div>
+                        <div class="spc-chart-wrapper"><canvas id="chart-deltat"></canvas></div>
+                        <div class="spc-legend">
+                            <span><span class="spc-legend-line" style="background:#2563EB"></span>Delta-T</span>
+                            <span><span class="spc-legend-line" style="background:#3B82F6"></span>LCL</span>
+                        </div>
+                        <div id="baseline-inputs-deltat" class="baseline-inputs-row" style="display:none;">
+                            <strong style="font-size:0.85rem; display:block; margin-bottom:0.5rem;">Delta-T Threshold</strong>
+                            <div style="display:flex; gap:1rem; flex-wrap:wrap;">
+                                <div style="flex:1; min-width:120px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">LCL (°C)</label>
+                                    <input type="number" step="0.001" id="bl-deltat-lcl" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
+                                </div>
+                                <div style="flex:1; min-width:120px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">Alert delay (min)</label>
+                                    <input type="number" step="1" min="1" id="bl-deltat-delay" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
+                                </div>
+                            </div>
+                            <div style="font-size:0.7rem; color:var(--text-muted); margin-top:0.4rem;">Alert fires when Delta-T stays below the LCL for this many minutes while the compressor is running.</div>
+                        </div>
+                    </div>
+                    <div class="spc-chart-section" id="chart-section-current">
+                        <div class="spc-chart-title">Compressor Current</div>
+                        <div class="spc-chart-wrapper"><canvas id="chart-current"></canvas></div>
+                        <div class="spc-legend">
+                            <span><span class="spc-legend-line" style="background:#F59E0B"></span>Current</span>
+                            <span><span class="spc-legend-line" style="background:#EF4444"></span>UCL</span>
+                            <span><span class="spc-legend-line" style="background:#64748B"></span>Mean</span>
+                            <span><span class="spc-legend-line" style="background:#3B82F6"></span>LCL</span>
+                        </div>
+                        <div id="baseline-inputs-current" class="baseline-inputs-row" style="display:none;">
+                            <strong style="font-size:0.85rem; display:block; margin-bottom:0.5rem;">Compressor Current Threshold</strong>
+                            <div style="display:flex; gap:1rem; flex-wrap:wrap;">
+                                <div style="flex:1; min-width:120px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">UCL (A)</label>
+                                    <input type="number" step="0.001" id="bl-current-ucl" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
+                                </div>
+                                <div style="flex:1; min-width:120px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">LCL (A)</label>
+                                    <input type="number" step="0.001" id="bl-current-lcl" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="spc-chart-section" id="chart-section-texhaust">
+                        <div class="spc-chart-title">Exhaust Temperature</div>
+                        <div class="spc-chart-wrapper"><canvas id="chart-texhaust"></canvas></div>
+                        <div class="spc-legend">
+                            <span><span class="spc-legend-line" style="background:#DC2626"></span>Temp</span>
+                            <span><span class="spc-legend-line" style="background:#EF4444"></span>UCL</span>
+                            <span><span class="spc-legend-line" style="background:#64748B"></span>Mean</span>
+                            <span><span class="spc-legend-line" style="background:#3B82F6"></span>LCL</span>
+                        </div>
+                        <div id="baseline-inputs-texhaust" class="baseline-inputs-row" style="display:none;">
+                            <strong style="font-size:0.85rem; display:block; margin-bottom:0.5rem;">Exhaust Temperature Threshold</strong>
+                            <div style="display:flex; gap:1rem; flex-wrap:wrap;">
+                                <div style="flex:1; min-width:120px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">UCL (°C)</label>
+                                    <input type="number" step="0.001" id="bl-texhaust-ucl" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
+                                </div>
+                                <div style="flex:1; min-width:120px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">LCL (°C)</label>
+                                    <input type="number" step="0.001" id="bl-texhaust-lcl" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="spc-chart-section" id="chart-section-dryer-current">
+                        <div class="spc-chart-title">Motor Current</div>
+                        <div class="spc-chart-wrapper"><canvas id="chart-dryer-current"></canvas></div>
+                        <div class="spc-legend">
+                            <span><span class="spc-legend-line" style="background:#F59E0B"></span>Current</span>
+                            <span><span class="spc-legend-line" style="background:#EF4444"></span>UCL</span>
+                            <span><span class="spc-legend-line" style="background:#64748B"></span>Mean</span>
+                            <span><span class="spc-legend-line" style="background:#3B82F6"></span>LCL</span>
+                        </div>
+                        <div id="baseline-inputs-dryer-current" class="baseline-inputs-row" style="display:none;">
+                            <strong style="font-size:0.85rem; display:block; margin-bottom:0.5rem;">Motor Current Baseline</strong>
+                            <div style="display:flex; gap:1rem; flex-wrap:wrap;">
+                                <div style="flex:1; min-width:120px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">Mean (A)</label>
+                                    <input type="number" step="0.001" id="bl-current-mean" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
+                                </div>
+                            </div>
+                            <div style="font-size:0.7rem; color:var(--text-muted); margin-top:0.4rem;">UCL/LCL are auto-computed as ±20% of the mean.</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Live Readings (moved below charts) -->
+                <div class="readings-grid" id="detail-readings"></div>
+
+                <!-- Analytics Table Section -->
+                <div class="data-table-section" id="table-container" style="display:none;">
+                    <div class="data-table-header">
+                        <h3 id="table-title">Analytics Data</h3>
+                        <button class="btn btn-primary" onclick="showExportModal()" id="btn-export">Export to Excel</button>
+                    </div>
+                    <div class="data-table-wrapper">
+                        <table class="data-table" id="data-table">
+                            <thead><tr id="table-headers"></tr></thead>
+                            <tbody id="table-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Maintenance History Section -->
+                <div class="data-table-section" id="maintenance-container">
+                    <div class="data-table-header">
+                        <h3>Maintenance History</h3>
+                    </div>
+                    <div class="data-table-wrapper">
+                        <table class="data-table" id="maintenance-table">
+                            <thead>
+                                <tr><th>Maintenance Date</th></tr>
+                            </thead>
+                            <tbody id="maintenance-body">
+                                <tr><td style="text-align:center; padding:2rem; color:var(--text-muted)">No maintenance records yet.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div id="alerts-panel" style="margin-top:1.5rem;">
+                    <div class="detail-section-title">Alerts</div>
+                    <div id="alerts-content" style="max-height:220px; overflow-y:auto;"></div>
+                </div>
+
+                <!-- Bottom Buttons -->
+                <div id="detail-bottom-actions" style="margin-top:1rem; padding-top:1rem; border-top:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap;">
+                    <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+                        <span id="baseline-controls" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
+                        <button id="btn-configure-baseline" class="btn btn-primary" style="font-size:0.85rem;" onclick="showBaselineConfigPanel()">Configure Baseline</button>
+                        <button id="btn-edit-baseline" class="btn btn-primary" style="display:none; font-size:0.85rem;" onclick="showBaselineConfigPanel()">Edit Baseline</button>
+                        <button id="btn-save-baseline" class="btn btn-primary" style="display:none; font-size:0.85rem;" onclick="saveBaselineConfig()">Save Baseline</button>
+                        <button id="btn-cancel-baseline" class="btn btn-secondary" style="display:none; font-size:0.85rem;" onclick="hideBaselineInputs()">Cancel</button>
+                        <button id="btn-remove-baseline" class="btn btn-danger" style="display:none; font-size:0.85rem;" onclick="removeBaselineConfig()">Remove Baseline</button>
+                        <span id="baseline-timestamp" style="font-size:0.75rem; color:var(--text-muted);"></span>
+                        </span>
+                    </div>
+                    <form id="forget-form" method="POST" onsubmit="return confirm('Are you sure you want to forget this device?');">
+                        <button type="submit" class="btn btn-danger">Forget Device</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- EXPORT DATA MODAL -->
+    <div id="export-overlay" class="detail-overlay" onclick="if(event.target===this)closeExportModal()" style="z-index: 1100;">
+        <div class="detail-panel" style="max-width: 500px;">
+            <div class="detail-header">
+                <div class="detail-title">Export Data to Excel</div>
+                <button class="close-btn" onclick="closeExportModal()">&times;</button>
+            </div>
+            <div class="detail-body">
+                <div class="form-group">
+                    <label class="form-label">Export Range</label>
+                    <select id="export-range" class="form-control" onchange="toggleExportDateInputs()">
+                        <option value="custom">Custom Date Range</option>
+                        <option value="all">All Data Since Calibration</option>
+                    </select>
+                </div>
+                <div id="custom-date-inputs">
+                    <div class="form-group">
+                        <label class="form-label">Start Date</label>
+                        <div style="display:flex; gap:0.5rem; align-items:center;">
+                            <input type="date" id="export-start-date" class="form-control" style="flex:1;" />
+                            <input type="text" id="export-start-time" maxlength="8" placeholder="HH:MM:SS" oninput="autoFormatTime(this)" class="form-control" style="width:90px; text-align:center;" />
+                            <select id="export-start-ampm" class="form-control" style="width:auto;">
+                                <option value="AM">AM</option>
+                                <option value="PM">PM</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">End Date</label>
+                        <div style="display:flex; gap:0.5rem; align-items:center;">
+                            <input type="date" id="export-end-date" class="form-control" style="flex:1;" />
+                            <input type="text" id="export-end-time" maxlength="8" placeholder="HH:MM:SS" oninput="autoFormatTime(this)" class="form-control" style="width:90px; text-align:center;" />
+                            <select id="export-end-ampm" class="form-control" style="width:auto;">
+                                <option value="AM">AM</option>
+                                <option value="PM">PM</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer; font-weight:400;">
+                        <input type="checkbox" id="export-include-idle" /> Include idle data
+                    </label>
+                </div>
+                <button class="btn btn-primary" onclick="downloadExcel()" style="width:100%; justify-content:center;">Download Excel File</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- DISCORD REGISTRATION MODAL -->
+    <div id="discord-overlay" class="detail-overlay" onclick="if(event.target===this)closeDiscordModal()" style="z-index: 1100;">
+        <div class="detail-panel" style="max-width: 500px;">
+            <div class="detail-header">
+                <div class="detail-title">Discord Alert Settings</div>
+                <button class="close-btn" onclick="closeDiscordModal()">&times;</button>
+            </div>
+            <div class="detail-body">
+                <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 1rem;">
+                    Receive instant alert notifications in your Discord server.
+                    <a href="https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks" target="_blank" style="color: var(--primary);">How to create a webhook →</a>
+                </p>
+                <div class="form-group">
+                    <label class="form-label">Webhook URL</label>
+                    <input type="url" id="discord-webhook-url" class="form-control" placeholder="https://discord.com/api/webhooks/..." style="width:100%;">
+                    <div id="discord-status" style="font-size: 0.8rem; margin-top: 0.35rem; color: var(--text-muted);"></div>
+                </div>
+                <div style="display: flex; gap: 0.75rem; margin-top: 1rem;">
+                    <button class="btn btn-primary" onclick="saveDiscordWebhook()" style="flex:1; justify-content:center;">Save</button>
+                    <button class="btn btn-secondary" onclick="testDiscordWebhook()" style="flex:1; justify-content:center;">Test</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+<script>
+const INITIAL_APPLIANCES = {{ appliances|tojson|safe }};
+const INITIAL_UNPAIRED = {{ unpaired_nodes|tojson|safe }};
+const ALL_NODES = {{ all_nodes|tojson|safe }};
+
+let appliances = INITIAL_APPLIANCES;
+let unpairedNodes = INITIAL_UNPAIRED;
+let selectedApplianceId = null;
+let charts = {};
+let pollTimer = null;
+let unpairedPollTimer = null;
+let floorPlanEditMode = false;
+let floorPlanDirty = new Set();
+let floorPlanDrag = null;
+let energyPieChart = null;
+const CHART_COLORS = ['#2563EB','#F59E0B','#10B981','#EF4444','#8B5CF6','#EC4899','#06B6D4','#84CC16'];
+
+// Detail modal state
+const MAX_CHART_POINTS = 1080;
+let detailChartMode = 'live';
+let detailShowIdle = false; // filtered=true by default
+let detailHistoryStart = null;
+let detailHistoryEnd = null;
+let currentDeviceHasBaseline = false;
+
+function isDryer(type) { return (type || '').includes('Dryer'); }
+
+function badgeClass(status) {
+    const s = (status || '').toLowerCase();
+    if (s.includes('critical') || s.includes('calib')) return 'status-danger';
+    if (s.includes('warning')) return 'status-warning';
+    if (s.includes('normal') || s.includes('running')) return 'status-normal';
+    if (s.includes('offline') || s.includes('idle')) return 'status-offline';
+    return 'status-info';
+}
+
+function fmtTime(iso) {
+    if (!iso) return '--';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleString();
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text == null ? '' : text;
+    return div.innerHTML;
+}
+
+async function fetchJson(url, options = {}) {
+    const resp = await fetch(url, { credentials: 'same-origin', ...options });
+    const text = await resp.text();
+    let data;
+    try { data = JSON.parse(text); } catch (e) { data = text; }
+    if (!resp.ok) {
+        const msg = (data && (data.error || data.message)) || text || `HTTP ${resp.status}`;
+        throw new Error(msg);
+    }
+    return data;
+}
+
+function toggleSidebar() {
+    const sb = document.getElementById('sidebar');
+    const ov = document.getElementById('sidebar-overlay');
+    sb.classList.toggle('open');
+    ov.classList.toggle('active');
+}
+
+function switchView(viewId, el) {
+    closeDeviceDetail();
+    closeDiscordModal();
+    document.querySelectorAll('.view-section').forEach(v => v.classList.remove('active'));
+    document.getElementById('view-' + viewId).classList.add('active');
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    if (el) el.classList.add('active');
+    if (viewId === 'dashboard') {
+        updateLiveData();
+    }
+    if (viewId === 'add-device') refreshUnpaired();
+}
+
+/* ---------- ENERGY SUMMARY ---------- */
+function initEnergySummary() {
+    const sel = document.getElementById('energy-month-select');
+    if (!sel) return;
+    sel.addEventListener('change', () => loadEnergySummary(sel.value));
+    populateEnergyMonths();
+}
+
+async function populateEnergyMonths() {
+    const sel = document.getElementById('energy-month-select');
+    if (!sel) return;
+    try {
+        const data = await fetchJson('/api/energy_months');
+        const months = Array.isArray(data) ? data : (data.months || []);
+        sel.innerHTML = '';
+        const current = new Date().toISOString().slice(0, 7);
+        const defaultMonth = months.includes(current) ? current : (months[0] || current);
+        months.forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m;
+            const d = new Date(m + '-01T00:00:00');
+            opt.textContent = isNaN(d.getTime()) ? m : d.toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+            sel.appendChild(opt);
+        });
+        sel.value = defaultMonth;
+        loadEnergySummary(defaultMonth);
+    } catch (e) {
+        console.error('energy months error', e);
+    }
+}
+
+async function loadEnergySummary(month) {
+    const totalEl = document.getElementById('energy-total-kwh');
+    const typeEl = document.getElementById('energy-type-breakdown');
+    const listEl = document.getElementById('energy-appliance-list');
+    try {
+        const data = await fetchJson('/api/energy_summary?month=' + encodeURIComponent(month));
+        totalEl.textContent = (data.total_kwh != null ? data.total_kwh.toFixed(2) : '--') + ' kWh';
+
+        const byType = data.by_type || {};
+        const hvacKwh = byType['HVAC'] || byType['Air Conditioner'] || 0;
+        const dryerKwh = byType['Gas Dryer'] || byType['Dryer'] || 0;
+        typeEl.innerHTML = `
+            <div class="energy-type-item hvac">
+                <div class="energy-type-label">HVAC</div>
+                <div class="energy-type-value">${hvacKwh.toFixed(2)} kWh</div>
+            </div>
+            <div class="energy-type-item dryer">
+                <div class="energy-type-label">Dryer</div>
+                <div class="energy-type-value">${dryerKwh.toFixed(2)} kWh</div>
+            </div>
+        `;
+
+        const apps = data.appliances || [];
+        if (apps.length === 0) {
+            listEl.innerHTML = '<p class="empty-state" style="padding:1rem;">No data for this month.</p>';
+        } else {
+            listEl.innerHTML = apps.map((a, i) => `
+                <div class="energy-appliance-item">
+                    <span class="energy-appliance-name"><span class="energy-dot" style="background:${CHART_COLORS[i % CHART_COLORS.length]}"></span>${escapeHtml(a.name)}</span>
+                    <span style="font-weight:600;">${(a.energy_kwh != null ? a.energy_kwh.toFixed(2) : '--')} kWh</span>
+                </div>
+            `).join('');
+        }
+
+        const ctx = document.getElementById('energyPieChart').getContext('2d');
+        if (energyPieChart) energyPieChart.destroy();
+        energyPieChart = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: apps.map(a => a.name),
+                datasets: [{
+                    data: apps.map(a => a.energy_kwh || 0),
+                    backgroundColor: apps.map((_, i) => CHART_COLORS[i % CHART_COLORS.length]),
+                    borderWidth: 0
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: { callbacks: { label: (ctx) => `${ctx.label}: ${ctx.raw.toFixed(2)} kWh` } }
+                }
+            }
+        });
+    } catch (e) {
+        totalEl.textContent = '-- kWh';
+        typeEl.innerHTML = '';
+        listEl.innerHTML = '<p class="empty-state" style="padding:1rem;">Unable to load energy summary.</p>';
+        console.error('energy summary error', e);
+    }
+}
+
+function exportEnergySummary() {
+    const sel = document.getElementById('energy-month-select');
+    const month = sel ? sel.value : new Date().toISOString().slice(0, 7);
+    window.open('/api/energy_summary/export?month=' + encodeURIComponent(month), '_blank');
+}
+
+/* ---------- FLOOR PLAN ---------- */
+function getMappedAppliances() { return appliances.filter(a => a.map_on_map); }
+function getUnmappedAppliances() { return appliances.filter(a => !a.map_on_map); }
+
+function fpStatusClass(a, live) {
+    if (!live || live.is_offline) return 'offline';
+    if (a.alert_status === 'critical') return 'critical';
+    if (a.alert_status === 'warning') return 'warning';
+    if (live.running_status === 'running') return 'running';
+    return 'idle';
+}
+
+function renderFloorPlan() {
+    const canvas = document.getElementById('floor-plan-canvas');
+    const empty = document.getElementById('fp-empty');
+    if (!canvas) return;
+    canvas.querySelectorAll('.fp-block').forEach(el => el.remove());
+    if (empty) empty.style.display = getMappedAppliances().length ? 'none' : 'block';
+
+    const rect = canvas.getBoundingClientRect();
+    getMappedAppliances().forEach(a => {
+        const el = document.createElement('div');
+        el.className = 'fp-block ' + fpStatusClass(a, null);
+        el.id = 'fp-block-' + a.id;
+        el.style.left = Math.max(0, Math.min(rect.width - 40, (a.map_x || 0))) + 'px';
+        el.style.top = Math.max(0, Math.min(rect.height - 30, (a.map_y || 0))) + 'px';
+        el.style.width = Math.max(40, (a.map_w || 120)) + 'px';
+        el.style.height = Math.max(30, (a.map_h || 60)) + 'px';
+        el.innerHTML = escapeHtml(a.name) + '<span class="fp-remove" onclick="removeFromFloorPlan(' + a.id + ', event)">&times;</span>';
+        canvas.appendChild(el);
+    });
+
+    if (floorPlanEditMode) enableFloorPlanDrag();
+    renderAddBlockDropdown();
+    updateFpActionButtons();
+}
+
+function renderAddBlockDropdown() {
+    const btn = document.getElementById('fp-add-btn');
+    const menu = document.getElementById('fp-add-menu');
+    if (!btn || !menu) return;
+    const unmapped = getUnmappedAppliances();
+    btn.textContent = 'Add Block (' + unmapped.length + ')';
+    btn.disabled = unmapped.length === 0;
+    if (unmapped.length === 0) {
+        menu.innerHTML = '<div class="fp-dropdown-item" style="color:var(--text-muted); cursor:default;">No new devices</div>';
+        return;
+    }
+    menu.innerHTML = unmapped.map(a =>
+        `<div class="fp-dropdown-item" onclick="addToFloorPlan(${a.id})">${escapeHtml(a.name)}</div>`
+    ).join('');
+}
+
+function toggleAddDropdown() {
+    const menu = document.getElementById('fp-add-menu');
+    if (!menu) return;
+    menu.classList.toggle('show');
+}
+
+function closeAddDropdown() {
+    const menu = document.getElementById('fp-add-menu');
+    if (menu) menu.classList.remove('show');
+}
+
+function updateFpActionButtons() {
+    const editBtn = document.getElementById('fp-edit-btn');
+    const cancelBtn = document.getElementById('fp-cancel-btn');
+    const saveBtn = document.getElementById('fp-save-btn');
+    if (floorPlanEditMode) {
+        editBtn.style.display = 'none';
+        cancelBtn.style.display = 'inline-flex';
+        saveBtn.style.display = 'inline-flex';
+        saveBtn.disabled = floorPlanDirty.size === 0;
+    } else {
+        editBtn.style.display = 'inline-flex';
+        cancelBtn.style.display = 'none';
+        saveBtn.style.display = 'none';
+        saveBtn.disabled = true;
+    }
+}
+
+function addToFloorPlan(id) {
+    const a = appliances.find(x => x.id === id);
+    if (!a) return;
+    closeAddDropdown();
+    if (!floorPlanEditMode) enterFloorPlanEdit();
+    a.map_on_map = true;
+    if (a.map_x == null) a.map_x = 20;
+    if (a.map_y == null) a.map_y = 20;
+    if (a.map_w == null) a.map_w = 120;
+    if (a.map_h == null) a.map_h = 60;
+    floorPlanDirty.add(id);
+    updateFpActionButtons();
+    renderFloorPlan();
+}
+
+function removeFromFloorPlan(id, event) {
+    if (event) event.stopPropagation();
+    const a = appliances.find(x => x.id === id);
+    if (!a) return;
+    a.map_on_map = false;
+    floorPlanDirty.add(id);
+    updateFpActionButtons();
+    renderFloorPlan();
+}
+
+function enterFloorPlanEdit() {
+    const canvas = document.getElementById('floor-plan-canvas');
+    floorPlanEditMode = true;
+    canvas.classList.add('editing');
+    updateFpActionButtons();
+    enableFloorPlanDrag();
+}
+
+function toggleFloorPlanEdit() {
+    if (floorPlanEditMode) {
+        cancelFloorPlanEdit();
+    } else {
+        enterFloorPlanEdit();
+    }
+}
+
+async function cancelFloorPlanEdit() {
+    const canvas = document.getElementById('floor-plan-canvas');
+    floorPlanEditMode = false;
+    canvas.classList.remove('editing');
+    floorPlanDirty.clear();
+    updateFpActionButtons();
+    disableFloorPlanDrag();
+    await refreshAppliances();
+}
+
+function enableFloorPlanDrag() {
+    const canvas = document.getElementById('floor-plan-canvas');
+    if (!canvas) return;
+    canvas.querySelectorAll('.fp-block').forEach(el => {
+        el.addEventListener('pointerdown', onFloorPlanPointerDown);
+    });
+}
+
+function disableFloorPlanDrag() {
+    const canvas = document.getElementById('floor-plan-canvas');
+    if (!canvas) return;
+    canvas.querySelectorAll('.fp-block').forEach(el => {
+        el.removeEventListener('pointerdown', onFloorPlanPointerDown);
+    });
+}
+
+function onFloorPlanPointerDown(e) {
+    if (!floorPlanEditMode) return;
+    const el = e.currentTarget;
+    const id = parseInt(el.id.replace('fp-block-', ''));
+    const a = appliances.find(x => x.id === id);
+    const canvas = document.getElementById('floor-plan-canvas');
+    const rect = canvas.getBoundingClientRect();
+    floorPlanDrag = {
+        el, a,
+        startX: e.clientX,
+        startY: e.clientY,
+        origLeft: parseFloat(el.style.left) || 0,
+        origTop: parseFloat(el.style.top) || 0
+    };
+    el.setPointerCapture(e.pointerId);
+    el.addEventListener('pointermove', onFloorPlanPointerMove);
+    el.addEventListener('pointerup', onFloorPlanPointerUp);
+    el.addEventListener('pointercancel', onFloorPlanPointerUp);
+}
+
+function onFloorPlanPointerMove(e) {
+    if (!floorPlanDrag) return;
+    const { el, startX, startY, origLeft, origTop } = floorPlanDrag;
+    const canvas = document.getElementById('floor-plan-canvas');
+    const rect = canvas.getBoundingClientRect();
+    let nx = origLeft + (e.clientX - startX);
+    let ny = origTop + (e.clientY - startY);
+    const w = parseFloat(el.style.width) || el.offsetWidth;
+    const h = parseFloat(el.style.height) || el.offsetHeight;
+    nx = Math.max(0, Math.min(rect.width - w, nx));
+    ny = Math.max(0, Math.min(rect.height - h, ny));
+    el.style.left = nx + 'px';
+    el.style.top = ny + 'px';
+}
+
+function onFloorPlanPointerUp(e) {
+    if (!floorPlanDrag) return;
+    const { el, a } = floorPlanDrag;
+    a.map_x = parseFloat(el.style.left);
+    a.map_y = parseFloat(el.style.top);
+    floorPlanDirty.add(a.id);
+    updateFpActionButtons();
+    el.releasePointerCapture(e.pointerId);
+    el.removeEventListener('pointermove', onFloorPlanPointerMove);
+    el.removeEventListener('pointerup', onFloorPlanPointerUp);
+    el.removeEventListener('pointercancel', onFloorPlanPointerUp);
+    floorPlanDrag = null;
+}
+
+async function saveFloorPlan() {
+    const dirty = Array.from(floorPlanDirty).map(id => appliances.find(a => a.id === id)).filter(Boolean);
+    if (dirty.length === 0) return;
+    try {
+        await Promise.all(dirty.map(a => fetchJson('/api/device/' + a.id + '/map_position', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                map_on_map: !!a.map_on_map,
+                map_x: a.map_x,
+                map_y: a.map_y,
+                map_w: a.map_w,
+                map_h: a.map_h
+            })
+        })));
+        floorPlanDirty.clear();
+        floorPlanEditMode = false;
+        document.getElementById('floor-plan-canvas').classList.remove('editing');
+        updateFpActionButtons();
+        disableFloorPlanDrag();
+        setFpStatus('Floor plan saved.', false);
+        await refreshAppliances();
+    } catch (e) {
+        setFpStatus('Save failed: ' + e.message, true);
+    }
+}
+
+function setFpStatus(text, isError) {
+    const el = document.getElementById('fp-status');
+    if (!el) return;
+    el.textContent = text;
+    el.style.color = isError ? '#991B1B' : 'var(--text-muted)';
+    setTimeout(() => { el.textContent = ''; }, 3000);
+}
+
+/* ---------- DEVICE CARDS & LIVE DATA ---------- */
+function updateCardStatus(a, data) {
+    const badge = document.getElementById('badge-' + a.id);
+    if (!badge) return;
+    const status = data.status || a.status;
+    let cls = 'status-normal', txt = 'Normal';
+    if (status === 'offset_calibration_needed') { cls = 'status-danger'; txt = 'Calib. Needed'; }
+    else if (status === 'calibrating') { cls = 'status-calibrating'; txt = 'Calibrating...'; }
+    else if (data.alert_status === 'critical') { cls = 'status-danger'; txt = 'Critical'; }
+    else if (data.alert_status === 'warning') { cls = 'status-warning'; txt = 'Warning'; }
+    badge.className = 'status-badge ' + cls;
+    badge.textContent = txt;
+}
+
+function updateLiveData() {
+    if (!appliances.length) return;
+    Promise.all(appliances.map(a => fetchJson('/api/device/' + a.id + '/latest').catch(() => null)))
+        .then(results => {
+            results.forEach((data, i) => {
+                if (!data) return;
+                const a = appliances[i];
+                // Live status convergence: /latest carries the fresh status, so
+                // sync it into the appliances array and re-render dependent UI
+                // without requiring a page refresh.
+                if (data.status && data.status !== a.status) {
+                    a.status = data.status;
+                    if (selectedApplianceId === a.id) renderActionBar(a);
+                }
+                const card = document.getElementById('card-' + a.id);
+                if (card) {
+                    const offline = document.getElementById('offline-' + a.id);
+                    if (offline) {
+                        if (data.is_offline) {
+                            offline.style.display = 'block';
+                            offline.style.background = 'var(--danger)';
+                            offline.textContent = 'Device Offline';
+                        } else if (!data.has_data) {
+                            offline.style.display = 'block';
+                            offline.style.background = 'var(--warning)';
+                            offline.textContent = 'Awaiting Sensor Data...';
+                        } else {
+                            offline.style.display = 'none';
+                        }
+                    }
+                    updateCardStatus(a, data);
+                    if (data.has_data) {
+                        if (isDryer(a.type)) {
+                            const t1 = document.getElementById('mini-t1-' + a.id);
+                            if (t1) t1.textContent = (data.Texhaust != null ? data.Texhaust.toFixed(1) : '--') + ' °C';
+                        } else {
+                            const delta = document.getElementById('mini-delta-' + a.id);
+                            if (delta) delta.textContent = (data.DeltaT != null ? data.DeltaT.toFixed(1) : '--') + ' °C';
+                        }
+                        const amp = document.getElementById('mini-amp-' + a.id);
+                        const current = data.Imotor != null ? data.Imotor : data.Icompressor;
+                        if (amp) amp.textContent = (current != null ? current.toFixed(2) : '--') + ' A';
+                        const runBadge = document.getElementById('mini-run-status-' + a.id);
+                        if (runBadge) {
+                            if (data.is_offline) {
+                                runBadge.style.display = 'none';
+                            } else {
+                                runBadge.style.display = 'inline-flex';
+                                runBadge.textContent = data.running_status === 'running' ? 'Running' : 'Idle';
+                                runBadge.className = 'status-badge ' + (data.running_status === 'running' ? 'status-normal' : 'status-info');
+                            }
+                        }
+                    }
+                }
+                if (selectedApplianceId === a.id) updateDetailData();
+            });
+        });
+}
+
+function updateCards() { updateLiveData(); }
+
+/* ---------- DEVICE DETAIL MODAL (v4-style single page) ---------- */
+let detailCharts = {};
+let detailSpcLimits = {};
+let detailPollTimer = null;
+let calibrationPollInterval = null;
+
+function destroyDetailCharts() {
+    Object.values(detailCharts).forEach(c => { if (c) c.destroy(); });
+    detailCharts = {};
+}
+
+function fmtChartTime(iso) {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+}
+
+function fmtChartDateTime(iso) {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return iso;
+    return d.toLocaleString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
+}
+
+function makeChartOptions(yLabel) {
+    return {
+        responsive: true, maintainAspectRatio: false, animation: false,
+        scales: {
+            x: { ticks: { maxTicksLimit: 8, autoSkip: true, font: { size: 10 }, callback: function(val) { return fmtChartTime(this.getLabelForValue(val)); } } },
+            y: { title: { display: true, text: yLabel, font: { size: 10 } }, ticks: { font: { size: 10 } } }
+        },
+        plugins: {
+            legend: { display: false },
+            tooltip: {
+                callbacks: {
+                    title: (items) => {
+                        const label = items[0]?.chart?.data?.labels?.[items[0].dataIndex];
+                        return label ? fmtChartDateTime(label) : '';
+                    },
+                    label: (ctx) => `${ctx.dataset.label}: ${ctx.raw != null ? ctx.raw.toFixed(2) : '--'}`
+                }
+            }
+        }
+    };
+}
+
+function makeDataset(label, color, dash=[], fill=false) {
+    return {
+        label, data: [], borderColor: color, backgroundColor: fill ? color + '33' : 'transparent',
+        borderWidth: dash.length ? 1.5 : 2, borderDash: dash, pointRadius: dash.length ? 0 : 2, tension: 0.3, fill
+    };
+}
+
+function openDeviceDetail(id) {
+    const a = appliances.find(x => x.id === id);
+    if (!a) return;
+    closeDiscordModal();
+    closeExportModal();
+    selectedApplianceId = id;
+    document.getElementById('detail-title').textContent = a.name;
+    document.getElementById('forget-form').action = '/devices/' + id + '/forget';
+    document.getElementById('detail-overlay').classList.add('active');
+    document.getElementById('chart-mode-bar').style.display = 'block';
+    document.getElementById('table-container').style.display = 'block';
+    document.getElementById('detail-readings').innerHTML = '<p style="grid-column:1/-1; text-align:center; color:var(--text-muted);">Loading...</p>';
+    document.getElementById('alerts-content').innerHTML = '<p style="font-size:0.85rem; color:var(--text-muted);">Loading alerts...</p>';
+
+    // Reset graph mode state
+    detailChartMode = 'live';
+    detailShowIdle = false;
+    detailHistoryStart = null;
+    detailHistoryEnd = null;
+    document.getElementById('chart-mode-select').value = 'live';
+    document.querySelectorAll('input[name="data-filter"]').forEach(r => r.checked = (r.value === 'filtered'));
+    document.getElementById('history-range-inputs').style.display = 'none';
+
+    hideBaselineInputs();
+    renderActionBar(a);
+    initCharts(id, !isDryer(a.type));
+    loadAlerts();
+    loadAnalyticsTable();
+    loadMaintenanceTable();
+    checkBaselineResults();
+    updateDetailData();
+    if (detailPollTimer) clearInterval(detailPollTimer);
+    detailPollTimer = setInterval(updateDetailData, 5000);
+}
+
+function closeDeviceDetail() {
+    document.getElementById('detail-overlay').classList.remove('active');
+    selectedApplianceId = null;
+    if (detailPollTimer) { clearInterval(detailPollTimer); detailPollTimer = null; }
+    if (calibrationPollInterval) { clearInterval(calibrationPollInterval); calibrationPollInterval = null; }
+    destroyDetailCharts();
+    detailSpcLimits = {};
+    currentDeviceHasBaseline = false;
+}
+
+function _setDetailGraphsVisible(visible) {
+    // Restore only the sections for the open device's type — never leak the other
+    // type's chart boxes into the modal (e.g. dryer boxes on an HVAC card).
+    const a = appliances.find(x => x.id === selectedApplianceId);
+    const isHVAC = !a || !isDryer(a.type);
+    const chartSections = isHVAC
+        ? ['chart-section-temps', 'chart-section-deltat', 'chart-section-current']
+        : ['chart-section-texhaust', 'chart-section-dryer-current'];
+    const ids = ['chart-mode-bar', ...chartSections, 'table-container', 'detail-readings', 'baseline-controls'];
+    ids.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = visible ? '' : 'none';
+    });
+}
+
+async function renderActionBar(a) {
+    // Always render from fresh server state: opening the card must reflect the
+    // current status even if the background poll has not caught up yet.
+    try {
+        const latest = await fetchJson('/api/device/' + a.id + '/latest');
+        if (latest.status) a.status = latest.status;
+    } catch (e) { /* backend unreachable: fall back to cached status */ }
+
+    const bar = document.getElementById('detail-action-bar');
+    if (!bar) return;
+    bar.style.display = 'none';
+    if (calibrationPollInterval) { clearInterval(calibrationPollInterval); calibrationPollInterval = null; }
+
+    const isHVAC = !isDryer(a.type);
+
+    // HVAC calibration phases take precedence over charts.
+    if (isHVAC && a.status === 'offset_calibration_needed') {
+        bar.style.display = 'flex';
+        bar.innerHTML = `
+            <div style="flex:1;">
+                <h4 style="color:var(--danger); margin-bottom:5px; font-size:1rem;">Calibration Required</h4>
+                <p style="font-size:0.85rem; color:var(--text-muted);">
+                    1. Make sure the AC is <strong>OFF</strong> and both probes have settled at room temperature.<br>
+                    2. Press and hold <strong>Button 2</strong> on the ESP32 for 5 seconds until the buzzer beeps.<br>
+                    3. Immediately start the AC in cooling mode &mdash; the supply probe must drop 8&nbsp;&deg;C below its baseline.<br>
+                    4. Calibration completes automatically (three beeps, up to 10 minutes).
+                </p>
+            </div>
+            <span class="status-badge status-danger">Waiting for Hardware</span>`;
+        _setDetailGraphsVisible(false);
+        return;
+    }
+
+    if (isHVAC && a.status === 'calibrating') {
+        bar.style.display = 'flex';
+        bar.innerHTML = `
+            <div style="flex:1;">
+                <h4 style="color:var(--warning); margin-bottom:5px; font-size:1rem;">Calibrating in progress...</h4>
+                <p style="font-size:0.85rem; color:var(--text-muted);">Baseline captured. Keep the AC running in cooling mode and do not power off the node.</p>
+                <div id="calib-progress-${a.id}" style="margin-top:8px;">
+                    <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text); margin-bottom:4px;">
+                        <span id="calib-drop-${a.id}">Supply: -- &deg;C | Drop: 0.0 / 8.0 &deg;C</span>
+                    </div>
+                    <div style="background:var(--border); border-radius:4px; height:8px; overflow:hidden;">
+                        <div id="calib-bar-${a.id}" style="background:var(--warning); height:100%; width:0%; transition:width 0.3s;"></div>
+                    </div>
+                    <div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px; text-align:right;">
+                        <span id="calib-pct-${a.id}">0%</span>
+                    </div>
+                </div>
+            </div>
+            <div style="display:flex; align-items:center;">
+                <span class="status-badge status-calibrating">Hardware Calibrating</span>
+            </div>`;
+        _setDetailGraphsVisible(false);
+        startCalibrationPolling(a.id);
+        return;
+    }
+
+    _setDetailGraphsVisible(true);
+
+    // Check baseline status
+    try {
+        const base = await fetchJson('/api/device/' + a.id + '/baseline_config');
+        const hasBaseline = base && base.metrics && Object.values(base.metrics).some(m =>
+            (m.ucl !== '' && m.ucl != null) || (m.lcl !== '' && m.lcl != null) || (m.mean !== '' && m.mean != null)
+        );
+        if (!hasBaseline) {
+            bar.style.display = 'flex';
+            bar.innerHTML = `
+                <div style="flex:1;">
+                    <h4 style="color:var(--warning); margin-bottom:5px; font-size:1rem;">Baseline Not Configured</h4>
+                    <p style="font-size:0.85rem; color:var(--text-muted);">Set Delta-T LCL and Current UCL/LCL thresholds to enable alerts.</p>
+                </div>`;
+        }
+    } catch (e) {
+        // ignore
+    }
+}
+
+function startCalibrationPolling(id) {
+    if (calibrationPollInterval) clearInterval(calibrationPollInterval);
+
+    function updateCalibUI(d) {
+        const dropEl = document.getElementById('calib-drop-' + id);
+        const barEl = document.getElementById('calib-bar-' + id);
+        const pctEl = document.getElementById('calib-pct-' + id);
+        const required = d.required != null ? d.required : 8.0;
+        const delta = d.delta != null ? d.delta : 0;
+        if (dropEl) {
+            const ds2Txt = d.ds2 != null ? Number(d.ds2).toFixed(1) : '--';
+            dropEl.textContent = 'Supply: ' + ds2Txt + ' °C | Drop: ' + delta.toFixed(1) + ' / ' + required.toFixed(1) + ' °C';
+        }
+        if (barEl) barEl.style.width = (d.progress_pct || 0) + '%';
+        if (pctEl) pctEl.textContent = (d.progress_pct || 0) + '%';
+    }
+
+    fetchJson('/api/device/' + id + '/calibration_progress').then(d => {
+        if (!d.error) updateCalibUI(d);
+    }).catch(() => {});
+
+    calibrationPollInterval = setInterval(() => {
+        fetchJson('/api/device/' + id + '/calibration_progress').then(d => {
+            if (!d.error) updateCalibUI(d);
+            // If calibration finished, refresh the appliance state and re-render the action bar.
+            if (d.progress_pct >= 100) {
+                refreshAppliances().then(() => {
+                    const a = appliances.find(x => x.id === id);
+                    if (a && selectedApplianceId === id) renderActionBar(a);
+                });
+            }
+        }).catch(() => {});
+    }, 3000);
+}
+
+function renderReadings(a, data) {
+    const grid = document.getElementById('detail-readings');
+    if (!grid) return;
+    const statusCls = (key, val) => readingOutOfThreshold(key, val) ? 'hl-warn' : 'hl';
+    let html = '';
+    if (isDryer(a.type)) {
+        html += readingItem('Exhaust Temp', data.Texhaust != null ? data.Texhaust.toFixed(1) + ' °C' : '--', statusCls('texhaust', data.Texhaust));
+        html += readingItem('Motor Current', data.Imotor != null ? data.Imotor.toFixed(2) + ' A' : '--', statusCls('current', data.Imotor));
+    } else {
+        html += readingItem('Return Temp', data.Treturn != null ? data.Treturn.toFixed(1) + ' °C' : '--', '');
+        html += readingItem('Supply Temp', data.Tsupply != null ? data.Tsupply.toFixed(1) + ' °C' : '--', '');
+        html += readingItem('Delta-T', data.DeltaT != null ? data.DeltaT.toFixed(1) + ' °C' : '--', statusCls('deltat', data.DeltaT));
+        html += readingItem('Compressor Current', data.Icompressor != null ? data.Icompressor.toFixed(2) + ' A' : '--', statusCls('current', data.Icompressor));
+    }
+    grid.innerHTML = html;
+}
+
+function readingItem(label, value, valueClass) {
+    return `<div class="reading-item">
+        <span class="reading-label">${escapeHtml(label)}</span>
+        <span class="reading-value ${valueClass}">${escapeHtml(value)}</span>
+    </div>`;
+}
+
+function readingOutOfThreshold(key, value) {
+    if (value == null || !detailSpcLimits[key]) return false;
+    const lim = detailSpcLimits[key];
+    const ucl = parseFloat(lim.ucl);
+    const lcl = parseFloat(lim.lcl);
+    if (!isNaN(ucl) && value > ucl) return true;
+    if (!isNaN(lcl) && value < lcl) return true;
+    return false;
+}
+
+function initCharts(id, isHVAC) {
+    destroyDetailCharts();
+    detailSpcLimits = {};
+
+    const hvacSections = ['chart-section-temps','chart-section-deltat','chart-section-current'];
+    const dryerSections = ['chart-section-texhaust','chart-section-dryer-current'];
+    const appliance = appliances.find(x => x.id === id);
+    const inCalibrationPhase = isHVAC && appliance &&
+        (appliance.status === 'offset_calibration_needed' || appliance.status === 'calibrating');
+    hvacSections.forEach(sid => document.getElementById(sid).style.display = (isHVAC && !inCalibrationPhase) ? 'block' : 'none');
+    dryerSections.forEach(sid => document.getElementById(sid).style.display = (!isHVAC && !inCalibrationPhase) ? 'block' : 'none');
+
+    if (isHVAC) {
+        detailCharts.temps = new Chart(document.getElementById('chart-temps').getContext('2d'), {
+            type: 'line', data: { labels: [], datasets: [makeDataset('Return °C', '#8B5CF6', []), makeDataset('Supply °C', '#10B981', [])] }, options: makeChartOptions('°C')
+        });
+        detailCharts.deltat = new Chart(document.getElementById('chart-deltat').getContext('2d'), {
+            type: 'line', data: { labels: [], datasets: [makeDataset('Delta-T °C', '#2563EB', []), makeDataset('LCL', '#3B82F6', [6,3])] }, options: makeChartOptions('°C')
+        });
+        detailCharts.current = new Chart(document.getElementById('chart-current').getContext('2d'), {
+            type: 'line', data: { labels: [], datasets: [makeDataset('Current A', '#F59E0B', [], true), makeDataset('UCL', '#EF4444', [6,3]), makeDataset('Mean', '#64748B', [4,4]), makeDataset('LCL', '#3B82F6', [6,3])] }, options: makeChartOptions('A')
+        });
+    } else {
+        detailCharts.texhaust = new Chart(document.getElementById('chart-texhaust').getContext('2d'), {
+            type: 'line', data: { labels: [], datasets: [makeDataset('Temp °C', '#DC2626', []), makeDataset('UCL', '#EF4444', [6,3]), makeDataset('Mean', '#64748B', [4,4]), makeDataset('LCL', '#3B82F6', [6,3])] }, options: makeChartOptions('°C')
+        });
+        detailCharts.dryerCurrent = new Chart(document.getElementById('chart-dryer-current').getContext('2d'), {
+            type: 'line', data: { labels: [], datasets: [makeDataset('Current A', '#F59E0B', [], true), makeDataset('UCL', '#EF4444', [6,3]), makeDataset('Mean', '#64748B', [4,4]), makeDataset('LCL', '#3B82F6', [6,3])] }, options: makeChartOptions('A')
+        });
+    }
+
+    fetchDetailChartData();
+}
+
+function fetchDetailChartData() {
+    if (!selectedApplianceId) return;
+    const a = appliances.find(x => x.id === selectedApplianceId);
+    if (!a) return;
+    const isHVAC = !isDryer(a.type);
+
+    Promise.all([
+        fetchJson('/api/device/' + selectedApplianceId + '/baseline_config').catch(() => ({ metrics: {} })),
+        _fetchChartReadings()
+    ]).then(([base, readings]) => {
+        buildSpcLimits(base.metrics || {});
+        populateHistoryCharts(selectedApplianceId, isHVAC, readings || []);
+    }).catch(e => console.error('fetch chart data error', e));
+}
+
+function _fetchChartReadings() {
+    let url = '/api/device/' + selectedApplianceId + '/latest_n?limit=' + MAX_CHART_POINTS + '&filtered=' + (!detailShowIdle);
+    if (detailChartMode === 'history' && detailHistoryStart && detailHistoryEnd) {
+        url += '&start=' + encodeURIComponent(detailHistoryStart) + '&end=' + encodeURIComponent(detailHistoryEnd);
+    }
+    return fetchJson(url);
+}
+
+function onChartModeChange() {
+    const sel = document.getElementById('chart-mode-select');
+    detailChartMode = sel.value;
+    const rangeInputs = document.getElementById('history-range-inputs');
+    if (detailChartMode === 'history') {
+        rangeInputs.style.display = 'flex';
+        if (!detailHistoryStart) {
+            const now = new Date();
+            const dayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+            setDateTimeGroup('history-start-date', 'history-start-time', 'history-start-ampm', dayAgo);
+            setDateTimeGroup('history-end-date', 'history-end-time', 'history-end-ampm', now);
+        }
+    } else {
+        rangeInputs.style.display = 'none';
+        detailHistoryStart = null;
+        detailHistoryEnd = null;
+    }
+    fetchDetailChartData();
+}
+
+function applyHistoryRange() {
+    const start = combineDateTime('history-start-date', 'history-start-time', 'history-start-ampm');
+    const end = combineDateTime('history-end-date', 'history-end-time', 'history-end-ampm');
+    if (!start || !end) { alert('Please fill in date, time, and AM/PM for both fields.'); return; }
+    detailHistoryStart = start;
+    detailHistoryEnd = end;
+    fetchDetailChartData();
+}
+
+function onFilterChange(el) {
+    detailShowIdle = el.value === 'unfiltered';
+    fetchDetailChartData();
+}
+
+function autoFormatTime(input) {
+    let v = input.value.replace(/\D/g, '').substring(0, 6);
+    if (v.length >= 4) {
+        v = v.replace(/(\d{2})(\d{2})(\d{0,2})/, '$1:$2:$3');
+    } else if (v.length >= 2) {
+        v = v.replace(/(\d{2})(\d{0,2})/, '$1:$2');
+    }
+    input.value = v;
+}
+
+function setDateTimeGroup(dateId, timeId, ampmId, dateObj) {
+    const yyyy = dateObj.getFullYear();
+    const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+    const dd = String(dateObj.getDate()).padStart(2, '0');
+    document.getElementById(dateId).value = `${yyyy}-${mm}-${dd}`;
+
+    let hours = dateObj.getHours();
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    hours = hours % 12;
+    hours = hours ? hours : 12;
+    const h = String(hours).padStart(2, '0');
+    const min = String(dateObj.getMinutes()).padStart(2, '0');
+    const sec = String(dateObj.getSeconds()).padStart(2, '0');
+    document.getElementById(timeId).value = `${h}:${min}:${sec}`;
+    document.getElementById(ampmId).value = ampm;
+}
+
+function combineDateTime(dateId, timeId, ampmId) {
+    const d = document.getElementById(dateId).value;
+    const t = document.getElementById(timeId).value;
+    const ampm = document.getElementById(ampmId).value;
+    if (!d || !t || t.length < 7) return null;
+    const [hhStr, mm, ss] = t.split(':');
+    let hh = parseInt(hhStr, 10);
+    if (ampm === 'PM' && hh !== 12) hh += 12;
+    if (ampm === 'AM' && hh === 12) hh = 0;
+    return `${d}T${String(hh).padStart(2, '0')}:${mm}:${ss}`;
+}
+
+function buildSpcLimits(metrics) {
+    detailSpcLimits = {};
+    Object.entries(metrics).forEach(([m, v]) => {
+        const ucl = v.ucl !== '' && v.ucl != null ? parseFloat(v.ucl) : NaN;
+        const lcl = v.lcl !== '' && v.lcl != null ? parseFloat(v.lcl) : NaN;
+        const mean = v.mean !== '' && v.mean != null ? parseFloat(v.mean) : NaN;
+        const hasUcl = !isNaN(ucl), hasLcl = !isNaN(lcl);
+        if (hasUcl || hasLcl || !isNaN(mean)) {
+            detailSpcLimits[m] = {
+                ucl: hasUcl ? ucl : null,
+                lcl: hasLcl ? lcl : null,
+                mean: !isNaN(mean) ? mean : (hasUcl && hasLcl ? (ucl + lcl) / 2 : null)
+            };
+        }
+    });
+}
+
+function populateHistoryCharts(id, isHVAC, readings) {
+    // Empty-state hint so an intentionally empty (filtered) chart is not mistaken for a bug
+    const hint = document.getElementById('chart-empty-hint');
+    if (hint) {
+        if (!readings.length) {
+            hint.textContent = detailChartMode === 'history'
+                ? 'No readings in the selected time range.'
+                : (detailShowIdle
+                    ? 'No readings yet — waiting for data…'
+                    : 'No running readings (current ≥ 0.25 A) yet — Filtered shows running data only.');
+            hint.style.display = 'block';
+        } else {
+            hint.style.display = 'none';
+        }
+    }
+
+    // Clear existing chart data first
+    Object.values(detailCharts).forEach(c => {
+        if (!c) return;
+        c.data.labels = [];
+        c.data.datasets.forEach(ds => { ds.data = []; });
+    });
+
+    if (!readings.length) {
+        Object.values(detailCharts).forEach(c => { if (c) c.update('none'); });
+        return;
+    }
+
+    // latest_n returns newest first; chart should be chronological
+    const sorted = [...readings].reverse();
+    sorted.forEach(r => {
+        const t = r.time ? new Date(r.time) : new Date();
+        const label = t.toISOString();
+        if (isHVAC) {
+            pushChartPoint('temps', label, r.Treturn, 0);
+            pushChartPoint('temps', label, r.Tsupply, 1);
+            pushChartPoint('deltat', label, r.DeltaT != null ? r.DeltaT : Math.abs((r.Treturn || 0) - (r.Tsupply || 0)));
+            pushChartPoint('current', label, r.Icompressor);
+        } else {
+            pushChartPoint('texhaust', label, r.Texhaust);
+            pushChartPoint('dryerCurrent', label, r.Imotor);
+        }
+    });
+    applySpcLines();
+    Object.values(detailCharts).forEach(c => { if (c) c.update('none'); });
+}
+
+function pushChartPoint(key, label, value, datasetIndex=0) {
+    const c = detailCharts[key];
+    if (!c) return;
+    if (c.data.labels.length === 0 || c.data.labels[c.data.labels.length - 1] !== label) {
+        c.data.labels.push(label);
+        c.data.datasets.forEach((ds, idx) => { ds.data.push(idx === datasetIndex ? (value != null ? value : null) : null); });
+    } else {
+        c.data.datasets[datasetIndex].data[c.data.datasets[datasetIndex].data.length - 1] = value != null ? value : null;
+    }
+}
+
+const spcDsMap = {
+    current: [1, 2, 3],         // UCL, Mean, LCL
+    deltat: [null, null, 1],    // LCL only
+    texhaust: [1, 2, 3],
+    dryerCurrent: [1, 2, 3]
+};
+
+function applySpcLines() {
+    Object.entries(detailCharts).forEach(([key, chart]) => {
+        const lim = detailSpcLimits[keyMapToMetric(key)];
+        if (!lim || !chart || chart.data.labels.length === 0) return;
+        const n = chart.data.labels.length;
+        const map = spcDsMap[key];
+        if (!map) return;
+        [lim.ucl, lim.mean, lim.lcl].forEach((val, i) => {
+            const dsIdx = map[i];
+            if (dsIdx == null) return;
+            const ds = chart.data.datasets[dsIdx];
+            if (!ds) return;
+            if (val == null) {
+                ds.data = [];
+                return;
+            }
+            ds.data = Array(n).fill(val);
+        });
+    });
+}
+
+function keyMapToMetric(key) {
+    const map = { current: 'current', deltat: 'deltat', texhaust: 'texhaust', dryerCurrent: 'current' };
+    return map[key];
+}
+
+function updateDetailData() {
+    if (!selectedApplianceId) return;
+    if (!document.getElementById('detail-overlay').classList.contains('active')) return;
+    const a = appliances.find(x => x.id === selectedApplianceId);
+    if (!a) return;
+
+    fetchJson('/api/device/' + selectedApplianceId + '/latest').then(data => {
+        const offlineBadge = document.getElementById('detail-offline-status');
+        const runBadge = document.getElementById('detail-run-status');
+        if (!data.has_data) {
+            offlineBadge.style.display = 'inline-block';
+            offlineBadge.textContent = data.is_offline ? 'Offline' : 'Awaiting Data';
+            offlineBadge.className = 'status-badge ' + (data.is_offline ? 'status-danger' : 'status-warning');
+            if (runBadge) runBadge.style.display = 'none';
+            renderReadings(a, data);
+            return;
+        }
+        offlineBadge.style.display = 'none';
+        if (runBadge && data.running_status) {
+            runBadge.style.display = 'inline-block';
+            runBadge.textContent = data.running_status === 'running' ? 'Running' : 'Idle';
+            runBadge.className = 'status-badge ' + (data.running_status === 'running' ? 'status-normal' : 'status-info');
+        }
+        renderReadings(a, data);
+
+        // Append latest point to charts only in live mode
+        if (detailChartMode === 'live') {
+            const isHVAC = !isDryer(a.type);
+            // Filtered mode shows running data only — skip idle live points (v4 parity)
+            const skipPush = !detailShowIdle && data.running_status !== 'running';
+            if (!skipPush) {
+                const t = data.time ? new Date(data.time) : new Date();
+                const label = t.toISOString();
+                if (isHVAC) {
+                    pushChartPoint('temps', label, data.Treturn, 0);
+                    pushChartPoint('temps', label, data.Tsupply, 1);
+                    pushChartPoint('deltat', label, data.DeltaT);
+                    pushChartPoint('current', label, data.Icompressor);
+                } else {
+                    pushChartPoint('texhaust', label, data.Texhaust);
+                    pushChartPoint('dryerCurrent', label, data.Imotor);
+                }
+                // keep window size ~1080 points
+                Object.values(detailCharts).forEach(c => {
+                    if (!c) return;
+                    while (c.data.labels.length > MAX_CHART_POINTS) {
+                        c.data.labels.shift();
+                        c.data.datasets.forEach(ds => { if (ds.data.length) ds.data.shift(); });
+                    }
+                });
+                applySpcLines();
+                Object.values(detailCharts).forEach(c => { if (c) c.update('none'); });
+            }
+        }
+    }).catch(e => console.error('detail poll error', e));
+}
+
+/* --- BASELINE CONFIG (inline per chart) --- */
+async function checkBaselineResults() {
+    if (!selectedApplianceId) return;
+    const configureBtn = document.getElementById('btn-configure-baseline');
+    const editBtn = document.getElementById('btn-edit-baseline');
+    const removeBtn = document.getElementById('btn-remove-baseline');
+    const tsEl = document.getElementById('baseline-timestamp');
+    try {
+        const data = await fetchJson('/api/device/' + selectedApplianceId + '/baseline_config');
+        currentDeviceHasBaseline = data && data.metrics && Object.values(data.metrics).some(m =>
+            (m.ucl !== '' && m.ucl != null) || (m.lcl !== '' && m.lcl != null) || (m.mean !== '' && m.mean != null)
+        );
+        if (configureBtn) configureBtn.style.display = currentDeviceHasBaseline ? 'none' : 'inline-flex';
+        if (editBtn) editBtn.style.display = currentDeviceHasBaseline ? 'inline-flex' : 'none';
+        if (removeBtn) removeBtn.style.display = currentDeviceHasBaseline ? 'inline-flex' : 'none';
+        if (tsEl && data && data.updated_at) {
+            tsEl.textContent = 'Baseline updated: ' + new Date(data.updated_at).toLocaleString();
+        } else if (tsEl) {
+            tsEl.textContent = '';
+        }
+    } catch (e) {
+        currentDeviceHasBaseline = false;
+        if (configureBtn) configureBtn.style.display = 'inline-flex';
+        if (editBtn) editBtn.style.display = 'none';
+        if (removeBtn) removeBtn.style.display = 'none';
+    }
+}
+
+async function showBaselineConfigPanel() {
+    if (!selectedApplianceId) return;
+    const a = appliances.find(x => x.id === selectedApplianceId);
+    const isHVAC = a && !isDryer(a.type);
+    try {
+        const data = await fetchJson('/api/device/' + selectedApplianceId + '/baseline_config');
+        const metrics = data.metrics || {};
+        if (isHVAC) {
+            const deltatVals = metrics.deltat || {};
+            document.getElementById('bl-deltat-lcl').value = deltatVals.lcl != null ? deltatVals.lcl : '';
+            document.getElementById('bl-deltat-delay').value = data.delta_t_delay_minutes != null ? data.delta_t_delay_minutes : '';
+            const currentVals = metrics.current || {};
+            document.getElementById('bl-current-ucl').value = currentVals.ucl != null ? currentVals.ucl : '';
+            document.getElementById('bl-current-lcl').value = currentVals.lcl != null ? currentVals.lcl : '';
+            document.getElementById('baseline-inputs-deltat').style.display = 'block';
+            document.getElementById('baseline-inputs-current').style.display = 'block';
+        } else {
+            const texhaustVals = metrics.texhaust || {};
+            document.getElementById('bl-texhaust-ucl') && (document.getElementById('bl-texhaust-ucl').value = texhaustVals.ucl != null ? texhaustVals.ucl : '');
+            document.getElementById('bl-texhaust-lcl') && (document.getElementById('bl-texhaust-lcl').value = texhaustVals.lcl != null ? texhaustVals.lcl : '');
+            const currentVals = metrics.current || {};
+            document.getElementById('bl-current-mean') && (document.getElementById('bl-current-mean').value = currentVals.mean != null ? currentVals.mean : '');
+            document.getElementById('baseline-inputs-texhaust').style.display = 'block';
+            document.getElementById('baseline-inputs-dryer-current').style.display = 'block';
+        }
+        document.getElementById('btn-configure-baseline').style.display = 'none';
+        document.getElementById('btn-edit-baseline').style.display = 'none';
+        document.getElementById('btn-remove-baseline').style.display = 'none';
+        document.getElementById('btn-save-baseline').style.display = 'inline-flex';
+        document.getElementById('btn-cancel-baseline').style.display = 'inline-flex';
+    } catch (e) { alert(e.message); }
+}
+
+function hideBaselineInputs() {
+    document.getElementById('baseline-inputs-deltat').style.display = 'none';
+    document.getElementById('baseline-inputs-current').style.display = 'none';
+    const texhaustRow = document.getElementById('baseline-inputs-texhaust');
+    if (texhaustRow) texhaustRow.style.display = 'none';
+    const dryerCurrentRow = document.getElementById('baseline-inputs-dryer-current');
+    if (dryerCurrentRow) dryerCurrentRow.style.display = 'none';
+    document.getElementById('btn-save-baseline').style.display = 'none';
+    document.getElementById('btn-cancel-baseline').style.display = 'none';
+    checkBaselineResults();
+}
+
+async function saveBaselineConfig() {
+    if (!selectedApplianceId) return;
+    const a = appliances.find(x => x.id === selectedApplianceId);
+    const isHVAC = a && !isDryer(a.type);
+    const metrics = {};
+    function addIfPresent(key, obj) {
+        const cleaned = {};
+        Object.entries(obj).forEach(([k, v]) => { if (v !== '' && v != null) cleaned[k] = parseFloat(v); });
+        if (Object.keys(cleaned).length) metrics[key] = cleaned;
+    }
+    if (isHVAC) {
+        addIfPresent('deltat', { lcl: document.getElementById('bl-deltat-lcl').value });
+        addIfPresent('current', { ucl: document.getElementById('bl-current-ucl').value, lcl: document.getElementById('bl-current-lcl').value });
+    } else {
+        addIfPresent('texhaust', { ucl: document.getElementById('bl-texhaust-ucl')?.value, lcl: document.getElementById('bl-texhaust-lcl')?.value });
+        addIfPresent('current', { mean: document.getElementById('bl-current-mean')?.value });
+    }
+    if (Object.keys(metrics).length === 0) { alert('No values entered.'); return; }
+    const payload = { metrics };
+    if (isHVAC) {
+        const delayRaw = document.getElementById('bl-deltat-delay').value;
+        if (delayRaw !== '' && delayRaw != null) payload.alert_delay_minutes = delayRaw;
+    }
+    try {
+        await fetchJson('/api/device/' + selectedApplianceId + '/baseline_config', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+        });
+        const base = await fetchJson('/api/device/' + selectedApplianceId + '/baseline_config');
+        buildSpcLimits(base.metrics || {});
+        applySpcLines();
+        Object.values(detailCharts).forEach(c => { if (c) c.update('none'); });
+        hideBaselineInputs();
+        renderActionBar(a);
+    } catch (err) { alert(err.message); }
+}
+
+async function removeBaselineConfig() {
+    if (!selectedApplianceId) return;
+    if (!confirm('Remove baseline for this device?')) return;
+    try {
+        await fetchJson('/api/device/' + selectedApplianceId + '/baseline_config', { method: 'DELETE' });
+        detailSpcLimits = {};
+        Object.values(detailCharts).forEach(c => {
+            if (!c) return;
+            c.data.datasets.forEach((ds, idx) => { if (idx >= 1) ds.data = []; });
+            c.update('none');
+        });
+        hideBaselineInputs();
+        const a = appliances.find(x => x.id === selectedApplianceId);
+        if (a) renderActionBar(a);
+    } catch (e) { alert(e.message); }
+}
+
+/* --- ANALYTICS TABLE --- */
+async function loadAnalyticsTable() {
+    if (!selectedApplianceId) return;
+    const a = appliances.find(x => x.id === selectedApplianceId);
+    if (!a) return;
+    const isHVAC = !isDryer(a.type);
+    const title = document.getElementById('table-title');
+    const thead = document.getElementById('table-headers');
+    const tbody = document.getElementById('table-body');
+    const endpoint = isHVAC ? '/api/device/' + selectedApplianceId + '/hvac_analytics' : '/api/device/' + selectedApplianceId + '/dryer_analytics';
+    try {
+        const data = await fetchJson(endpoint);
+        if (isHVAC) {
+            title.textContent = 'HVAC Daily Averages';
+            thead.innerHTML = `
+                <th>Date</th>
+                <th class="numeric">Avg Return (°C)</th>
+                <th class="numeric">Avg Supply (°C)</th>
+                <th class="numeric">Avg Delta-T (°C)</th>
+                <th class="numeric">Energy (kWh)</th>`;
+            const rows = (data.daily_averages || []);
+            if (rows.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:2rem; color:var(--text-muted)">No analytics data yet.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = rows.map(r => {
+                const avgReturn = r.avg_return != null ? r.avg_return : r.avg_intake;
+                const avgSupply = r.avg_supply != null ? r.avg_supply : r.avg_exit;
+                const delta = (avgReturn != null && avgSupply != null) ? Math.abs(avgReturn - avgSupply).toFixed(2) : '--';
+                return `<tr>
+                    <td>${escapeHtml(r.date)}</td>
+                    <td class="numeric">${avgReturn != null ? avgReturn.toFixed(2) + ' °C' : '--'}</td>
+                    <td class="numeric">${avgSupply != null ? avgSupply.toFixed(2) + ' °C' : '--'}</td>
+                    <td class="numeric">${delta !== '--' ? delta + ' °C' : '--'}</td>
+                    <td class="numeric">${r.daily_energy_kwh != null ? r.daily_energy_kwh.toFixed(4) + ' kWh' : '--'}</td>
+                </tr>`;
+            }).join('');
+        } else {
+            title.textContent = 'Dryer Cycles';
+            thead.innerHTML = `
+                <th>Start</th>
+                <th class="numeric">Duration (min)</th>
+                <th class="numeric">Max Temp (°C)</th>
+                <th class="numeric">Energy (kWh)</th>`;
+            const rows = Array.isArray(data) ? data : (data.cycles || []);
+            if (rows.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:2rem; color:var(--text-muted)">No cycle data yet.</td></tr>';
+                return;
+            }
+            tbody.innerHTML = rows.map(r => `<tr>
+                <td>${fmtTime(r.start_time)}</td>
+                <td class="numeric">${r.duration_minutes != null ? r.duration_minutes.toFixed(1) : '--'}</td>
+                <td class="numeric">${r.max_temp != null ? r.max_temp.toFixed(1) + ' °C' : '--'}</td>
+                <td class="numeric">${r.energy_kwh != null ? r.energy_kwh.toFixed(4) + ' kWh' : '--'}</td>
+            </tr>`).join('');
+        }
+    } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="5" class="status-msg error">' + e.message + '</td></tr>';
+    }
+}
+
+async function loadMaintenanceTable() {
+    if (!selectedApplianceId) return;
+    const tbody = document.getElementById('maintenance-body');
+    try {
+        const data = await fetchJson('/api/device/' + selectedApplianceId + '/maintenance_logs');
+        const logs = data.logs || [];
+        if (logs.length === 0) {
+            tbody.innerHTML = '<tr><td style="text-align:center; padding:2rem; color:var(--text-muted)">No maintenance records yet.</td></tr>';
+            return;
+        }
+        tbody.innerHTML = logs.map(l => `<tr><td>${fmtTime(l.timestamp)}</td></tr>`).join('');
+    } catch (e) {
+        tbody.innerHTML = '<tr><td class="status-msg error">' + e.message + '</td></tr>';
+    }
+}
+
+/* --- ALERTS --- */
+async function loadAlerts() {
+    if (!selectedApplianceId) return;
+    const content = document.getElementById('alerts-content');
+    try {
+        const data = await fetchJson('/api/device/' + selectedApplianceId + '/alerts');
+        const alerts = data.alerts || [];
+        if (alerts.length === 0) { content.innerHTML = '<p style="font-size:0.85rem; color:var(--text-muted);">No alerts.</p>'; return; }
+        content.innerHTML = '';
+        alerts.forEach(al => {
+            const div = document.createElement('div');
+            const isCritical = al.severity === 'critical';
+            const isResolved = !!al.resolved_at;
+            div.className = 'alert-item ' + (isCritical ? 'critical' : 'warning') + (isResolved ? ' resolved' : '');
+            const badge = `<span class="alert-severity-badge" style="background:${isCritical ? '#EF4444' : '#F59E0B'};">${isCritical ? 'CRITICAL' : 'WARNING'}</span>`;
+            let resolveHtml = '';
+            if (isResolved) {
+                resolveHtml = `<span style="color:var(--success); font-size:0.75rem;">Resolved: ${fmtTime(al.resolved_at)}</span>`;
+            } else {
+                resolveHtml = `<button class="btn btn-sm btn-secondary" onclick="resolveAlert(${al.id})" style="margin-top:4px; font-size:0.7rem; padding:2px 8px;">Resolve</button>`;
+            }
+            div.innerHTML = `${badge}<strong>${escapeHtml(al.alert_type)}</strong> — ${escapeHtml(al.message || '')}<br><span style="color:var(--text-muted); font-size:0.75rem;">${fmtTime(al.created_at)}</span><br>${resolveHtml}`;
+            content.appendChild(div);
+        });
+    } catch (e) { content.innerHTML = '<p class="status-msg error">' + e.message + '</p>'; }
+}
+
+async function resolveAlert(alertId) {
+    try {
+        await fetchJson('/api/alerts/' + alertId + '/acknowledge', { method: 'POST' });
+        loadAlerts();
+        refreshAppliances();
+    } catch (e) { alert(e.message); }
+}
+
+/* --- EXPORT MODAL --- */
+function showExportModal() {
+    document.getElementById('export-overlay').classList.add('active');
+    if (detailChartMode === 'history' && detailHistoryStart && detailHistoryEnd) {
+        document.getElementById('export-range').value = 'custom';
+        setDateTimeGroup('export-start-date', 'export-start-time', 'export-start-ampm', new Date(detailHistoryStart));
+        setDateTimeGroup('export-end-date', 'export-end-time', 'export-end-ampm', new Date(detailHistoryEnd));
+    } else {
+        document.getElementById('export-range').value = 'all';
+        const now = new Date();
+        const weekAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        setDateTimeGroup('export-end-date', 'export-end-time', 'export-end-ampm', now);
+        setDateTimeGroup('export-start-date', 'export-start-time', 'export-start-ampm', weekAgo);
+    }
+    document.getElementById('export-include-idle').checked = detailShowIdle;
+    toggleExportDateInputs();
+}
+
+function closeExportModal() {
+    document.getElementById('export-overlay').classList.remove('active');
+}
+
+function toggleExportDateInputs() {
+    const range = document.getElementById('export-range').value;
+    document.getElementById('custom-date-inputs').style.display = range === 'custom' ? 'block' : 'none';
+}
+
+function downloadExcel() {
+    if (!selectedApplianceId) return;
+    const range = document.getElementById('export-range').value;
+    const includeIdle = document.getElementById('export-include-idle').checked;
+    let url = '/api/device/' + selectedApplianceId + '/export_excel';
+    const params = [];
+    params.push('filtered=' + (includeIdle ? 'false' : 'true'));
+    if (range === 'custom') {
+        const start = combineDateTime('export-start-date', 'export-start-time', 'export-start-ampm');
+        const end = combineDateTime('export-end-date', 'export-end-time', 'export-end-ampm');
+        if (!start || !end) { alert('Please fill in date, time, and AM/PM for both export fields.'); return; }
+        params.push('start_date=' + encodeURIComponent(start));
+        params.push('end_date=' + encodeURIComponent(end));
+    }
+    if (params.length) url += '?' + params.join('&');
+    window.location.href = url;
+    closeExportModal();
+}
+
+/* ---------- ADD DEVICE ---------- */
+function handleMacSelection(sel) {
+    document.getElementById('hidden-mac').value = sel.value;
+    checkFormValidity();
+}
+
+function checkFormValidity() {
+    const mac = document.getElementById('hidden-mac').value;
+    const name = document.getElementById('device-name-input').value.trim();
+    const type = document.getElementById('device-type-select').value;
+    const sensor = document.getElementById('current-sensor-select').value;
+    const btn = document.getElementById('btn-save-device');
+    btn.disabled = !(mac && name && type && sensor);
+}
+
+async function scanNodes() {
+    const btn = document.getElementById('btn-scan');
+    const results = document.getElementById('scan-results');
+    const select = document.getElementById('scanned-mac-select');
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span> Scanning...';
+    try {
+        const nodes = await fetchJson('/api/unpaired_nodes');
+        select.innerHTML = '<option value="">-- Select Discovered MAC --</option>';
+        if (nodes.length === 0) {
+            alert('No unpaired nodes found. Make sure the Sensor node is powered on and connected.');
+            select.innerHTML += '<option value="" disabled>No unpaired nodes found</option>';
+        } else {
+            nodes.forEach(n => {
+                const opt = document.createElement('option');
+                opt.value = n.id;
+                opt.textContent = n.mac_address;
+                select.appendChild(opt);
+            });
+        }
+        results.style.display = 'block';
+    } catch (e) {
+        alert('Scan failed: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Scan for Unpaired Nodes';
+    }
+}
+
+function updateFormDetails() {
+    const type = document.getElementById('device-type-select').value;
+    const details = document.getElementById('dynamic-details');
+    const acSubtype = document.getElementById('ac-subtype');
+    const guide = document.getElementById('wiring-guide');
+    const wireName = document.getElementById('wire-type-name');
+    const wireList = document.getElementById('wire-list');
+    checkFormValidity();
+    if (!type) { details.style.display = 'none'; return; }
+    details.style.display = 'block';
+    const noteEl = document.getElementById('wire-note');
+    if (type === 'HVAC') {
+        acSubtype.style.display = 'block';
+        updateInverterMapping();
+        wireName.textContent = 'HVAC (Air Conditioner)';
+        wireList.innerHTML = `
+            <li><strong>DS18B20 Return Air:</strong> Port 1</li>
+            <li><strong>DS18B20 Supply Air:</strong> Port 2</li>
+            <li id="wire-sensor-line"></li>
+        `;
+        if (noteEl) {
+            noteEl.innerHTML = '<em>After pairing, press Button 2 for 5 seconds in still air to calibrate offsets.</em>';
+            noteEl.style.display = 'block';
+        }
+    } else if (type === 'Gas Dryer') {
+        acSubtype.style.display = 'none';
+        document.getElementById('is-inverter-hidden').value = '0';
+        wireName.textContent = 'Gas Dryer';
+        wireList.innerHTML = `
+            <li><strong>BME280:</strong> exhaust duct temperature / humidity / pressure</li>
+            <li id="wire-sensor-line"></li>
+            <li>Keep the BME280 probe protected from direct water splash.</li>
+        `;
+        if (noteEl) {
+            noteEl.innerHTML = '<em>After pairing, set baseline once the dryer is running normally.</em>';
+            noteEl.style.display = 'block';
+        }
+    } else {
+        if (noteEl) noteEl.style.display = 'none';
+    }
+    guide.style.display = 'block';
+    updateSensorDependentUI();
+}
+
+function updateInverterMapping() {
+    const sel = document.getElementById('hvac-tech-select');
+    const isInv = document.getElementById('is-inverter-hidden');
+    if (!sel || !isInv) return;
+    isInv.value = sel.value === 'inverter' ? '1' : '0';
+}
+
+function updateSensorDependentUI() {
+    const sensor = document.getElementById('current-sensor-select').value;
+    const line = document.getElementById('wire-sensor-line');
+    if (line) {
+        line.innerHTML = sensor
+            ? `<strong>${sensor} Current Sensor:</strong> clamp on the load live (L) wire, Port 6`
+            : '<strong>Current Sensor:</strong> select a sensor model above';
+    }
+    checkFormValidity();
+}
+
+/* ---------- DISCORD ---------- */
+async function showDiscordModal() {
+    closeDeviceDetail();
+    const input = document.getElementById('discord-webhook-url');
+    const status = document.getElementById('discord-status');
+    try {
+        const data = await fetchJson('/api/user/discord_webhook');
+        input.value = data.url || '';
+        status.textContent = data.masked ? 'Saved: ' + data.masked : 'No webhook saved.';
+    } catch (e) {
+        status.textContent = 'Failed to load webhook.';
+    }
+    document.getElementById('discord-overlay').classList.add('active');
+}
+
+function closeDiscordModal() {
+    document.getElementById('discord-overlay').classList.remove('active');
+}
+
+async function saveDiscordWebhook() {
+    const url = document.getElementById('discord-webhook-url').value.trim();
+    const status = document.getElementById('discord-status');
+    try {
+        await fetchJson('/api/user/discord_webhook', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url })
+        });
+        status.textContent = 'Webhook saved.';
+        status.style.color = '#065F46';
+    } catch (e) {
+        status.textContent = e.message;
+        status.style.color = '#991B1B';
+    }
+}
+
+async function testDiscordWebhook() {
+    const url = document.getElementById('discord-webhook-url').value.trim();
+    const status = document.getElementById('discord-status');
+    if (!url) { status.textContent = 'Enter a webhook URL first.'; return; }
+    status.textContent = 'Sending test...';
+    try {
+        await fetchJson('/api/user/discord_webhook/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url })
+        });
+        status.textContent = 'Test alert sent.';
+        status.style.color = '#065F46';
+    } catch (e) {
+        status.textContent = e.message;
+        status.style.color = '#991B1B';
+    }
+}
+
+/* ---------- REFRESH & POLLING ---------- */
+async function refreshAppliances() {
+    try {
+        appliances = await fetchJson('/api/appliances');
+        updateLiveData();
+    } catch (e) {
+        console.error('refresh appliances failed', e);
+    }
+}
+
+async function refreshUnpaired() {
+    try {
+        unpairedNodes = await fetchJson('/api/unpaired_nodes');
+    } catch (e) { console.error(e); }
+}
+
+function startPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(() => {
+        updateLiveData();
+        if (document.getElementById('view-add-device').classList.contains('active')) refreshUnpaired();
+    }, 5000);
+}
+
+window.addEventListener('beforeunload', () => {
+    if (pollTimer) clearInterval(pollTimer);
+});
+
+document.addEventListener('click', (e) => {
+    const drop = document.querySelector('.fp-dropdown');
+    if (drop && !drop.contains(e.target)) closeAddDropdown();
+});
+
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        closeDeviceDetail();
+        closeDiscordModal();
+    }
+});
+
+document.addEventListener('DOMContentLoaded', () => {
+    initEnergySummary();
+    updateLiveData();
+    startPolling();
+});
+
+</script>
+</body>
+</html>
