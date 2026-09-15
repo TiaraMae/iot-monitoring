@@ -296,6 +296,10 @@
             border: 1px solid var(--border);
             border-radius: var(--radius);
             padding: 0.75rem;
+            overflow: hidden;
+        }
+        .spc-chart-wrapper canvas {
+            clip-path: inset(0);
         }
         .spc-legend {
             display: flex;
@@ -729,11 +733,36 @@
                         <div class="spc-legend" id="legend-chart-2"></div>
                         <div id="baseline-inputs-chart-2" class="baseline-inputs-row" style="display:none; margin-top:0.5rem; padding:0.75rem; background:var(--bg); border-radius:8px; border:1px solid var(--border);"></div>
                     </div>
-                    <div class="spc-chart-section">
+                    <div class="spc-chart-section" id="section-chart-3">
                         <div class="spc-chart-title" id="title-chart-3">Current</div>
                         <div class="spc-chart-wrapper"><canvas id="chart3"></canvas></div>
                         <div class="spc-legend" id="legend-chart-3"></div>
                         <div id="baseline-inputs-chart-3" class="baseline-inputs-row" style="display:none; margin-top:0.5rem; padding:0.75rem; background:var(--bg); border-radius:8px; border:1px solid var(--border);"></div>
+                        <div id="pressure-baseline-panel" style="margin-top:0.5rem; padding:0.75rem; background:var(--bg); border-radius:8px; border:1px solid var(--border);">
+                            <div id="pressure-baseline-unset" style="display:none;">
+                                <p style="font-size:0.8rem; color:var(--text-muted); margin-bottom:0.5rem;">Set absolute pressure baseline to display gauge pressure data.</p>
+                                <div style="display:flex; gap:0.5rem; align-items:flex-end; flex-wrap:wrap;">
+                                    <div style="flex:1; min-width:120px;">
+                                        <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">Absolute Pressure (hPa)</label>
+                                        <input type="number" step="0.01" id="pressure-baseline-input" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border); font-size:0.9rem;">
+                                    </div>
+                                    <button class="btn btn-primary" style="font-size:0.85rem;" onclick="savePressureBaseline()">Save Baseline</button>
+                                </div>
+                            </div>
+                            <div id="pressure-baseline-set" style="display:none;">
+                                <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:0.5rem;">
+                                    <div>
+                                        <span style="font-size:0.8rem; color:var(--text-muted);">Absolute Pressure Baseline: </span>
+                                        <span id="pressure-baseline-value" style="font-weight:600;"></span>
+                                        <span style="font-size:0.8rem; color:var(--text-muted);"> hPa</span>
+                                    </div>
+                                    <div style="display:flex; gap:0.5rem; align-items:center;">
+                                        <span id="pressure-baseline-timestamp" style="font-size:0.72rem; color:var(--text-muted);"></span>
+                                        <button class="btn btn-secondary" style="font-size:0.8rem; background:var(--bg); color:var(--text); border:1px solid var(--border);" onclick="editPressureBaseline()">Update</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                     <div class="spc-chart-section" id="section-chart-6">
                         <div class="spc-chart-title" id="title-chart-6">Delta Humidity (ΔRH)</div>
@@ -764,6 +793,7 @@
                     <div class="reading-item"><span class="reading-label">Current (SCT)</span><span class="reading-value hl" id="detail-amp">-- A</span></div>
                     <div class="reading-item"><span class="reading-label" id="lbl-delta">Delta-T (Ret-Sup)</span><span class="reading-value hl-warn" id="detail-delta">-- °C</span></div>
                     <div class="reading-item"><span class="reading-label">Delta RH (Ret-Sup)</span><span class="reading-value hl-warn" id="detail-deltarh">-- %</span></div>
+                    <div class="reading-item" id="row-abs-pressure" style="display:none"><span class="reading-label">Raw Absolute Pressure</span><span class="reading-value" id="detail-abs-pressure">-- hPa</span></div>
                 </div>
 
                 <!-- Data Table Section -->
@@ -930,7 +960,16 @@
         let currentDeviceHasBaseline = false;
         let wasOffline = false;  // track offline→online transitions for history refresh
 
-        /* --- NAVIGATION --- */
+        /* --- AUTH / SESSION HANDLING --- */
+        function handleFetchResponse(response) {
+            if (response.status === 401 || (response.redirected && response.url && response.url.includes('/login'))) {
+                window.location.href = '/login';
+                return Promise.reject('unauthorized');
+            }
+            return response;
+        }
+
+        /* --- NAVIGATION ---
         function toggleSidebar() {
             document.getElementById('sidebar').classList.toggle('open');
             document.getElementById('sidebar-overlay').classList.toggle('active');
@@ -1039,11 +1078,15 @@
                 document.getElementById('lbl-delta').innerText = isHVAC ? 'Delta-T (Ret-Sup)' : 'Gauge Pressure (hPa)';
                 document.getElementById('detail-delta').className = isHVAC ? 'reading-value hl-warn' : 'reading-value';
                 document.getElementById('detail-deltarh').parentElement.style.display = isHVAC ? 'flex' : 'none';
+                document.getElementById('row-abs-pressure').style.display = isHVAC ? 'none' : 'flex';
+                document.getElementById('pressure-baseline-panel').style.display = isHVAC ? 'none' : 'block';
 
                 // We want charts visible as long as it's not calibrating.
                 const hasGraphs = (status !== 'calibration_needed' && status !== 'calibrating');
                 document.getElementById('spc-charts-section').style.display = hasGraphs ? 'block' : 'none';
                 document.getElementById('readings-grid').style.display = hasGraphs ? 'grid' : 'none';
+                // For dryers, force 3-column grid so pressure values wrap neatly below temp/RH/current
+                document.getElementById('readings-grid').style.gridTemplateColumns = isHVAC ? '' : 'repeat(3, 1fr)';
                 document.getElementById('chart-mode-bar').style.display = hasGraphs ? 'block' : 'none';
                 
                 // Reset chart mode to live when opening a new device
@@ -1083,6 +1126,9 @@
                 loadAlerts();
                 checkBaselineResults();
 
+                if (!isHVAC) {
+                    await loadPressureBaseline();
+                }
                 if (hasGraphs) {
                     try {
                         initCharts(id, isHVAC);
@@ -1129,22 +1175,97 @@
             document.getElementById('btn-cancel-baseline').style.display = 'none';
         }
 
+        /* --- PRESSURE BASELINE --- */
+        async function loadPressureBaseline() {
+            if (!currentDetailId) return;
+            const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
+            const isHVAC = card && card.dataset.type.includes('HVAC');
+            if (isHVAC) return;
+            try {
+                document.getElementById('pressure-baseline-panel').style.display = 'block';
+                const res = await fetch(`/api/device/${currentDetailId}/pressure_baseline`);
+                const data = await res.json();
+                const unsetDiv = document.getElementById('pressure-baseline-unset');
+                const setDiv = document.getElementById('pressure-baseline-set');
+                const chartTitle = document.getElementById('title-chart-3');
+                const chartWrapper = document.querySelector('#section-chart-3 .spc-chart-wrapper');
+                const chartLegend = document.getElementById('legend-chart-3');
+                const baselineInputs = document.getElementById('baseline-inputs-chart-3');
+                if (data.atmospheric_pressure !== null && data.atmospheric_pressure !== undefined) {
+                    unsetDiv.style.display = 'none';
+                    setDiv.style.display = 'block';
+                    document.getElementById('pressure-baseline-value').innerText = parseFloat(data.atmospheric_pressure).toFixed(2);
+                    document.getElementById('pressure-baseline-timestamp').innerText = data.updated_at ? 'Updated: ' + new Date(data.updated_at).toLocaleString() : '';
+                    if (chartTitle) chartTitle.style.display = 'block';
+                    if (chartWrapper) chartWrapper.style.display = 'block';
+                    if (chartLegend) chartLegend.style.display = 'block';
+                } else {
+                    unsetDiv.style.display = 'block';
+                    setDiv.style.display = 'none';
+                    if (chartTitle) chartTitle.style.display = 'none';
+                    if (chartWrapper) chartWrapper.style.display = 'none';
+                    if (chartLegend) chartLegend.style.display = 'none';
+                    if (baselineInputs) baselineInputs.style.display = 'none';
+                }
+            } catch (e) {
+                console.error("loadPressureBaseline error:", e);
+            }
+        }
+
+        function savePressureBaseline() {
+            if (!currentDetailId) return;
+            const input = document.getElementById('pressure-baseline-input');
+            const val = input.value;
+            if (val === '') {
+                alert('Please enter an absolute pressure value.');
+                return;
+            }
+            fetch(`/api/device/${currentDetailId}/pressure_baseline`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ atmospheric_pressure: parseFloat(val) })
+            })
+            .then(handleFetchResponse)
+            .then(r => r.json())
+            .then(data => {
+                if (data.success) {
+                    input.value = '';
+                    loadPressureBaseline();
+                    // Refresh chart history since gauge pressure is now computable
+                    const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
+                    if (card) initCharts(currentDetailId, card.dataset.type.includes('HVAC'));
+                } else {
+                    alert(data.error || 'Failed to save pressure baseline');
+                }
+            })
+            .catch(e => console.error("savePressureBaseline error:", e));
+        }
+
+        function editPressureBaseline() {
+            const setDiv = document.getElementById('pressure-baseline-set');
+            const unsetDiv = document.getElementById('pressure-baseline-unset');
+            const currentVal = document.getElementById('pressure-baseline-value').innerText;
+            document.getElementById('pressure-baseline-input').value = currentVal;
+            setDiv.style.display = 'none';
+            unsetDiv.style.display = 'block';
+        }
+
         function showBaselineConfigPanel() {
             if (!currentDetailId) return;
             const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
             const isHVAC = card && card.dataset.type.includes('HVAC');
             const chartMetrics = isHVAC ?
                 [['deltat', 'Delta-T (°C)'], ['current', 'Current (A)']] :
-                [['texhaust', 'Exhaust Temp (°C)'], ['rhexhaust', 'Exhaust RH (%)'], ['current', 'Current (A)']];
+                [['texhaust', 'Exhaust Temp (°C)'], ['rhexhaust', 'Exhaust RH (%)'], ['pressure', 'Gauge Pressure (hPa)'], ['current', 'Current (A)']];
             const metricChartMap = isHVAC ?
                 {'deltat': 1, 'current': 5} :
-                {'texhaust': 1, 'rhexhaust': 2, 'current': 4};
+                {'texhaust': 1, 'rhexhaust': 2, 'pressure': 3, 'current': 4};
 
             fetch(`/api/device/${currentDetailId}/baseline_config`).then(r => r.json()).then(data => {
                 if (data.error) return;
                 const guidance = isHVAC
                     ? 'HVAC: set UCL/LCL for Delta-T and Current. Delta-T LCL is the smallest temperature split observed during normal cooling; Current UCL/LCL bound the normal compressor operating range.'
-                    : 'Dryer: set UCL/LCL for Temp and Humidity. For Motor Current, enter the observed baseline mean — UCL and LCL are auto-derived as ±20%.';
+                    : 'Dryer: set UCL/LCL for Temp and Humidity. For Motor Current, enter the observed baseline mean — UCL and LCL are auto-derived as ±20%. For Gauge Pressure, enter the observed baseline mean and UCL.';
                 const guidanceHtml = `<div style="font-size:0.75rem; color:var(--text-muted); margin-bottom:0.5rem; padding:0.4rem 0.6rem; background:var(--bg); border-left:3px solid var(--primary); border-radius:0 4px 4px 0;"><strong>Guidance:</strong> ${guidance}</div>`;
                 chartMetrics.forEach(([key, label]) => {
                     const chartIdx = metricChartMap[key];
@@ -1152,6 +1273,7 @@
                     if (!container) return;
                     const vals = data.metrics && data.metrics[key] ? data.metrics[key] : {ucl: '', lcl: '', mean: ''};
                     const isDryerCurrent = !isHVAC && key === 'current';
+                    const isPressure = !isHVAC && key === 'pressure';
 
                     if (isDryerCurrent) {
                         const meanVal = (vals.mean !== '' && vals.mean !== undefined && vals.mean !== null) ? parseFloat(vals.mean).toFixed(2) : '';
@@ -1170,6 +1292,21 @@
                                 <div style="min-width:80px; text-align:right;">
                                     <span style="font-size:0.72rem; color:var(--text-muted);">LCL (auto)</span>
                                     <div id="bl-${key}-lcl-display" style="font-size:0.95rem; font-weight:600; color:var(--text);">${lclDisp}</div>
+                                </div>
+                            </div>
+                        `;
+                    } else if (isPressure) {
+                        const meanVal = (vals.mean !== '' && vals.mean !== undefined && vals.mean !== null) ? parseFloat(vals.mean).toFixed(2) : '';
+                        const uclVal = (vals.ucl !== '' && vals.ucl !== undefined && vals.ucl !== null) ? parseFloat(vals.ucl).toFixed(2) : '';
+                        container.innerHTML = (chartIdx === 1 ? guidanceHtml : '') + `
+                            <div style="display:flex; gap:1rem; align-items:flex-end; flex-wrap:wrap;">
+                                <div style="flex:1; min-width:100px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">Mean (hPa)</label>
+                                    <input type="number" step="0.01" id="bl-${key}-mean" value="${meanVal}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border); font-size:0.9rem;">
+                                </div>
+                                <div style="flex:1; min-width:100px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">UCL</label>
+                                    <input type="number" step="0.01" id="bl-${key}-ucl" value="${uclVal}" style="width:100%; padding:0.35rem; border-radius:var(--radius); border:1px solid var(--border); font-size:0.9rem;">
                                 </div>
                             </div>
                         `;
@@ -1235,10 +1372,11 @@
             if (!currentDetailId) return;
             const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
             const isHVAC = card && card.dataset.type.includes('HVAC');
-            const metrics = isHVAC ? ['deltat', 'current'] : ['texhaust', 'rhexhaust', 'current'];
+            const metrics = isHVAC ? ['deltat', 'current'] : ['texhaust', 'rhexhaust', 'pressure', 'current'];
             const payload = { metrics: {} };
             for (const m of metrics) {
                 const isDryerCurrent = !isHVAC && m === 'current';
+                const isPressure = !isHVAC && m === 'pressure';
                 if (isDryerCurrent) {
                     const meanEl = document.getElementById(`bl-${m}-mean`);
                     if (!meanEl) continue;
@@ -1248,6 +1386,17 @@
                         return;
                     }
                     payload.metrics[m] = { mean: parseFloat(mean) };
+                } else if (isPressure) {
+                    const meanEl = document.getElementById(`bl-${m}-mean`);
+                    const uclEl = document.getElementById(`bl-${m}-ucl`);
+                    if (!meanEl || !uclEl) continue;
+                    const mean = meanEl.value;
+                    const ucl = uclEl.value;
+                    if (mean === '' || ucl === '') {
+                        alert(`Please fill in Mean and UCL for Gauge Pressure.`);
+                        return;
+                    }
+                    payload.metrics[m] = { mean: parseFloat(mean), ucl: parseFloat(ucl) };
                 } else {
                     const uclEl = document.getElementById(`bl-${m}-ucl`);
                     const lclEl = document.getElementById(`bl-${m}-lcl`);
@@ -1400,9 +1549,11 @@
         }).catch(() => {});
         
         calibrationPollInterval = setInterval(() => {
-            fetch(`/api/device/${id}/calibration_progress`).then(r => r.json()).then(d => {
+            fetch(`/api/device/${id}/calibration_progress`)
+                .then(handleFetchResponse)
+                .then(r => r.json()).then(d => {
                 if (!d.error) updateCalibUI(d);
-            }).catch(() => {});
+            }).catch(err => { if (err === 'unauthorized') return; });
         }, 3000);
     }
 
@@ -1416,7 +1567,9 @@
                 if (!card) return;
                 const oldStatus = card.dataset.status;
                 const oldAlertStatus = card.dataset.alertStatus || 'normal';
-                fetch('/api/device/' + id + '/spc_limits').then(r => r.json()).then(data => {
+                fetch('/api/device/' + id + '/spc_limits')
+                    .then(handleFetchResponse)
+                    .then(r => r.json()).then(data => {
                     if (!data.error && data.status) {
                         // Update operational status and action bar
                         if (data.status !== oldStatus) {
@@ -1452,7 +1605,7 @@
                             applySPCLines();
                         }
                     }
-                }).catch(()=>{});
+                }).catch(err => { if (err === 'unauthorized') return; });
             };
 
             doPoll(); // run immediately on card click
@@ -1494,6 +1647,7 @@
 
         function updateDataTable() {
             if (!currentDetailId) return;
+            const reqId = ++tableRequestId;
             const card = document.querySelector(`.card[data-id="${currentDetailId}"]`);
             if (!card) return;
             const isHVAC = card.dataset.type.includes('HVAC');
@@ -1527,6 +1681,7 @@
             fetch(endpoint + (endpoint.includes('?') ? '&' : '?') + '_t=' + Date.now())
                 .then(r => r.json())
                 .then(data => {
+                    if (reqId !== tableRequestId) return; // ignore stale response
                     if (data.error) {
                         title.innerText = 'Analytics Data';
                         tbody.innerHTML = `<tr><td colspan="12" style="text-align:center; padding:2rem; color:red;">Error: ${data.error}</td></tr>`;
@@ -1845,6 +2000,7 @@
         let showIdle = false; // filtered=true by default
         // Per-chart timestamp arrays are attached directly to Chart.js instances
         let initChartsRequestId = 0; // ignore stale fetch callbacks
+        let tableRequestId = 0;      // ignore stale table fetch callbacks
 
         function fmtTimeLabel(date) {
             return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
@@ -1852,7 +2008,7 @@
 
         function makeSPCChartOptions(yLabel) {
             return {
-                responsive: true, maintainAspectRatio: false, animation: false,
+                responsive: true, maintainAspectRatio: false, devicePixelRatio: 1, animation: false,
                 scales: {
                     x: { type: 'category', ticks: { maxTicksLimit: 8, autoSkip: true, font: { size: 10 } } },
                     y: { title: { display: true, text: yLabel, font: { size: 10 } }, ticks: { font: { size: 10 } } }
@@ -2001,10 +2157,14 @@
                 document.getElementById('title-chart-3').innerText = "Exhaust Gauge Pressure";
                 document.getElementById('legend-chart-3').innerHTML = `
                     <span><span class="spc-legend-line" style="background:#059669"></span>Gauge Pressure hPa</span>
+                    <span><span class="spc-legend-line" style="background:#EF4444; border-top:2px dashed #EF4444"></span>UCL</span>
+                    <span><span class="spc-legend-line" style="background:#64748B; border-top:2px dashed #64748B"></span>Mean</span>
                 `;
                 chart3 = new Chart(document.getElementById('chart3').getContext('2d'), {
                     type: 'line', data: { datasets: [
-                        mkDataset('Pressure', '#059669', [], true)
+                        mkDataset('Pressure', '#059669', [], true),
+                        mkDataset('UCL', '#EF4444', [6,3]),
+                        mkDataset('Mean', '#64748B', [4,4])
                     ] }, options: makeSPCChartOptions('hPa')
                 });
                 chart3.timeLabels = [];
@@ -2076,6 +2236,7 @@
                     historyLoading = false;  // allow live pushes even on error
                     console.error("History fetch error:", e);
                 });
+            setupZoomResizeHandler();
         }
 
         function applySPCLines() {
@@ -2089,10 +2250,13 @@
                 const values = [limits.ucl, limits.mean, limits.lcl];
                 [1, 2, 3].forEach((dsIdx, i) => {
                     const val = values[i];
-                    const ds = chart.data.datasets[dsIdx].data;
-                    while (ds.length < n) ds.push(val);
-                    while (ds.length > n) ds.pop();
-                    for (let j = 0; j < n; j++) ds[j] = val;
+                    if (val === null || val === undefined) return;
+                    const ds = chart.data.datasets[dsIdx];
+                    if (!ds) return;
+                    const data = ds.data;
+                    while (data.length < n) data.push(val);
+                    while (data.length > n) data.pop();
+                    for (let j = 0; j < n; j++) data[j] = val;
                 });
                 chart.update('quiet');
             }
@@ -2104,6 +2268,7 @@
                 // Dryer: only evaluated charts get SPC lines
                 setLines(chart1, spcLimits.texhaust);
                 setLines(chart2, spcLimits.rhexhaust);
+                setLines(chart3, spcLimits.pressure);
                 setLines(chart4, spcLimits.current);
             }
         }
@@ -2197,6 +2362,7 @@
         const type = card.dataset.type;
         
         fetch(`/api/device/${id}/latest`)
+            .then(handleFetchResponse)
             .then(r => r.json())
             .then(data => {
                 const offlineBanner = document.getElementById(`offline-${id}`);
@@ -2256,12 +2422,13 @@
                     if (elA) elA.innerText = data.Icompressor.toFixed(2) + ' A';
                 } else {
                     const elT = document.getElementById(`mini-t1-${id}`);
-                    if (elT) elT.innerText = data.Texhaust.toFixed(1) + ' °C';
+                    if (elT) elT.innerText = data.Texhaust != null ? data.Texhaust.toFixed(1) + ' °C' : '-- °C';
                     const elA = document.getElementById(`mini-amp-${id}`);
-                    if (elA) elA.innerText = data.Imotor.toFixed(2) + ' A';
+                    if (elA) elA.innerText = data.Imotor != null ? data.Imotor.toFixed(2) + ' A' : '-- A';
                 }
             })
-            .catch(() => {
+            .catch(err => {
+                if (err === 'unauthorized') return;
                 // Network / server error
                 const offlineBanner = document.getElementById(`offline-${id}`);
                 offlineBanner.innerText = 'Awaiting Sensor Data...';
@@ -2281,6 +2448,7 @@
     const isHVAC = card.dataset.type.includes('HVAC');
     
     fetch(`/api/device/${currentDetailId}/latest`)
+        .then(handleFetchResponse)
         .then(r => r.json())
         .then(data => {
             const runBadge = document.getElementById('detail-run-status');
@@ -2309,6 +2477,7 @@
                 } else {
                     document.getElementById('detail-h1').innerText = '-- %';
                     document.getElementById('detail-delta').innerText = '-- hPa';
+                    document.getElementById('detail-abs-pressure').innerText = '-- hPa';
                 }
                 document.getElementById('detail-amp').innerText = '-- A';
                 return;
@@ -2351,6 +2520,7 @@
                 } else {
                     document.getElementById('detail-h1').innerText = '-- %';
                     document.getElementById('detail-delta').innerText = '-- hPa';
+                    document.getElementById('detail-abs-pressure').innerText = '-- hPa';
                 }
                 document.getElementById('detail-amp').innerText = '-- A';
                 return;
@@ -2410,10 +2580,11 @@
                     }
                 }
             } else {
-                document.getElementById('detail-t1').innerText = data.Texhaust.toFixed(1) + ' °C';
-                document.getElementById('detail-h1').innerText = data.RHexhaust.toFixed(1) + ' %';
-                document.getElementById('detail-delta').innerText = data.Pressure.toFixed(2) + ' hPa (gauge)';
-                document.getElementById('detail-amp').innerText = data.Imotor.toFixed(2) + ' A';
+                document.getElementById('detail-t1').innerText = data.Texhaust != null ? data.Texhaust.toFixed(1) + ' °C' : '-- °C';
+                document.getElementById('detail-h1').innerText = data.RHexhaust != null ? data.RHexhaust.toFixed(1) + ' %' : '-- %';
+                document.getElementById('detail-delta').innerText = data.Pressure != null ? data.Pressure.toFixed(2) + ' hPa' : '-- hPa';
+                document.getElementById('detail-abs-pressure').innerText = data.AbsPressure != null ? data.AbsPressure.toFixed(2) + ' hPa' : '-- hPa';
+                document.getElementById('detail-amp').innerText = data.Imotor != null ? data.Imotor.toFixed(2) + ' A' : '-- A';
                 
                 if (shouldPush) {
                     const idle = data.running_status !== 'running';
@@ -2425,7 +2596,10 @@
                 }
             }
         })
-        .catch(e => console.error("Error updating detail data:", e));
+        .catch(e => {
+            if (e === 'unauthorized') return;
+            console.error("Error updating detail data:", e);
+        });
 }
 
         function showThresholdPanel() {
@@ -2615,6 +2789,7 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    devicePixelRatio: 1,
                     plugins: {
                         legend: { display: false },
                         tooltip: {
@@ -2634,10 +2809,22 @@
             updateEnergySummary();
         }
 
+        function setupZoomResizeHandler() {
+            const charts = () => [chart1, chart2, chart3, chart4, chart5, chart6, energyPieChart];
+            const onZoom = () => {
+                charts().forEach(c => { if (c) c.resize(); });
+                const mq = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+                mq.addEventListener('change', onZoom, { once: true });
+            };
+            const mq = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
+            mq.addEventListener('change', onZoom, { once: true });
+        }
+
         function updateEnergySummary() {
             const month = document.getElementById('energy-month-select').value;
             if (!month) return;
             fetch(`/api/energy_summary?month=${month}`)
+                .then(handleFetchResponse)
                 .then(r => r.json())
                 .then(data => {
                     if (data.error) return;
@@ -2703,7 +2890,9 @@
                         listContainer.appendChild(div);
                     });
                 })
-                .catch(() => {});
+                .catch(err => {
+                    if (err === 'unauthorized') return;
+                });
         }
 
         function exportEnergySummary() {
