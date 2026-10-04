@@ -263,89 +263,6 @@
             width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0;
         }
 
-        /* --- FLOOR PLAN --- */
-        .floor-plan-card { margin-bottom: 2rem; }
-        .floor-plan-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1rem;
-            flex-wrap: wrap;
-            gap: 0.5rem;
-        }
-        .floor-plan-title { font-size: 1.25rem; font-weight: 600; }
-        .floor-plan-canvas {
-            position: relative;
-            width: 100%;
-            height: 420px;
-            background: #fff;
-            border: 2px dashed #CBD5E1;
-            border-radius: var(--radius);
-            overflow: hidden;
-            user-select: none;
-        }
-        .floor-plan-canvas.editing { border-color: var(--primary); background: #F8FAFC; touch-action: none; }
-        .fp-block {
-            position: absolute;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            color: #fff;
-            font-size: 0.8rem;
-            font-weight: 600;
-            border-radius: 8px;
-            padding: 0.4rem;
-            cursor: grab;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.15);
-            transition: background-color 0.3s ease, box-shadow 0.2s ease;
-            overflow: hidden;
-            word-break: break-word;
-            line-height: 1.1;
-        }
-        .fp-block:active { cursor: grabbing; }
-        .fp-block.offline { background: #9CA3AF; }
-        .fp-block.idle { background: #3B82F6; }
-        .fp-block.running { background: #22C55E; }
-        .fp-block.warning { background: #EAB308; }
-        .fp-block.critical { background: #EF4444; }
-        .fp-block .fp-remove {
-            position: absolute;
-            top: 2px;
-            right: 4px;
-            font-size: 0.7rem;
-            line-height: 1;
-            color: rgba(255,255,255,0.9);
-            cursor: pointer;
-            display: none;
-        }
-        .floor-plan-canvas.editing .fp-block .fp-remove { display: block; }
-        .floor-plan-toolbar {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 0.75rem;
-            margin-top: 1rem;
-        }
-        .fp-status { font-size: 0.8rem; margin-left: auto; color: var(--text-muted); }
-        .fp-actions { display: flex; gap: 0.5rem; align-items: center; }
-        .fp-dropdown { position: relative; display: inline-block; }
-        .fp-dropbtn { display: inline-flex; align-items: center; gap: 0.35rem; }
-        .fp-dropbtn:disabled { opacity: 0.5; cursor: not-allowed; }
-        .fp-dropdown-content {
-            display: none; position: absolute; right: 0; top: calc(100% + 4px);
-            background: var(--surface); min-width: 180px; max-height: 220px; overflow-y: auto;
-            border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow-md);
-            z-index: 20;
-        }
-        .fp-dropdown-content.show { display: block; }
-        .fp-dropdown-item {
-            padding: 0.55rem 0.85rem; font-size: 0.85rem; cursor: pointer;
-            border-bottom: 1px solid var(--border); white-space: nowrap;
-        }
-        .fp-dropdown-item:last-child { border-bottom: none; }
-        .fp-dropdown-item:hover { background: var(--bg); }
-
         /* --- MODAL --- */
         .detail-overlay {
             position: fixed;
@@ -734,7 +651,8 @@
                                     {% if 'Dryer' in a.type %}GAS DRYER{% else %}HVAC{% if a.is_inverter %} (Inverter){% endif %}{% endif %}
                                 </div>
                             </div>
-                            <div>
+                            <div style="display:flex; flex-direction:column; align-items:flex-end; gap:0.35rem;">
+                                <span id="mini-run-status-{{ a.id }}" style="display:none;" class="status-badge"></span>
                                 {% if a.status == 'offset_calibration_needed' %}
                                     <span class="status-badge status-danger" id="badge-{{ a.id }}">Calib. Needed</span>
                                 {% elif a.status == 'calibrating' %}
@@ -755,16 +673,9 @@
                             {% else %}
                                 <div class="data-point"><span class="data-label">Delta-T (Ret-Sup)</span><span class="data-value" id="mini-delta-{{ a.id }}">-- °C</span></div>
                                 <div class="data-point"><span class="data-label">Current</span><span class="data-value highlight" id="mini-amp-{{ a.id }}">-- A</span></div>
-                                <div class="data-point" style="align-items:flex-start; justify-content:flex-end;">
-                                    <span id="mini-run-status-{{ a.id }}" style="display:none;" class="status-badge"></span>
-                                </div>
+                                <div class="data-point"><span class="data-label">Avg ΔT (24h run)</span><span class="data-value" id="mini-avgdelta-{{ a.id }}">-- °C</span></div>
                             {% endif %}
                         </div>
-                        {% if 'Dryer' in a.type %}
-                        <div style="margin-top:0.25rem; font-size:0.7rem;">
-                            <span id="mini-run-status-{{ a.id }}" style="display:none;" class="status-badge"></span>
-                        </div>
-                        {% endif %}
                         <div id="offline-{{ a.id }}" style="display:none; position:absolute; bottom:0; left:0; right:0; background:var(--warning); color:white; text-align:center; font-size:0.75rem; padding:2px; border-radius:0 0 var(--radius) var(--radius);">Awaiting Sensor Data...</div>
 
                     </div>
@@ -886,10 +797,10 @@
                         <div style="display:flex; align-items:center; gap:0.5rem; margin-left:auto; flex-wrap:wrap;">
                             <label style="font-size:0.85rem; font-weight:600;">Data:</label>
                             <label style="display:flex; align-items:center; gap:0.3rem; font-size:0.8rem; cursor:pointer;">
-                                <input type="radio" name="data-filter" value="filtered" checked onchange="onFilterChange(this)"> Filtered
+                                <input type="radio" name="data-filter" value="filtered" checked onchange="onFilterChange(this)"> Running only
                             </label>
                             <label style="display:flex; align-items:center; gap:0.3rem; font-size:0.8rem; cursor:pointer;">
-                                <input type="radio" name="data-filter" value="unfiltered" onchange="onFilterChange(this)"> Unfiltered
+                                <input type="radio" name="data-filter" value="unfiltered" onchange="onFilterChange(this)"> All data
                             </label>
                         </div>
                     </div>
@@ -910,13 +821,13 @@
                         <div class="spc-chart-wrapper"><canvas id="chart-deltat"></canvas></div>
                         <div class="spc-legend">
                             <span><span class="spc-legend-line" style="background:#2563EB"></span>Delta-T</span>
-                            <span><span class="spc-legend-line" style="background:#3B82F6"></span>LCL</span>
+                            <span><span class="spc-legend-line" style="background:#3B82F6"></span>Minimum</span>
                         </div>
                         <div id="baseline-inputs-deltat" class="baseline-inputs-row" style="display:none;">
                             <strong style="font-size:0.85rem; display:block; margin-bottom:0.5rem;">Delta-T Threshold</strong>
                             <div style="display:flex; gap:1rem; flex-wrap:wrap;">
                                 <div style="flex:1; min-width:120px;">
-                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">LCL (°C)</label>
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">Minimum value (°C)</label>
                                     <input type="number" step="0.001" id="bl-deltat-lcl" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
                                 </div>
                                 <div style="flex:1; min-width:120px;">
@@ -924,7 +835,7 @@
                                     <input type="number" step="1" min="1" id="bl-deltat-delay" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
                                 </div>
                             </div>
-                            <div style="font-size:0.7rem; color:var(--text-muted); margin-top:0.4rem;">Alert fires when Delta-T stays below the LCL for this many minutes while the compressor is running.</div>
+                            <div style="font-size:0.7rem; color:var(--text-muted); margin-top:0.4rem;">Alert fires when Delta-T stays below the minimum value for this many minutes while the compressor is running.</div>
                         </div>
                     </div>
                     <div class="spc-chart-section" id="chart-section-current">
@@ -932,22 +843,6 @@
                         <div class="spc-chart-wrapper"><canvas id="chart-current"></canvas></div>
                         <div class="spc-legend">
                             <span><span class="spc-legend-line" style="background:#F59E0B"></span>Current</span>
-                            <span><span class="spc-legend-line" style="background:#EF4444"></span>UCL</span>
-                            <span><span class="spc-legend-line" style="background:#64748B"></span>Mean</span>
-                            <span><span class="spc-legend-line" style="background:#3B82F6"></span>LCL</span>
-                        </div>
-                        <div id="baseline-inputs-current" class="baseline-inputs-row" style="display:none;">
-                            <strong style="font-size:0.85rem; display:block; margin-bottom:0.5rem;">Compressor Current Threshold</strong>
-                            <div style="display:flex; gap:1rem; flex-wrap:wrap;">
-                                <div style="flex:1; min-width:120px;">
-                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">UCL (A)</label>
-                                    <input type="number" step="0.001" id="bl-current-ucl" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
-                                </div>
-                                <div style="flex:1; min-width:120px;">
-                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">LCL (A)</label>
-                                    <input type="number" step="0.001" id="bl-current-lcl" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
-                                </div>
-                            </div>
                         </div>
                     </div>
                     <div class="spc-chart-section" id="chart-section-texhaust">
@@ -955,19 +850,19 @@
                         <div class="spc-chart-wrapper"><canvas id="chart-texhaust"></canvas></div>
                         <div class="spc-legend">
                             <span><span class="spc-legend-line" style="background:#DC2626"></span>Temp</span>
-                            <span><span class="spc-legend-line" style="background:#EF4444"></span>UCL</span>
+                            <span><span class="spc-legend-line" style="background:#EF4444"></span>Maximum</span>
                             <span><span class="spc-legend-line" style="background:#64748B"></span>Mean</span>
-                            <span><span class="spc-legend-line" style="background:#3B82F6"></span>LCL</span>
+                            <span><span class="spc-legend-line" style="background:#3B82F6"></span>Minimum</span>
                         </div>
                         <div id="baseline-inputs-texhaust" class="baseline-inputs-row" style="display:none;">
                             <strong style="font-size:0.85rem; display:block; margin-bottom:0.5rem;">Exhaust Temperature Threshold</strong>
                             <div style="display:flex; gap:1rem; flex-wrap:wrap;">
                                 <div style="flex:1; min-width:120px;">
-                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">UCL (°C)</label>
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">Maximum value (°C)</label>
                                     <input type="number" step="0.001" id="bl-texhaust-ucl" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
                                 </div>
                                 <div style="flex:1; min-width:120px;">
-                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">LCL (°C)</label>
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">Minimum value (°C)</label>
                                     <input type="number" step="0.001" id="bl-texhaust-lcl" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
                                 </div>
                             </div>
@@ -978,9 +873,9 @@
                         <div class="spc-chart-wrapper"><canvas id="chart-dryer-current"></canvas></div>
                         <div class="spc-legend">
                             <span><span class="spc-legend-line" style="background:#F59E0B"></span>Current</span>
-                            <span><span class="spc-legend-line" style="background:#EF4444"></span>UCL</span>
+                            <span><span class="spc-legend-line" style="background:#EF4444"></span>Maximum</span>
                             <span><span class="spc-legend-line" style="background:#64748B"></span>Mean</span>
-                            <span><span class="spc-legend-line" style="background:#3B82F6"></span>LCL</span>
+                            <span><span class="spc-legend-line" style="background:#3B82F6"></span>Minimum</span>
                         </div>
                         <div id="baseline-inputs-dryer-current" class="baseline-inputs-row" style="display:none;">
                             <strong style="font-size:0.85rem; display:block; margin-bottom:0.5rem;">Motor Current Baseline</strong>
@@ -990,7 +885,7 @@
                                     <input type="number" step="0.001" id="bl-current-mean" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
                                 </div>
                             </div>
-                            <div style="font-size:0.7rem; color:var(--text-muted); margin-top:0.4rem;">UCL/LCL are auto-computed as ±20% of the mean.</div>
+                            <div style="font-size:0.7rem; color:var(--text-muted); margin-top:0.4rem;">Maximum/Minimum are auto-computed as ±20% of the mean.</div>
                         </div>
                     </div>
                 </div>
@@ -1036,19 +931,23 @@
 
                 <!-- Bottom Buttons -->
                 <div id="detail-bottom-actions" style="margin-top:1rem; padding-top:1rem; border-top:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap;">
-                    <div style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
-                        <span id="baseline-controls" style="display:flex; gap:0.5rem; align-items:center; flex-wrap:wrap;">
-                        <button id="btn-configure-baseline" class="btn btn-primary" style="font-size:0.85rem;" onclick="showBaselineConfigPanel()">Configure Baseline</button>
-                        <button id="btn-edit-baseline" class="btn btn-primary" style="display:none; font-size:0.85rem;" onclick="showBaselineConfigPanel()">Edit Baseline</button>
+                    <div style="display:flex; gap:0.9rem; align-items:center; flex-wrap:wrap;">
+                        <span id="baseline-controls" style="display:flex; gap:0.9rem; align-items:center; flex-wrap:wrap;">
+                        <button id="btn-configure-baseline" class="btn btn-primary" style="font-size:0.85rem;" onclick="showBaselineConfigPanel()">Settings</button>
+                        <button id="btn-edit-baseline" class="btn btn-primary" style="display:none; font-size:0.85rem;" onclick="showBaselineConfigPanel()">Settings</button>
                         <button id="btn-save-baseline" class="btn btn-primary" style="display:none; font-size:0.85rem;" onclick="saveBaselineConfig()">Save Baseline</button>
                         <button id="btn-cancel-baseline" class="btn btn-secondary" style="display:none; font-size:0.85rem;" onclick="hideBaselineInputs()">Cancel</button>
-                        <button id="btn-remove-baseline" class="btn btn-danger" style="display:none; font-size:0.85rem;" onclick="removeBaselineConfig()">Remove Baseline</button>
                         <span id="baseline-timestamp" style="font-size:0.75rem; color:var(--text-muted);"></span>
                         </span>
+                        <button id="btn-cancel-calibration" class="btn btn-secondary" style="display:none; font-size:0.85rem;" onclick="cancelCalibration()">Cancel Calibration</button>
                     </div>
-                    <form id="forget-form" method="POST" onsubmit="return confirm('Are you sure you want to forget this device?');">
-                        <button type="submit" class="btn btn-danger">Forget Device</button>
-                    </form>
+                    <div style="display:flex; gap:0.9rem; align-items:center; flex-wrap:wrap;">
+                        <button id="btn-recalibrate" class="btn btn-secondary" style="display:none; font-size:0.85rem;" onclick="recalibrateDevice()">Re-calibrate</button>
+                        <button id="btn-remove-baseline" class="btn btn-danger" style="display:none; font-size:0.85rem;" onclick="removeBaselineConfig()">Remove Baseline</button>
+                        <form id="forget-form" method="POST" onsubmit="return confirm('Are you sure you want to forget this device? ALL of its readings, alerts, and history will be permanently deleted.');">
+                            <button type="submit" class="btn btn-danger">Forget Device</button>
+                        </form>
+                    </div>
                 </div>
             </div>
         </div>
@@ -1139,16 +1038,13 @@ let selectedApplianceId = null;
 let charts = {};
 let pollTimer = null;
 let unpairedPollTimer = null;
-let floorPlanEditMode = false;
-let floorPlanDirty = new Set();
-let floorPlanDrag = null;
 let energyPieChart = null;
 const CHART_COLORS = ['#2563EB','#F59E0B','#10B981','#EF4444','#8B5CF6','#EC4899','#06B6D4','#84CC16'];
 
 // Detail modal state
 const MAX_CHART_POINTS = 1080;
 let detailChartMode = 'live';
-let detailShowIdle = false; // filtered=true by default
+let detailShowIdle = false; // "Running only" selected by default (filtered=true)
 let detailHistoryStart = null;
 let detailHistoryEnd = null;
 let currentDeviceHasBaseline = false;
@@ -1309,239 +1205,43 @@ function exportEnergySummary() {
     window.open('/api/energy_summary/export?month=' + encodeURIComponent(month), '_blank');
 }
 
-/* ---------- FLOOR PLAN ---------- */
-function getMappedAppliances() { return appliances.filter(a => a.map_on_map); }
-function getUnmappedAppliances() { return appliances.filter(a => !a.map_on_map); }
-
-function fpStatusClass(a, live) {
-    if (!live || live.is_offline) return 'offline';
-    if (a.alert_status === 'critical') return 'critical';
-    if (a.alert_status === 'warning') return 'warning';
-    if (live.running_status === 'running') return 'running';
-    return 'idle';
-}
-
-function renderFloorPlan() {
-    const canvas = document.getElementById('floor-plan-canvas');
-    const empty = document.getElementById('fp-empty');
-    if (!canvas) return;
-    canvas.querySelectorAll('.fp-block').forEach(el => el.remove());
-    if (empty) empty.style.display = getMappedAppliances().length ? 'none' : 'block';
-
-    const rect = canvas.getBoundingClientRect();
-    getMappedAppliances().forEach(a => {
-        const el = document.createElement('div');
-        el.className = 'fp-block ' + fpStatusClass(a, null);
-        el.id = 'fp-block-' + a.id;
-        el.style.left = Math.max(0, Math.min(rect.width - 40, (a.map_x || 0))) + 'px';
-        el.style.top = Math.max(0, Math.min(rect.height - 30, (a.map_y || 0))) + 'px';
-        el.style.width = Math.max(40, (a.map_w || 120)) + 'px';
-        el.style.height = Math.max(30, (a.map_h || 60)) + 'px';
-        el.innerHTML = escapeHtml(a.name) + '<span class="fp-remove" onclick="removeFromFloorPlan(' + a.id + ', event)">&times;</span>';
-        canvas.appendChild(el);
-    });
-
-    if (floorPlanEditMode) enableFloorPlanDrag();
-    renderAddBlockDropdown();
-    updateFpActionButtons();
-}
-
-function renderAddBlockDropdown() {
-    const btn = document.getElementById('fp-add-btn');
-    const menu = document.getElementById('fp-add-menu');
-    if (!btn || !menu) return;
-    const unmapped = getUnmappedAppliances();
-    btn.textContent = 'Add Block (' + unmapped.length + ')';
-    btn.disabled = unmapped.length === 0;
-    if (unmapped.length === 0) {
-        menu.innerHTML = '<div class="fp-dropdown-item" style="color:var(--text-muted); cursor:default;">No new devices</div>';
-        return;
-    }
-    menu.innerHTML = unmapped.map(a =>
-        `<div class="fp-dropdown-item" onclick="addToFloorPlan(${a.id})">${escapeHtml(a.name)}</div>`
-    ).join('');
-}
-
-function toggleAddDropdown() {
-    const menu = document.getElementById('fp-add-menu');
-    if (!menu) return;
-    menu.classList.toggle('show');
-}
-
-function closeAddDropdown() {
-    const menu = document.getElementById('fp-add-menu');
-    if (menu) menu.classList.remove('show');
-}
-
-function updateFpActionButtons() {
-    const editBtn = document.getElementById('fp-edit-btn');
-    const cancelBtn = document.getElementById('fp-cancel-btn');
-    const saveBtn = document.getElementById('fp-save-btn');
-    if (floorPlanEditMode) {
-        editBtn.style.display = 'none';
-        cancelBtn.style.display = 'inline-flex';
-        saveBtn.style.display = 'inline-flex';
-        saveBtn.disabled = floorPlanDirty.size === 0;
-    } else {
-        editBtn.style.display = 'inline-flex';
-        cancelBtn.style.display = 'none';
-        saveBtn.style.display = 'none';
-        saveBtn.disabled = true;
-    }
-}
-
-function addToFloorPlan(id) {
-    const a = appliances.find(x => x.id === id);
-    if (!a) return;
-    closeAddDropdown();
-    if (!floorPlanEditMode) enterFloorPlanEdit();
-    a.map_on_map = true;
-    if (a.map_x == null) a.map_x = 20;
-    if (a.map_y == null) a.map_y = 20;
-    if (a.map_w == null) a.map_w = 120;
-    if (a.map_h == null) a.map_h = 60;
-    floorPlanDirty.add(id);
-    updateFpActionButtons();
-    renderFloorPlan();
-}
-
-function removeFromFloorPlan(id, event) {
-    if (event) event.stopPropagation();
-    const a = appliances.find(x => x.id === id);
-    if (!a) return;
-    a.map_on_map = false;
-    floorPlanDirty.add(id);
-    updateFpActionButtons();
-    renderFloorPlan();
-}
-
-function enterFloorPlanEdit() {
-    const canvas = document.getElementById('floor-plan-canvas');
-    floorPlanEditMode = true;
-    canvas.classList.add('editing');
-    updateFpActionButtons();
-    enableFloorPlanDrag();
-}
-
-function toggleFloorPlanEdit() {
-    if (floorPlanEditMode) {
-        cancelFloorPlanEdit();
-    } else {
-        enterFloorPlanEdit();
-    }
-}
-
-async function cancelFloorPlanEdit() {
-    const canvas = document.getElementById('floor-plan-canvas');
-    floorPlanEditMode = false;
-    canvas.classList.remove('editing');
-    floorPlanDirty.clear();
-    updateFpActionButtons();
-    disableFloorPlanDrag();
-    await refreshAppliances();
-}
-
-function enableFloorPlanDrag() {
-    const canvas = document.getElementById('floor-plan-canvas');
-    if (!canvas) return;
-    canvas.querySelectorAll('.fp-block').forEach(el => {
-        el.addEventListener('pointerdown', onFloorPlanPointerDown);
-    });
-}
-
-function disableFloorPlanDrag() {
-    const canvas = document.getElementById('floor-plan-canvas');
-    if (!canvas) return;
-    canvas.querySelectorAll('.fp-block').forEach(el => {
-        el.removeEventListener('pointerdown', onFloorPlanPointerDown);
-    });
-}
-
-function onFloorPlanPointerDown(e) {
-    if (!floorPlanEditMode) return;
-    const el = e.currentTarget;
-    const id = parseInt(el.id.replace('fp-block-', ''));
-    const a = appliances.find(x => x.id === id);
-    const canvas = document.getElementById('floor-plan-canvas');
-    const rect = canvas.getBoundingClientRect();
-    floorPlanDrag = {
-        el, a,
-        startX: e.clientX,
-        startY: e.clientY,
-        origLeft: parseFloat(el.style.left) || 0,
-        origTop: parseFloat(el.style.top) || 0
-    };
-    el.setPointerCapture(e.pointerId);
-    el.addEventListener('pointermove', onFloorPlanPointerMove);
-    el.addEventListener('pointerup', onFloorPlanPointerUp);
-    el.addEventListener('pointercancel', onFloorPlanPointerUp);
-}
-
-function onFloorPlanPointerMove(e) {
-    if (!floorPlanDrag) return;
-    const { el, startX, startY, origLeft, origTop } = floorPlanDrag;
-    const canvas = document.getElementById('floor-plan-canvas');
-    const rect = canvas.getBoundingClientRect();
-    let nx = origLeft + (e.clientX - startX);
-    let ny = origTop + (e.clientY - startY);
-    const w = parseFloat(el.style.width) || el.offsetWidth;
-    const h = parseFloat(el.style.height) || el.offsetHeight;
-    nx = Math.max(0, Math.min(rect.width - w, nx));
-    ny = Math.max(0, Math.min(rect.height - h, ny));
-    el.style.left = nx + 'px';
-    el.style.top = ny + 'px';
-}
-
-function onFloorPlanPointerUp(e) {
-    if (!floorPlanDrag) return;
-    const { el, a } = floorPlanDrag;
-    a.map_x = parseFloat(el.style.left);
-    a.map_y = parseFloat(el.style.top);
-    floorPlanDirty.add(a.id);
-    updateFpActionButtons();
-    el.releasePointerCapture(e.pointerId);
-    el.removeEventListener('pointermove', onFloorPlanPointerMove);
-    el.removeEventListener('pointerup', onFloorPlanPointerUp);
-    el.removeEventListener('pointercancel', onFloorPlanPointerUp);
-    floorPlanDrag = null;
-}
-
-async function saveFloorPlan() {
-    const dirty = Array.from(floorPlanDirty).map(id => appliances.find(a => a.id === id)).filter(Boolean);
-    if (dirty.length === 0) return;
-    try {
-        await Promise.all(dirty.map(a => fetchJson('/api/device/' + a.id + '/map_position', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                map_on_map: !!a.map_on_map,
-                map_x: a.map_x,
-                map_y: a.map_y,
-                map_w: a.map_w,
-                map_h: a.map_h
-            })
-        })));
-        floorPlanDirty.clear();
-        floorPlanEditMode = false;
-        document.getElementById('floor-plan-canvas').classList.remove('editing');
-        updateFpActionButtons();
-        disableFloorPlanDrag();
-        setFpStatus('Floor plan saved.', false);
-        await refreshAppliances();
-    } catch (e) {
-        setFpStatus('Save failed: ' + e.message, true);
-    }
-}
-
-function setFpStatus(text, isError) {
-    const el = document.getElementById('fp-status');
-    if (!el) return;
-    el.textContent = text;
-    el.style.color = isError ? '#991B1B' : 'var(--text-muted)';
-    setTimeout(() => { el.textContent = ''; }, 3000);
-}
-
 /* ---------- DEVICE CARDS & LIVE DATA ---------- */
+let baselinePanelOpen = false;
+
+function syncCalibrateButtons(a) {
+    const recal = document.getElementById('btn-recalibrate');
+    const cancel = document.getElementById('btn-cancel-calibration');
+    if (!recal || !cancel) return;
+    const open = selectedApplianceId === a.id;
+    const isHVAC = open && !isDryer(a.type);
+    recal.style.display = (isHVAC && a.status === 'normal' && baselinePanelOpen) ? '' : 'none';
+    // Initial calibration is mandatory: cancelling is only offered once the
+    // device has been calibrated at least once (a.calibrated from /latest).
+    cancel.style.display = (isHVAC && a.calibrated && (a.status === 'offset_calibration_needed' || a.status === 'calibrating')) ? '' : 'none';
+}
+
+async function recalibrateDevice() {
+    const a = appliances.find(x => x.id === selectedApplianceId);
+    if (!a) return;
+    if (!confirm('Re-calibrate the temperature offsets?\n\n1. Make sure both temperature probes are at room temperature (AC off).\n2. Hold the hidden button on the sensor node for 5 seconds until it beeps.\n3. Start the AC in cooling mode and wait until the temperature drops 8 °C.\n\nCharts pause until calibration completes. You can cancel anytime with "Cancel Calibration".')) return;
+    try {
+        await fetchJson('/api/device/' + a.id + '/recalibrate', { method: 'POST' });
+        a.status = 'offset_calibration_needed';
+        renderActionBar(a);
+    } catch (e) { alert('Could not start re-calibration: ' + (e.message || e)); }
+}
+
+async function cancelCalibration() {
+    const a = appliances.find(x => x.id === selectedApplianceId);
+    if (!a) return;
+    if (!confirm('Cancel calibration? The device returns to its previous calibrated state and resumes streaming immediately.')) return;
+    try {
+        await fetchJson('/api/device/' + a.id + '/calibration/cancel', { method: 'POST' });
+        a.status = 'normal';
+        renderActionBar(a);
+    } catch (e) { alert('Could not cancel calibration: ' + (e.message || e)); }
+}
+
 function updateCardStatus(a, data) {
     const badge = document.getElementById('badge-' + a.id);
     if (!badge) return;
@@ -1593,6 +1293,8 @@ function updateLiveData() {
                         } else {
                             const delta = document.getElementById('mini-delta-' + a.id);
                             if (delta) delta.textContent = (data.DeltaT != null ? data.DeltaT.toFixed(1) : '--') + ' °C';
+                            const avgD = document.getElementById('mini-avgdelta-' + a.id);
+                            if (avgD) avgD.textContent = (data.AvgDeltaT24h != null ? data.AvgDeltaT24h.toFixed(1) : '--') + ' °C';
                         }
                         const amp = document.getElementById('mini-amp-' + a.id);
                         const current = data.Imotor != null ? data.Imotor : data.Icompressor;
@@ -1614,7 +1316,6 @@ function updateLiveData() {
         });
 }
 
-function updateCards() { updateLiveData(); }
 
 /* ---------- DEVICE DETAIL MODAL (v4-style single page) ---------- */
 let detailCharts = {};
@@ -1734,7 +1435,9 @@ async function renderActionBar(a) {
     try {
         const latest = await fetchJson('/api/device/' + a.id + '/latest');
         if (latest.status) a.status = latest.status;
+        if (latest.calibrated !== undefined) a.calibrated = latest.calibrated;
     } catch (e) { /* backend unreachable: fall back to cached status */ }
+    syncCalibrateButtons(a);
 
     const bar = document.getElementById('detail-action-bar');
     if (!bar) return;
@@ -1750,10 +1453,10 @@ async function renderActionBar(a) {
             <div style="flex:1;">
                 <h4 style="color:var(--danger); margin-bottom:5px; font-size:1rem;">Calibration Required</h4>
                 <p style="font-size:0.85rem; color:var(--text-muted);">
-                    1. Make sure the AC is <strong>OFF</strong> and both probes have settled at room temperature.<br>
-                    2. Press and hold <strong>Button 2</strong> on the ESP32 for 5 seconds until the buzzer beeps.<br>
-                    3. Immediately start the AC in cooling mode &mdash; the supply probe must drop 8&nbsp;&deg;C below its baseline.<br>
-                    4. Calibration completes automatically (three beeps, up to 10 minutes).
+                    1. Make sure both temperature probes are at room temperature (AC off).<br>
+                    2. Hold the <strong>hidden button</strong> on the sensor node for 5 seconds until it beeps.<br>
+                    3. Start the AC in cooling mode and wait until the temperature drops 8&nbsp;&deg;C.<br>
+                    4. Success: three beeps. Failed or timed out: two beeps.
                 </p>
             </div>
             <span class="status-badge status-danger">Waiting for Hardware</span>`;
@@ -1766,15 +1469,16 @@ async function renderActionBar(a) {
         bar.innerHTML = `
             <div style="flex:1;">
                 <h4 style="color:var(--warning); margin-bottom:5px; font-size:1rem;">Calibrating in progress...</h4>
-                <p style="font-size:0.85rem; color:var(--text-muted);">Baseline captured. Keep the AC running in cooling mode and do not power off the node.</p>
+                <p style="font-size:0.85rem; color:var(--text-muted);">Wait for the temperature to drop 8&nbsp;&deg;C. Keep the AC running and do not power off the node.</p>
                 <div id="calib-progress-${a.id}" style="margin-top:8px;">
                     <div style="display:flex; justify-content:space-between; font-size:0.8rem; color:var(--text); margin-bottom:4px;">
-                        <span id="calib-drop-${a.id}">Supply: -- &deg;C | Drop: 0.0 / 8.0 &deg;C</span>
+                        <span id="calib-drop-${a.id}">S1: -- &deg;C | Drop: 0.0 / 8.0 &deg;C</span>
                     </div>
                     <div style="background:var(--border); border-radius:4px; height:8px; overflow:hidden;">
                         <div id="calib-bar-${a.id}" style="background:var(--warning); height:100%; width:0%; transition:width 0.3s;"></div>
                     </div>
-                    <div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px; text-align:right;">
+                    <div style="font-size:0.75rem; color:var(--text-muted); margin-top:2px; display:flex; justify-content:space-between;">
+                        <span id="calib-s2-${a.id}">S2: -- &deg;C</span>
                         <span id="calib-pct-${a.id}">0%</span>
                     </div>
                 </div>
@@ -1800,7 +1504,7 @@ async function renderActionBar(a) {
             bar.innerHTML = `
                 <div style="flex:1;">
                     <h4 style="color:var(--warning); margin-bottom:5px; font-size:1rem;">Baseline Not Configured</h4>
-                    <p style="font-size:0.85rem; color:var(--text-muted);">Set Delta-T LCL and Current UCL/LCL thresholds to enable alerts.</p>
+                    <p style="font-size:0.85rem; color:var(--text-muted);">Set a minimum Delta-T value to enable alerts.</p>
                 </div>`;
         }
     } catch (e) {
@@ -1818,8 +1522,8 @@ function startCalibrationPolling(id) {
         const required = d.required != null ? d.required : 8.0;
         const delta = d.delta != null ? d.delta : 0;
         if (dropEl) {
-            const ds2Txt = d.ds2 != null ? Number(d.ds2).toFixed(1) : '--';
-            dropEl.textContent = 'Supply: ' + ds2Txt + ' °C | Drop: ' + delta.toFixed(1) + ' / ' + required.toFixed(1) + ' °C';
+            const ds1Txt = d.ds1 != null ? Number(d.ds1).toFixed(1) : '--';
+            dropEl.textContent = 'S1: ' + ds1Txt + ' °C | Drop: ' + delta.toFixed(1) + ' / ' + required.toFixed(1) + ' °C';
         }
         if (barEl) barEl.style.width = (d.progress_pct || 0) + '%';
         if (pctEl) pctEl.textContent = (d.progress_pct || 0) + '%';
@@ -1894,17 +1598,18 @@ function initCharts(id, isHVAC) {
             type: 'line', data: { labels: [], datasets: [makeDataset('Return °C', '#8B5CF6', []), makeDataset('Supply °C', '#10B981', [])] }, options: makeChartOptions('°C')
         });
         detailCharts.deltat = new Chart(document.getElementById('chart-deltat').getContext('2d'), {
-            type: 'line', data: { labels: [], datasets: [makeDataset('Delta-T °C', '#2563EB', []), makeDataset('LCL', '#3B82F6', [6,3])] }, options: makeChartOptions('°C')
+            type: 'line', data: { labels: [], datasets: [makeDataset('Delta-T °C', '#2563EB', []), makeDataset('Minimum', '#3B82F6', [6,3])] }, options: makeChartOptions('°C')
         });
         detailCharts.current = new Chart(document.getElementById('chart-current').getContext('2d'), {
-            type: 'line', data: { labels: [], datasets: [makeDataset('Current A', '#F59E0B', [], true), makeDataset('UCL', '#EF4444', [6,3]), makeDataset('Mean', '#64748B', [4,4]), makeDataset('LCL', '#3B82F6', [6,3])] }, options: makeChartOptions('A')
+            // Delta-T is the only HVAC alert trigger — no current UCL/Mean/LCL lines.
+            type: 'line', data: { labels: [], datasets: [makeDataset('Current A', '#F59E0B', [], true)] }, options: makeChartOptions('A')
         });
     } else {
         detailCharts.texhaust = new Chart(document.getElementById('chart-texhaust').getContext('2d'), {
-            type: 'line', data: { labels: [], datasets: [makeDataset('Temp °C', '#DC2626', []), makeDataset('UCL', '#EF4444', [6,3]), makeDataset('Mean', '#64748B', [4,4]), makeDataset('LCL', '#3B82F6', [6,3])] }, options: makeChartOptions('°C')
+            type: 'line', data: { labels: [], datasets: [makeDataset('Temp °C', '#DC2626', []), makeDataset('Maximum', '#EF4444', [6,3]), makeDataset('Mean', '#64748B', [4,4]), makeDataset('Minimum', '#3B82F6', [6,3])] }, options: makeChartOptions('°C')
         });
         detailCharts.dryerCurrent = new Chart(document.getElementById('chart-dryer-current').getContext('2d'), {
-            type: 'line', data: { labels: [], datasets: [makeDataset('Current A', '#F59E0B', [], true), makeDataset('UCL', '#EF4444', [6,3]), makeDataset('Mean', '#64748B', [4,4]), makeDataset('LCL', '#3B82F6', [6,3])] }, options: makeChartOptions('A')
+            type: 'line', data: { labels: [], datasets: [makeDataset('Current A', '#F59E0B', [], true), makeDataset('Maximum', '#EF4444', [6,3]), makeDataset('Mean', '#64748B', [4,4]), makeDataset('Minimum', '#3B82F6', [6,3])] }, options: makeChartOptions('A')
         });
     }
 
@@ -2025,7 +1730,7 @@ function buildSpcLimits(metrics) {
 }
 
 function populateHistoryCharts(id, isHVAC, readings) {
-    // Empty-state hint so an intentionally empty (filtered) chart is not mistaken for a bug
+    // Empty-state hint so an intentionally empty ("Running only") chart is not mistaken for a bug
     const hint = document.getElementById('chart-empty-hint');
     if (hint) {
         if (!readings.length) {
@@ -2033,7 +1738,7 @@ function populateHistoryCharts(id, isHVAC, readings) {
                 ? 'No readings in the selected time range.'
                 : (detailShowIdle
                     ? 'No readings yet — waiting for data…'
-                    : 'No running readings (current ≥ 0.25 A) yet — Filtered shows running data only.');
+                    : 'No running readings (current ≥ 0.25 A) yet — "Running only" shows running data only.');
             hint.style.display = 'block';
         } else {
             hint.style.display = 'none';
@@ -2060,7 +1765,7 @@ function populateHistoryCharts(id, isHVAC, readings) {
         if (isHVAC) {
             pushChartPoint('temps', label, r.Treturn, 0);
             pushChartPoint('temps', label, r.Tsupply, 1);
-            pushChartPoint('deltat', label, r.DeltaT != null ? r.DeltaT : Math.abs((r.Treturn || 0) - (r.Tsupply || 0)));
+            pushChartPoint('deltat', label, r.DeltaT != null ? r.DeltaT : (r.Treturn || 0) - (r.Tsupply || 0));
             pushChartPoint('current', label, r.Icompressor);
         } else {
             pushChartPoint('texhaust', label, r.Texhaust);
@@ -2083,7 +1788,7 @@ function pushChartPoint(key, label, value, datasetIndex=0) {
 }
 
 const spcDsMap = {
-    current: [1, 2, 3],         // UCL, Mean, LCL
+    // HVAC compressor current has no SPC lines (delta-T is the only HVAC trigger).
     deltat: [null, null, 1],    // LCL only
     texhaust: [1, 2, 3],
     dryerCurrent: [1, 2, 3]
@@ -2121,7 +1826,18 @@ function updateDetailData() {
     const a = appliances.find(x => x.id === selectedApplianceId);
     if (!a) return;
 
+    // Event-driven panels (yellow-button maintenance history, alerts) refresh
+    // on the same 5 s tick so MQTT events show without reopening the card.
+    loadMaintenanceTable();
+    loadAlerts();
+
     fetchJson('/api/device/' + selectedApplianceId + '/latest').then(data => {
+        // During calibration, mirror the live S2 (supply) reading into the
+        // progress bar (S1 comes from the calibration_progress endpoint).
+        if (a.status === 'calibrating' && data.has_data) {
+            const s2El = document.getElementById('calib-s2-' + selectedApplianceId);
+            if (s2El) s2El.textContent = 'S2: ' + (data.Tsupply != null ? Number(data.Tsupply).toFixed(1) : '--') + ' °C';
+        }
         const offlineBadge = document.getElementById('detail-offline-status');
         const runBadge = document.getElementById('detail-run-status');
         if (!data.has_data) {
@@ -2143,7 +1859,7 @@ function updateDetailData() {
         // Append latest point to charts only in live mode
         if (detailChartMode === 'live') {
             const isHVAC = !isDryer(a.type);
-            // Filtered mode shows running data only — skip idle live points (v4 parity)
+            // "Running only" mode shows running data only — skip idle live points (v4 parity)
             const skipPush = !detailShowIdle && data.running_status !== 'running';
             if (!skipPush) {
                 const t = data.time ? new Date(data.time) : new Date();
@@ -2186,7 +1902,8 @@ async function checkBaselineResults() {
         );
         if (configureBtn) configureBtn.style.display = currentDeviceHasBaseline ? 'none' : 'inline-flex';
         if (editBtn) editBtn.style.display = currentDeviceHasBaseline ? 'inline-flex' : 'none';
-        if (removeBtn) removeBtn.style.display = currentDeviceHasBaseline ? 'inline-flex' : 'none';
+        // Remove Baseline lives inside the Settings panel only.
+        if (removeBtn) removeBtn.style.display = 'none';
         if (tsEl && data && data.updated_at) {
             tsEl.textContent = 'Baseline updated: ' + new Date(data.updated_at).toLocaleString();
         } else if (tsEl) {
@@ -2207,15 +1924,16 @@ async function showBaselineConfigPanel() {
     try {
         const data = await fetchJson('/api/device/' + selectedApplianceId + '/baseline_config');
         const metrics = data.metrics || {};
+        // Derive the baseline state from THIS fetch so the panel buttons do
+        // not depend on a possibly-stale global.
+        currentDeviceHasBaseline = Object.values(metrics).some(m =>
+            (m.ucl !== '' && m.ucl != null) || (m.lcl !== '' && m.lcl != null) || (m.mean !== '' && m.mean != null)
+        );
         if (isHVAC) {
             const deltatVals = metrics.deltat || {};
             document.getElementById('bl-deltat-lcl').value = deltatVals.lcl != null ? deltatVals.lcl : '';
             document.getElementById('bl-deltat-delay').value = data.delta_t_delay_minutes != null ? data.delta_t_delay_minutes : '';
-            const currentVals = metrics.current || {};
-            document.getElementById('bl-current-ucl').value = currentVals.ucl != null ? currentVals.ucl : '';
-            document.getElementById('bl-current-lcl').value = currentVals.lcl != null ? currentVals.lcl : '';
             document.getElementById('baseline-inputs-deltat').style.display = 'block';
-            document.getElementById('baseline-inputs-current').style.display = 'block';
         } else {
             const texhaustVals = metrics.texhaust || {};
             document.getElementById('bl-texhaust-ucl') && (document.getElementById('bl-texhaust-ucl').value = texhaustVals.ucl != null ? texhaustVals.ucl : '');
@@ -2227,15 +1945,28 @@ async function showBaselineConfigPanel() {
         }
         document.getElementById('btn-configure-baseline').style.display = 'none';
         document.getElementById('btn-edit-baseline').style.display = 'none';
-        document.getElementById('btn-remove-baseline').style.display = 'none';
+        // Remove Baseline is part of the Settings flow: only when the panel is
+        // open, and only when a baseline actually exists.
+        document.getElementById('btn-remove-baseline').style.display = currentDeviceHasBaseline ? 'inline-flex' : 'none';
         document.getElementById('btn-save-baseline').style.display = 'inline-flex';
         document.getElementById('btn-cancel-baseline').style.display = 'inline-flex';
+        baselinePanelOpen = true;
+        syncCalibrateButtons(a);
+        // Settings replaces the Forget Device button on the right side.
+        const forgetForm = document.getElementById('forget-form');
+        if (forgetForm) forgetForm.style.display = 'none';
     } catch (e) { alert(e.message); }
 }
 
 function hideBaselineInputs() {
+    baselinePanelOpen = false;
+    const cur = appliances.find(x => x.id === selectedApplianceId);
+    if (cur) syncCalibrateButtons(cur);
+    const removeBtn = document.getElementById('btn-remove-baseline');
+    if (removeBtn) removeBtn.style.display = 'none';
+    const forgetForm = document.getElementById('forget-form');
+    if (forgetForm) forgetForm.style.display = '';
     document.getElementById('baseline-inputs-deltat').style.display = 'none';
-    document.getElementById('baseline-inputs-current').style.display = 'none';
     const texhaustRow = document.getElementById('baseline-inputs-texhaust');
     if (texhaustRow) texhaustRow.style.display = 'none';
     const dryerCurrentRow = document.getElementById('baseline-inputs-dryer-current');
@@ -2256,8 +1987,8 @@ async function saveBaselineConfig() {
         if (Object.keys(cleaned).length) metrics[key] = cleaned;
     }
     if (isHVAC) {
+        // Delta-T LCL (+ delay) is the only HVAC baseline — no compressor current.
         addIfPresent('deltat', { lcl: document.getElementById('bl-deltat-lcl').value });
-        addIfPresent('current', { ucl: document.getElementById('bl-current-ucl').value, lcl: document.getElementById('bl-current-lcl').value });
     } else {
         addIfPresent('texhaust', { ucl: document.getElementById('bl-texhaust-ucl')?.value, lcl: document.getElementById('bl-texhaust-lcl')?.value });
         addIfPresent('current', { mean: document.getElementById('bl-current-mean')?.value });
@@ -2326,7 +2057,7 @@ async function loadAnalyticsTable() {
             tbody.innerHTML = rows.map(r => {
                 const avgReturn = r.avg_return != null ? r.avg_return : r.avg_intake;
                 const avgSupply = r.avg_supply != null ? r.avg_supply : r.avg_exit;
-                const delta = (avgReturn != null && avgSupply != null) ? Math.abs(avgReturn - avgSupply).toFixed(2) : '--';
+                const delta = (avgReturn != null && avgSupply != null) ? (avgReturn - avgSupply).toFixed(2) : '--';
                 return `<tr>
                     <td>${escapeHtml(r.date)}</td>
                     <td class="numeric">${avgReturn != null ? avgReturn.toFixed(2) + ' °C' : '--'}</td>
@@ -2521,7 +2252,7 @@ function updateFormDetails() {
             <li id="wire-sensor-line"></li>
         `;
         if (noteEl) {
-            noteEl.innerHTML = '<em>After pairing, press Button 2 for 5 seconds in still air to calibrate offsets.</em>';
+            noteEl.innerHTML = '<em>After pairing, press the hidden button for 5 seconds in still air, then start the AC to calibrate offsets.</em>';
             noteEl.style.display = 'block';
         }
     } else if (type === 'Gas Dryer') {
@@ -2643,11 +2374,6 @@ function startPolling() {
 
 window.addEventListener('beforeunload', () => {
     if (pollTimer) clearInterval(pollTimer);
-});
-
-document.addEventListener('click', (e) => {
-    const drop = document.querySelector('.fp-dropdown');
-    if (drop && !drop.contains(e.target)) closeAddDropdown();
 });
 
 document.addEventListener('keydown', (e) => {

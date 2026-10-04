@@ -7,7 +7,7 @@ Each appliance is fitted with an ESP32-C3 sensor node that measures air temperat
 ## Architecture
 
 ```
-[Sensor Node] --MQTT--> [HiveMQ Cloud] --MQTT--> [Flask Backend] --> [PostgreSQL]
+[Sensor Node] --MQTT--> [EMQX Cloud] --MQTT--> [Flask Backend] --> [PostgreSQL]
                                                           |
                                                        [Dashboard SPA]
 ```
@@ -32,8 +32,8 @@ Firmware lives in `firmware/Update_SensorNode_Production/` and runs on an ESP32-
 - Current clamp on ADC (GPIO 0) for compressor / motor current.
 
 **Controls and indicators**
-- Button 1 (GPIO 1): 2-second hold sends a `maintenance_request` event (only when paired and calibrated).
-- Button 2 (GPIO 3): 5-second hold requests offset calibration (HVAC only).
+- Yellow button (GPIO 1): 2-second hold sends a `maintenance_request` event (only when paired and calibrated).
+- Hidden button (GPIO 3): 5-second hold requests offset calibration (HVAC only).
 - LED shows running (solid), WiFi down (fast blink), MQTT down (medium blink), or idle (brief 10 s blink).
 - Buzzer gives audio feedback for pairing, calibration success/failure, maintenance ack/deny, and connection loss.
 
@@ -51,8 +51,8 @@ Firmware lives in `firmware/Update_SensorNode_Production/` and runs on an ESP32-
 |---|---|
 | `checkin` | Sent on MQTT connect and every 10 minutes while idle |
 | `event_request_config` | Sent on connect and every 10 s while unpaired; asks backend for `settype`/`setcf`/`setdeductor`/`restore` |
-| `maintenance_request` | Button 1 long press |
-| `event_button2_offset_calibration_request` | Button 2 long press (HVAC only) |
+| `maintenance_request` | Yellow button long press |
+| `event_button2_offset_calibration_request` | Hidden button long press (HVAC only) |
 | `calibration_progress` | Throttled (~2 s) supply-probe drop during calibration |
 | `calibration_success_request` | Supply probe dropped ≥ 8 °C below baseline |
 | `calibration_fail_request` | 10-minute timeout or approval timeout |
@@ -64,7 +64,7 @@ Firmware lives in `firmware/Update_SensorNode_Production/` and runs on an ESP32-
 | `setcf:<value>` / `setdeductor:<value>` | Current-clamp calibration values |
 | `restore:offsetcalibrationneeded` / `restore:normal` | Status restore |
 | `baseline:set` | Baselines saved on backend |
-| `startcalibration` | Approves a Button 2 calibration request |
+| `startcalibration` | Approves a hidden-button calibration request |
 | `offsetcalibrationsuccessack` / `offsetcalibrationfailack` | Calibration result ack |
 | `maintenanceack` / `maintenancedenied` / `actiondenied:busy` | Maintenance / busy replies |
 
@@ -103,12 +103,12 @@ Key behaviors:
 
 ### Offset Calibration (HVAC)
 
-A drop-based, firmware-monitored protocol that zeroes the inter-probe error:
+A drop-based, firmware-monitored protocol that assumes **both probes sit at the same point** and treats **sensor 1 (Port 1, return/DS1) as the trusted reference**:
 
-1. Button 2 (5 s hold) → node sends `event_button2_offset_calibration_request`; backend zeroes stored offsets, marks the device `calibrating`, and approves with `startcalibration`.
-2. The firmware captures a baseline from the next valid sample window (AC off), then starts monitoring the supply probe (DS2) for cooling.
-3. Turn the AC on in cooling mode — when the supply probe drops **≥ 8 °C** below its baseline, the node sends `calibration_success_request` with base/final readings; otherwise a `calibration_fail_request` after 10 minutes.
-4. The backend sanity-gates the result (supply must cool ≥ 7.5 °C — rising temperatures never count — and return ≥ 2.5 °C), stores additive offsets that zero the inter-probe error at the captured baseline, replies with the success/failure ack, and restores the device to `normal` (or back to `offset_calibration_needed` on failure).
+1. Place both probes together at the same point. Hidden button (5 s hold) → node sends `event_button2_offset_calibration_request`; backend zeroes stored offsets, marks the device `calibrating`, and approves with `startcalibration`.
+2. The firmware captures a baseline from the next valid sample window (AC off), then monitors the **reference probe (DS1)** for cooling.
+3. Turn the AC on in cooling mode — when **DS1 drops ≥ 8 °C** below its baseline, the node sends `calibration_success_request` with base/final readings; otherwise a `calibration_fail_request` after 10 minutes. DS2 must follow (≥ 2.5 °C drop) — a supply probe that doesn't track the reference is rejected as faulty.
+4. The backend sanity-gates the result (supply must cool ≥ 7.5 °C — rising temperatures never count — and return ≥ 2.5 °C), then aligns sensor 2 to sensor 1: **sensor 1 (Port 1, return) is the trusted reference** (its offset stays 0); sensor 2 (Port 2, supply) gets the offset c = base_ds1 − base_ds2, i.e. the affine model y = m·x + c with m = 1 (a single shared calibration point fixes c only). Both probes then read identically at the calibration point. Success marks the appliance `normal` and records `calibrated_at`; failure reverts to `offset_calibration_needed` with the previous offsets restored. If the node loses power or Wi-Fi mid-calibration, reconnecting automatically returns it to “Calibration Required” and the calibration is simply re-run — the dashboard never stays stuck on “Calibrating...”. **Data display starts at the initial calibration** (the raw calibration-session recordings are discarded at that moment); a later re-calibration keeps all history since the initial calibration.
 
 The dashboard shows a calibration progress bar (`Supply: X °C | Drop: Y / 8.0 °C`) and completes or reverts within one poll — no page refresh needed.
 
@@ -124,11 +124,11 @@ Single-page app served at `/dashboard` with a fixed sidebar and top navbar.
 
 - **Dashboard view**
   - Monthly energy consumption doughnut chart, total kWh, HVAC/dryer breakdown, per-appliance list, month selector, and Excel export.
-  - Device cards with live mini-readings, status badges, and a click-to-open detail modal. A card strip shows **Device Offline** (red) when the node is silent past the 120 s timeout, or **Awaiting Sensor Data** (yellow) when the node is online but has no readings yet.
+  - Device cards with live mini-readings, status badges, and a click-to-open detail modal. The Idle/Running badge sits above the appliance-condition badge (Normal/Warning/Critical). HVAC cards also show **Avg ΔT (24h run)** — the average delta-T over the last 24 h for running readings only, skipping the first 5 minutes of each compressor run. A card strip shows **Device Offline** (red) when the node is silent past the 120 s timeout, or **Awaiting Sensor Data** (yellow) when the node is online but has no readings yet.
 - **Device detail modal** (polled every 5 s while open)
-  - Live/history chart modes and a **filtered/unfiltered** toggle — filtered shows running data only (`current ≥ 0.25 A`); an empty-state hint explains when no running data exists.
+  - Live/history chart modes and a **Running only / All data** toggle — Running only shows running data only (`current ≥ 0.25 A`); an empty-state hint explains when no running data exists.
   - HVAC: Return & Supply chart, Delta-T chart, Compressor Current chart. Dryer: Exhaust Temperature chart, Motor Current chart. X-axis ticks render actual reading times in local time.
-  - Inline SPC baseline editor (HVAC: delta-T LCL + alert delay, current; dryer: exhaust temp, RH, current, pressure), with last-updated timestamp.
+  - Inline SPC baseline editor (HVAC: delta-T LCL + alert delay only — delta-T is the sole HVAC alert trigger; dryer: exhaust temp, RH, current, pressure), with last-updated timestamp.
   - Alert list with acknowledge/resolve actions and maintenance history.
   - Per-device Excel export with date-stamped filenames (`MMDDYYYY-HHMMSS`, `_filtered`/`_unfiltered` suffix).
   - Calibration-required / calibrating / baseline-not-configured action bars.
@@ -178,9 +178,21 @@ Single-page app served at `/dashboard` with a fixed sidebar and top navbar.
 ### Offset calibration (HVAC)
 
 1. Make sure the AC is **OFF** and both probes have settled at room temperature.
-2. Hold **Button 2 for 5 seconds** until the buzzer beeps — the backend approves and the firmware captures the baseline.
+2. Hold the **hidden button for 5 seconds** until the buzzer beeps — the backend approves and the firmware captures the baseline.
 3. Immediately start the AC in cooling mode — the supply probe must drop **8 °C** below its baseline (up to 10 minutes).
 4. Three short beeps = success (offsets stored, status → Normal). Two long beeps = failed or timed out; repeat from step 1.
+
+### Re-calibration and cancel (HVAC)
+
+When a sensor drifts or is replaced, use **Re-calibrate** in the device detail modal (next to the baseline buttons) instead of forgetting the device — no data is lost:
+
+1. Click **Re-calibrate** (device must be `Normal`). Status → `offset_calibration_needed` and the node pauses telemetry immediately.
+2. Run the normal hidden-button flow above (AC off → hold hidden button 5 s → AC cooling → 8 °C drop).
+3. New offsets replace the old ones; readings before and after stay intact.
+
+**Cancel Calibration** is available while a calibration is pending (`offset_calibration_needed`) or running (`calibrating`, including the 10-minute hardware window) — but only for devices that have been calibrated before. Cancel restores the exact previous state — old offsets, status `normal`, and the node's telemetry gate re-opens immediately. The **first calibration after pairing (or after forget + re-pair) is mandatory: there is no cancel, and no data is shown until it completes.**
+
+Endpoints: `POST /api/device/<id>/recalibrate`, `POST /api/device/<id>/calibration/cancel`.
 
 ---
 

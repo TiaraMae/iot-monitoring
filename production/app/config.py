@@ -1,9 +1,35 @@
 """Environment-only configuration and constants."""
 
 import os
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# All system times are WIB (Asia/Jakarta, UTC+7). DB timestamps use naive
+# local NOW() (the server host must be set to Jakarta time); reading times and
+# in-memory trackers use now_wib()/to_wib() so everything compares correctly.
+TIMEZONE = ZoneInfo("Asia/Jakarta")
+
+
+def now_wib():
+    """Current time as a naive WIB datetime (matches DB naive-local NOW())."""
+    return datetime.now(TIMEZONE).replace(tzinfo=None)
+
+
+def to_wib(dt):
+    """Normalize a datetime to naive WIB.
+
+    Aware datetimes are converted to WIB; naive datetimes are assumed to
+    already be WIB (DB values, server-local values).
+    """
+    if dt is None:
+        return now_wib()
+    if dt.tzinfo is not None:
+        return dt.astimezone(TIMEZONE).replace(tzinfo=None)
+    return dt
 
 
 def _require_env(name):
@@ -28,13 +54,22 @@ MQTT_PASS = _require_env("MQTT_PASS")
 
 RUNNING_CURRENT_THRESHOLD = 0.25
 MQTT_TOPIC_PREFIX = "iot/production/nodes"
-DELTA_T_ALERT_COOLDOWN_SECONDS = 600
 UNPAIRED_TIMEOUT_SECONDS = 30
 # A paired node streams telemetry every 10 s; silence beyond this marks it offline.
 OFFLINE_TIMEOUT_SECONDS = 120
+# A need-calibration node streams no telemetry by design (mandatory calibration);
+# its only liveness signal is the idle checkin every 10 minutes, so the offline
+# window must match that heartbeat (10 min + 60 s margin).
+NEED_CALIBRATION_OFFLINE_TIMEOUT_SECONDS = 660
 # Default running delay (minutes) before the HVAC delta-T alert fires, applied
 # when a delta-T LCL baseline is saved without an explicit delay.
 DEFAULT_DELTA_T_DELAY_MINUTES = 5
+# Minutes skipped at the start of each compressor run before a reading counts
+# toward the 24 h average delta-T on the device card (starting transients).
+AVG_DELTA_T_WARMUP_MINUTES = 5
+# Must match MAX_CHART_POINTS in templates/dashboard.html — the chart requests
+# this many points, and the API must not truncate the window below it (GAP-9).
+MAX_CHART_POINTS = 1080
 
 # Device types stored in appliances.type (pairing form values).
 VALID_DEVICE_TYPES = ("HVAC", "Gas Dryer")

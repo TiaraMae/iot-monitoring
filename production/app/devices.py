@@ -2,7 +2,7 @@
 
 import json
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
 
 import requests
 
@@ -15,7 +15,6 @@ from openpyxl.utils import get_column_letter
 
 from app import config, models, mqtt
 from app import calibration
-from app import telemetry
 from app.db import get_conn, release_conn
 
 
@@ -93,6 +92,12 @@ def handle_node_event(mac, payload):
         if not appliance:
             mqtt.send_node_command(mac, "settype:unpaired")
             return
+
+        # Node (re)connected: if it died mid-calibration, the DB can be stuck at
+        # `calibrating` forever (fail events are not buffered) — reconcile first.
+        from app.calibration import reconcile_on_node_connect
+        reconcile_on_node_connect(appliance["id"])
+        appliance = models.get_appliance(node["appliance_id"])
 
         _send_type_config(
             mac,
@@ -182,11 +187,13 @@ def pair_device():
         cur.execute("""
             INSERT INTO appliances
             (user_id, name, type, is_inverter, location, brand,
-             operational_status, cf, deductor, current_sensor)
-            VALUES (%s, %s, %s, %s, 'Home', 'Generic', %s, %s, %s, %s)
+             operational_status, cf, deductor, current_sensor, initial_calibrated_at)
+            VALUES (%s, %s, %s, %s, 'Home', 'Generic', %s, %s, %s, %s, %s)
             RETURNING id
         """, (current_user.id, name, app_type, is_inverter,
-              initial_status, cf, deductor, current_sensor))
+              initial_status, cf, deductor, current_sensor,
+              # Dryers never calibrate: their display window starts at pairing.
+              config.now_wib() if _is_dryer(app_type) else None))
         appliance_id = cur.fetchone()[0]
         cur.execute("""
             UPDATE sensor_nodes
@@ -199,15 +206,12 @@ def pair_device():
         cur.close()
         release_conn(conn)
 
-        if node_id in telemetry.UNPAIRED_CACHE:
-            del telemetry.UNPAIRED_CACHE[node_id]
-
         _send_type_config(mac, app_type, current_sensor, initial_status)
 
         if _is_dryer(app_type):
             flash(f"{name} added and ready. Configure baseline to enable alerts.", "success")
         else:
-            flash(f"{name} added. Hold Button 2 for 5s in still air to calibrate offsets.", "success")
+            flash(f"{name} added. Hold the hidden button for 5s in still air, then start the AC to calibrate offsets.", "success")
     except Exception as e:
         flash(f"Error pairing device: {e}", "error")
 
@@ -229,7 +233,9 @@ def forget_device(appliance_id):
         mqtt.send_node_command(mac, "settype:unpaired")
 
     alerts.clear_appliance_trackers(appliance_id)
-    flash("Device forgotten.", "success")
+    from app.calibration import CALIBRATION_TRACKER
+    CALIBRATION_TRACKER.pop(appliance_id, None)
+    flash("Device forgotten. All of its readings, alerts, and history were deleted.", "success")
     return redirect(url_for("dashboard"))
 
 
@@ -237,30 +243,6 @@ def forget_device(appliance_id):
 @login_required
 def api_unpaired_nodes():
     return jsonify(models.get_unpaired_nodes())
-
-
-@devices_bp.route("/api/node/<int:node_id>/latest")
-@login_required
-def api_node_latest(node_id):
-    cache = telemetry.UNPAIRED_CACHE.get(node_id)
-    if not cache:
-        return jsonify({"error": "Node not in cache"}), 404
-
-    d = cache["data"]
-    if "BME280Temp" in d:
-        return jsonify({
-            "time": cache["time"].isoformat(),
-            "Texhaust": d.get("BME280Temp"),
-            "RHexhaust": d.get("BME280Hum"),
-            "Pressure": d.get("BME280Pres"),
-            "Imotor": cache.get("amps", 0),
-        })
-    return jsonify({
-        "time": cache["time"].isoformat(),
-        "Treturn": d.get("DS1Temp"),
-        "Tsupply": d.get("DS2Temp"),
-        "Icompressor": cache.get("amps", 0),
-    })
 
 
 @devices_bp.route("/api/device/<int:appliance_id>/latest")
@@ -273,14 +255,28 @@ def api_device_latest(appliance_id):
     alert_status = models.get_appliance_alert_status(appliance_id)
     from datetime import datetime
 
+    # Converge a dead calibration session (node cut off mid-calibration): if the
+    # session cannot be live, revert before reporting status.
+    if appliance["operational_status"] == "calibrating":
+        from app.calibration import reconcile_calibration_state
+        if reconcile_calibration_state(appliance):
+            appliance = models.get_appliance(appliance_id)
+
     node = models.get_node_by_appliance(appliance_id)
     last_seen = node["last_seen"] if node else None
     # last_seen is stored via NOW() (naive LOCAL wall time) — compare on the same
     # clock. Comparing against aware UTC double-counts the timezone offset and
     # delays offline detection by ~7 h in UTC+7.
+    # The offline window must match how often the node talks in its current
+    # state: calibrated nodes stream telemetry every 10 s (strict 120 s), but
+    # a need-calibration node is silent by design and only checks in every
+    # 10 minutes — 120 s would flap it offline between checkins.
+    offline_timeout = (config.NEED_CALIBRATION_OFFLINE_TIMEOUT_SECONDS
+                       if appliance["operational_status"] == "offset_calibration_needed"
+                       else config.OFFLINE_TIMEOUT_SECONDS)
     now = datetime.now()
     is_offline = (
-        (now - last_seen).total_seconds() > config.OFFLINE_TIMEOUT_SECONDS
+        (now - last_seen).total_seconds() > offline_timeout
         if last_seen else True
     )
 
@@ -294,9 +290,10 @@ def api_device_latest(appliance_id):
                 "running_status": "idle",
                 "is_offline": is_offline,
                 "has_data": False,
+                "calibrated": appliance["calibrated_at"] is not None,
             })
         imotor = max(0.0, row["imotor"] or 0)
-        running = imotor >= 0.25
+        running = imotor >= config.RUNNING_CURRENT_THRESHOLD
         return jsonify({
             "time": row["time"].isoformat(),
             "Texhaust": row["texhaust"],
@@ -310,6 +307,7 @@ def api_device_latest(appliance_id):
             "running_status": "running" if running else "idle",
             "is_offline": is_offline,
             "has_data": True,
+            "calibrated": appliance["calibrated_at"] is not None,
         })
 
     # HVAC
@@ -322,16 +320,18 @@ def api_device_latest(appliance_id):
             "running_status": "idle",
             "is_offline": is_offline,
             "has_data": False,
+            "calibrated": appliance["calibrated_at"] is not None,
         })
 
     icomp = row["icompressor"] or 0
-    running = icomp >= 0.25
-    delta_t = round(abs((row["treturn"] or 0) - (row["tsupply"] or 0)), 2)
+    running = icomp >= config.RUNNING_CURRENT_THRESHOLD
+    delta_t = round((row["treturn"] or 0) - (row["tsupply"] or 0), 2)
     return jsonify({
         "time": row["time"].isoformat(),
         "Treturn": row["treturn"],
         "Tsupply": row["tsupply"],
         "DeltaT": delta_t,
+        "AvgDeltaT24h": models.get_avg_delta_t_running_24h(appliance_id),
         "Icompressor": icomp,
         "type": appliance["type"],
         "status": appliance["operational_status"],
@@ -339,6 +339,7 @@ def api_device_latest(appliance_id):
         "running_status": "running" if running else "idle",
         "is_offline": is_offline,
         "has_data": True,
+        "calibrated": appliance["calibrated_at"] is not None,
     })
 
 
@@ -457,31 +458,6 @@ def api_resolve_alert(alert_id):
     return api_acknowledge_alert(alert_id)
 
 
-@devices_bp.route("/api/device/<int:appliance_id>/history")
-@login_required
-def api_device_history(appliance_id):
-    appliance = models.get_appliance(appliance_id)
-    if not appliance or appliance["user_id"] != current_user.id:
-        return jsonify({"error": "not found"}), 404
-
-    limit = request.args.get("limit", 60, type=int)
-    limit = max(10, min(500, limit))
-
-    if _is_dryer(appliance["type"]):
-        readings = models.get_recent_dryer_readings(appliance_id, limit=limit)
-        return jsonify({
-            "type": "dryer",
-            "readings": readings,
-        })
-
-    readings = models.get_latest_hvac_readings(appliance_id, limit=limit)
-    readings.reverse()
-    return jsonify({
-        "type": "hvac",
-        "readings": readings,
-    })
-
-
 @devices_bp.route("/api/device/<int:appliance_id>/latest_n")
 @login_required
 def api_device_latest_n(appliance_id):
@@ -490,7 +466,7 @@ def api_device_latest_n(appliance_id):
         return jsonify({"error": "not found"}), 404
 
     limit = request.args.get("limit", 120, type=int)
-    limit = max(1, min(1000, limit))
+    limit = max(1, min(config.MAX_CHART_POINTS, limit))
     start = request.args.get("start")
     end = request.args.get("end")
     filtered = request.args.get("filtered", "true").lower() != "false"
@@ -502,8 +478,8 @@ def api_device_latest_n(appliance_id):
         params = [appliance_id, start, end, limit]
 
     is_dry = _is_dryer(appliance["type"])
-    current_filter = " AND r.imotor >= 0.25" if (filtered and is_dry) else ""
-    current_filter_hvac = " AND r.icompressor >= 0.25" if (filtered and not is_dry) else ""
+    current_filter = " AND r.imotor >= {}".format(config.RUNNING_CURRENT_THRESHOLD) if (filtered and is_dry) else ""
+    current_filter_hvac = " AND r.icompressor >= {}".format(config.RUNNING_CURRENT_THRESHOLD) if (filtered and not is_dry) else ""
 
     conn = get_conn()
     if not conn:
@@ -602,8 +578,8 @@ def api_export_excel(appliance_id):
             query_params.append(end_date)
 
         is_dry = _is_dryer(appliance["type"])
-        current_filter = " AND r.imotor >= 0.25" if (filtered and is_dry) else ""
-        current_filter_hvac = " AND r.icompressor >= 0.25" if (filtered and not is_dry) else ""
+        current_filter = " AND r.imotor >= {}".format(config.RUNNING_CURRENT_THRESHOLD) if (filtered and is_dry) else ""
+        current_filter_hvac = " AND r.icompressor >= {}".format(config.RUNNING_CURRENT_THRESHOLD) if (filtered and not is_dry) else ""
 
         if is_dry:
             cur.execute(f"""
@@ -705,32 +681,6 @@ def api_export_excel(appliance_id):
             release_conn(conn)
 
 
-@devices_bp.route("/api/device/<int:appliance_id>/thresholds", methods=["POST"])
-@login_required
-def api_device_thresholds(appliance_id):
-    appliance = models.get_appliance(appliance_id)
-    if not appliance or appliance["user_id"] != current_user.id:
-        return jsonify({"error": "not found"}), 404
-
-    data = request.get_json() or {}
-    updates = {}
-    if "alert_enabled" in data:
-        updates["alert_enabled"] = bool(data["alert_enabled"])
-    if "alert_rhexhaust_threshold" in data:
-        try:
-            float(data["alert_rhexhaust_threshold"])
-        except (ValueError, TypeError):
-            return jsonify({"error": "Invalid alert_rhexhaust_threshold"}), 400
-        # The column is not persisted yet unless the schema has it; alert_enabled is.
-
-    if not updates:
-        return jsonify({"success": True})
-
-    if models.update_appliance_settings(appliance_id, updates):
-        return jsonify({"success": True})
-    return jsonify({"error": "Failed to update thresholds"}), 500
-
-
 @devices_bp.route("/api/appliances")
 @login_required
 def api_appliances():
@@ -781,7 +731,7 @@ def api_user_discord_webhook_test():
                     "title": "Test Alert",
                     "description": "This is a test Discord alert from IoT Monitoring.",
                     "color": 0x2563EB,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": datetime.now(config.TIMEZONE).isoformat(),
                 }
             ]
         }
@@ -791,41 +741,6 @@ def api_user_discord_webhook_test():
         return jsonify({"error": f"Discord returned {resp.status_code}"}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-
-@devices_bp.route("/api/device/<int:appliance_id>/map_position", methods=["POST"])
-@login_required
-def api_device_map_position(appliance_id):
-    appliance = models.get_appliance(appliance_id)
-    if not appliance or appliance["user_id"] != current_user.id:
-        return jsonify({"error": "not found"}), 404
-
-    data = request.get_json() or {}
-    updates = {}
-    bool_fields = {"map_on_map"}
-    numeric_fields = {"map_x", "map_y", "map_w", "map_h"}
-
-    for field in bool_fields | numeric_fields:
-        if field not in data:
-            continue
-        if field in bool_fields:
-            updates[field] = bool(data[field])
-        else:
-            val = data[field]
-            if val in (None, ""):
-                updates[field] = None
-            else:
-                try:
-                    updates[field] = float(val)
-                except (ValueError, TypeError):
-                    return jsonify({"error": f"Invalid value for {field}"}), 400
-
-    if not updates:
-        return jsonify({"error": "No valid fields provided"}), 400
-
-    if models.update_appliance_map(appliance_id, updates):
-        return jsonify({"success": True})
-    return jsonify({"error": "Failed to update map position"}), 500
 
 
 @devices_bp.route("/api/send_command", methods=["POST"])

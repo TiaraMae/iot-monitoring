@@ -39,7 +39,7 @@ def _compute_energy_kwh(readings, voltage):
         prev_time, prev_current = readings[i - 1]
         curr_time, curr_current = readings[i]
         gap = (curr_time - prev_time).total_seconds()
-        if gap <= 120 and prev_current >= 0.25:
+        if gap <= 120 and prev_current >= config.RUNNING_CURRENT_THRESHOLD:
             energy_ws += prev_current * voltage * gap
     return round(energy_ws / 3_600_000, 4)
 
@@ -50,7 +50,9 @@ def _compute_daily_energy(readings, voltage):
     in_cycle = False
     cycle_readings = []
     for i, r in enumerate(readings):
-        time_val, current = r
+        # Index (not tuple-unpack): the analytics query may carry extra
+        # columns (treturn/tsupply) alongside time and current.
+        time_val, current = r[0], r[1]
         current = float(current) if current is not None else 0.0
         if in_cycle and i > 0:
             gap = (time_val - readings[i - 1][0]).total_seconds()
@@ -60,13 +62,13 @@ def _compute_daily_energy(readings, voltage):
                     energy_ws += cycle_readings[j - 1][1] * voltage * dt
                 in_cycle = False
                 cycle_readings = []
-        if current >= 0.25 and not in_cycle:
+        if current >= config.RUNNING_CURRENT_THRESHOLD and not in_cycle:
             in_cycle = True
             cycle_readings = [(time_val, current)]
         elif in_cycle:
             if cycle_readings and cycle_readings[-1][0] != time_val:
                 cycle_readings.append((time_val, current))
-        if current < 0.25 and in_cycle:
+        if current < config.RUNNING_CURRENT_THRESHOLD and in_cycle:
             for j in range(1, len(cycle_readings)):
                 dt = (cycle_readings[j][0] - cycle_readings[j - 1][0]).total_seconds()
                 energy_ws += cycle_readings[j - 1][1] * voltage * dt
@@ -102,49 +104,12 @@ def hvac_analytics(appliance_id):
             except ValueError:
                 pass
 
+        # Single chronological fetch feeds both the daily averages and the
+        # energy integral. Daily averages skip the first AVG_DELTA_T_WARMUP_MINUTES
+        # of each compressor run (same rule as the device card's Avg ΔT).
         if start and end:
             cur.execute("""
-                SELECT DATE(r.time) as date,
-                       AVG(r.treturn), AVG(r.tsupply)
-                FROM hvac_readings r
-                JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
-                JOIN appliances a ON a.id = sn.appliance_id
-                WHERE sn.appliance_id = %s AND r.icompressor >= 0.25
-                  AND r.time >= a.created_at AND r.time >= %s AND r.time <= %s
-                GROUP BY DATE(r.time)
-                ORDER BY DATE(r.time) DESC
-                LIMIT 30
-            """, (appliance_id, start, end))
-        else:
-            cur.execute("""
-                SELECT DATE(r.time) as date,
-                       AVG(r.treturn), AVG(r.tsupply)
-                FROM hvac_readings r
-                JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
-                JOIN appliances a ON a.id = sn.appliance_id
-                WHERE sn.appliance_id = %s AND r.icompressor >= 0.25
-                  AND r.time >= a.created_at
-                GROUP BY DATE(r.time)
-                ORDER BY DATE(r.time) DESC
-                LIMIT 30
-            """, (appliance_id,))
-        daily_rows = cur.fetchall()
-        daily_averages = [
-            {
-                "date": r[0].isoformat(),
-                "avg_return": round(r[1], 2) if r[1] is not None else None,
-                "avg_supply": round(r[2], 2) if r[2] is not None else None,
-                "avg_intake": round(r[1], 2) if r[1] is not None else None,
-                "avg_exit": round(r[2], 2) if r[2] is not None else None,
-                "avg_coil": None,
-            }
-            for r in daily_rows
-        ]
-
-        voltage = models.get_appliance_voltage(appliance_id)
-        if start and end:
-            cur.execute("""
-                SELECT r.time, r.icompressor
+                SELECT r.time, r.icompressor, r.treturn, r.tsupply
                 FROM hvac_readings r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
                 JOIN appliances a ON a.id = sn.appliance_id
@@ -154,7 +119,7 @@ def hvac_analytics(appliance_id):
             """, (appliance_id, start, end))
         else:
             cur.execute("""
-                SELECT r.time, r.icompressor
+                SELECT r.time, r.icompressor, r.treturn, r.tsupply
                 FROM hvac_readings r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
                 JOIN appliances a ON a.id = sn.appliance_id
@@ -162,6 +127,28 @@ def hvac_analytics(appliance_id):
                 ORDER BY r.time ASC
             """, (appliance_id,))
         readings = cur.fetchall()
+
+        daily_rows = models.compute_daily_running_averages(
+            [
+                {"time": r[0], "icompressor": r[1], "treturn": r[2], "tsupply": r[3]}
+                for r in readings
+            ],
+            config.RUNNING_CURRENT_THRESHOLD,
+            config.AVG_DELTA_T_WARMUP_MINUTES,
+        )
+        daily_averages = [
+            {
+                "date": d["date"],
+                "avg_return": d["avg_return"],
+                "avg_supply": d["avg_supply"],
+                "avg_intake": d["avg_return"],
+                "avg_exit": d["avg_supply"],
+                "avg_coil": None,
+            }
+            for d in daily_rows
+        ]
+
+        voltage = models.get_appliance_voltage(appliance_id)
 
         readings_by_date = defaultdict(list)
         for r in readings:
@@ -195,7 +182,7 @@ def dryer_analytics(appliance_id):
         return jsonify({"error": "db"}), 500
     cur = conn.cursor()
     try:
-        cycle_start = 0.25
+        cycle_start = config.RUNNING_CURRENT_THRESHOLD
         baselines = models.get_spc_baselines(appliance_id)
         mean_current = baselines.get("current", {}).get("mean", 2.0)
         prominence_threshold = 0.40
@@ -386,7 +373,9 @@ def _finalize_cycle_record(current_cycle, end_time, peak_values, voltage, cycles
     cycles.append(current_cycle)
 
 
-HVAC_METRICS = ["deltat", "current"]
+# Delta-T is the only HVAC alert trigger, so the compressor current has no
+# UCL/LCL baseline anymore (removed 2026-09-26). Dryer metrics keep current.
+HVAC_METRICS = ["deltat"]
 DRYER_METRICS = ["texhaust", "rhexhaust", "current", "pressure"]
 
 
@@ -564,7 +553,7 @@ def api_device_spc_limits(appliance_id):
     expected = (
         ["texhaust", "rhexhaust", "pressure", "current"]
         if "Dryer" in appliance["type"]
-        else ["deltat", "current"]
+        else ["deltat"]
     )
 
     result = {

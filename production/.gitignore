@@ -1,0 +1,25 @@
+# Runtime single-process lock (app/singleinstance.py)
+backend.lock
+
+# Local secrets — NEVER commit real credentials
+.env
+secrets.h
+deployment/.env.production
+
+# EMQX Cloud server CA (local reference copy; public cert, keep out of repo)
+emqxsl-ca.crt
+
+# Local-only: agent documentation, design screenshots, DB backups
+AGENTS.md
+/*.png
+backups/*.dump
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Editor/OS
+.vscode/
+.DS_Store
+Thumbs.db

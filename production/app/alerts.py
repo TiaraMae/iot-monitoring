@@ -1,6 +1,8 @@
 """Fault alert logic for HVAC delta-T and dryer cycles."""
 
-from datetime import datetime, timedelta, timezone
+import queue
+import threading
+from datetime import datetime, timedelta
 
 import requests
 
@@ -51,7 +53,7 @@ FAULT_DISCORD_MAP = {
     },
     "fault_hvac_low_delta_t": {
         "title": "HVAC Delta-T Below Limit",
-        "description": "Temperature split across the evaporator coil has stayed below the configured LCL while the compressor is running.",
+        "description": "Temperature split across the evaporator coil has stayed below the configured minimum value while the compressor is running.",
         "cause": "Low refrigerant, dirty filter, or compressor issue.",
         "action": "Check air filter and schedule HVAC technician if alert persists.",
     },
@@ -95,6 +97,49 @@ def _insert_fault_alert(
         print(f"Fault alert insert error: {e}")
 
 
+def _post_discord_embed(webhook_url, embed):
+    """Synchronous POST of one embed; shared by the worker and the fallback."""
+    try:
+        try:
+            _discord_queue.put_nowait((webhook_url, embed))
+            _ensure_discord_worker()
+        except queue.Full:
+            # Queue saturated (webhook down for a while): never drop an alert
+            # silently — post synchronously as a last resort.
+            _post_discord_embed(webhook_url, embed)
+    except Exception as e:
+        print(f"Discord alert failed: {e}")
+
+
+# GAP-4: alerts are dispatched on a background worker so a slow/dead webhook
+# never stalls MQTT ingestion on the paho callback thread.
+_discord_queue = queue.Queue(maxsize=50)
+_discord_worker = None
+_discord_worker_lock = threading.Lock()
+
+
+def _discord_worker_loop():
+    while True:
+        item = _discord_queue.get()
+        try:
+            webhook_url, embed = item
+            _post_discord_embed(webhook_url, embed)
+        except Exception as e:
+            print(f"Discord worker error: {e}")
+        finally:
+            _discord_queue.task_done()
+
+
+def _ensure_discord_worker():
+    global _discord_worker
+    with _discord_worker_lock:
+        if _discord_worker is None or not _discord_worker.is_alive():
+            _discord_worker = threading.Thread(
+                target=_discord_worker_loop, name="discord-alerts", daemon=True
+            )
+            _discord_worker.start()
+
+
 def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=None, severity="warning"):
     try:
         webhook_url = models.get_user_webhook(appliance_id)
@@ -121,7 +166,7 @@ def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=
                     f"**Recommended Action:** {fault_meta['action']}"
                 ),
                 "color": embed_color,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(config.TIMEZONE).isoformat(),
                 "footer": {"text": "IoT Monitoring & Predictive Maintenance"},
             }
         else:
@@ -134,7 +179,7 @@ def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=
                     {"name": "Value", "value": str(value) if value is not None else "N/A", "inline": True},
                     {"name": "Threshold", "value": str(threshold) if threshold is not None else "N/A", "inline": True},
                 ],
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(config.TIMEZONE).isoformat(),
                 "footer": {"text": "IoT Monitoring & Predictive Maintenance"},
             }
 
@@ -164,62 +209,100 @@ def check_hvac_delta_t_alert(appliance_id, reading_data):
 
     current = reading_data.get("current", 0.0)
     delta_t = reading_data.get("delta_t", 0.0)
-    actual_time = reading_data.get("_actual_time", datetime.now(timezone.utc))
+    actual_time = config.to_wib(reading_data.get("_actual_time"))
 
     tracker = DELTA_T_TRACKER.setdefault(appliance_id, {
-        "start_time": None,
+        "in_run": False,
+        "dip_start": None,
+        "below_since": None,
+        "alerted_in_run": False,
+        "last_ts": None,
         "last_alert_time": None,
-        "low_current_start": None,
     })
 
-    # Reset if current has been below threshold for more than 30 seconds.
+    # Stale/backlogged readings (offline-buffer flushes carry backdated
+    # timestamps and can arrive AFTER newer live readings) must never drive
+    # the alert state machine — they replay history the FSM has already
+    # passed. The reading itself is still stored by telemetry.py.
+    if tracker["last_ts"] is not None and actual_time <= tracker["last_ts"]:
+        return
+
+    # Gap close: > 30 s of sample-time silence means the compressor was off
+    # OR the node disconnected (live cadence is 10 s). This is the only way a
+    # disconnect — whose idle readings sat in the offline buffer and arrive
+    # later as stale backfill — can close the run.
+    if tracker["last_ts"] is not None and (actual_time - tracker["last_ts"]).total_seconds() > 30:
+        tracker["in_run"] = False
+        tracker["below_since"] = None
+        tracker["alerted_in_run"] = False
+    tracker["last_ts"] = actual_time
+
     if current < config.RUNNING_CURRENT_THRESHOLD:
-        if tracker["low_current_start"] is None:
-            tracker["low_current_start"] = actual_time
-        elif (actual_time - tracker["low_current_start"]).total_seconds() > 30:
-            tracker["start_time"] = None
-            tracker["low_current_start"] = None
+        # Idle-duration close: normal off-cycles keep sending idle readings
+        # every 10 s (no sample gap), so the run closes here instead.
+        if tracker["in_run"]:
+            if tracker["dip_start"] is None:
+                tracker["dip_start"] = actual_time
+            elif (actual_time - tracker["dip_start"]).total_seconds() > 30:
+                tracker["in_run"] = False
+                tracker["dip_start"] = None
+                tracker["below_since"] = None
+                tracker["alerted_in_run"] = False
         return
-    else:
-        tracker["low_current_start"] = None
 
-    # Delta-T healthy: reset timer.
+    # Running reading: a short dip ends without consequences.
+    tracker["dip_start"] = None
+    if not tracker["in_run"]:
+        # Run start (first running reading after > 30 s idle). The evaluation
+        # window ALWAYS restarts here — never from stale/cached data.
+        tracker["in_run"] = True
+        tracker["below_since"] = None
+        tracker["alerted_in_run"] = False
+
     if delta_t >= delta_t_lcl:
-        tracker["start_time"] = None
+        # Healthy: pause the continuous below-minimum clock. The latch is
+        # NOT cleared — exactly one alert per compressor run.
+        tracker["below_since"] = None
         return
 
-    # Delta-T low: start or continue timer.
-    if tracker["start_time"] is None:
-        tracker["start_time"] = actual_time
+    if tracker["below_since"] is None:
+        tracker["below_since"] = actual_time
         return
 
-    elapsed = (actual_time - tracker["start_time"]).total_seconds()
+    elapsed = (actual_time - tracker["below_since"]).total_seconds()
     if elapsed >= delay_minutes * 60:
-        last_alert = tracker["last_alert_time"]
-        if (
-            last_alert is None
-            or (actual_time - last_alert).total_seconds() >= config.DELTA_T_ALERT_COOLDOWN_SECONDS
-        ):
-            models.insert_alert(
+        # One alert per compressor run: a faulted AC running for hours must
+        # not spam alerts. The latch holds for the whole run (even across
+        # healthy bounces) and clears only at the next run start.
+        if not tracker["alerted_in_run"]:
+            # Fire: DB insert first, latch immediately, Discord best-effort —
+            # a webhook failure must never suppress or repeat an alert.
+            alert_id = models.insert_alert(
                 appliance_id=appliance_id,
                 alert_type="fault_hvac_low_delta_t",
                 message=(
-                    f"Delta-T {delta_t:.2f}C below LCL {delta_t_lcl:.2f}C "
+                    f"Delta-T {delta_t:.2f}C below minimum {delta_t_lcl:.2f}C "
                     f"for {delay_minutes} minutes (current {current:.2f}A)"
                 ),
                 value=delta_t,
                 threshold=delta_t_lcl,
                 severity="warning",
             )
-            send_discord_alert(
-                appliance_id,
-                "fault_hvac_low_delta_t",
-                f"Delta-T stayed below LCL for {delay_minutes} minutes.",
-                delta_t,
-                delta_t_lcl,
-                "warning",
-            )
             tracker["last_alert_time"] = actual_time
+            tracker["alerted_in_run"] = True
+            print(f"DELTA-T ALERT fired: appliance {appliance_id} alert {alert_id} "
+                  f"at {actual_time} (delta {delta_t:.2f}C, min {delta_t_lcl:.2f}C)")
+            try:
+                send_discord_alert(
+                    appliance_id,
+                    "fault_hvac_low_delta_t",
+                    f"Delta-T stayed below the minimum value for {delay_minutes} minutes.",
+                    delta_t,
+                    delta_t_lcl,
+                    "warning",
+                )
+            except Exception as e:
+                print(f"Discord delivery failed for appliance {appliance_id}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +335,7 @@ def check_dryer_faults(appliance_id, reading_data):
             return
 
         baselines = models.get_spc_baselines(appliance_id)
-        now = datetime.now(timezone.utc)
+        now = config.now_wib()
         _check_dryer_faults(appliance_id, reading_data, baselines, now, cur, conn)
     finally:
         cur.close()
@@ -264,7 +347,7 @@ def _check_dryer_faults(appliance_id, reading_data, baselines, now, cur, conn):
     texhaust = reading_data.get("texhaust", 0.0)
     rhexhaust = reading_data.get("rhexhaust", 0.0)
     gauge_pressure = reading_data.get("pressure")
-    actual_time = reading_data.get("_actual_time", now)
+    actual_time = config.to_wib(reading_data.get("_actual_time", now))
 
     stats = DRYER_CYCLE_STATS.setdefault(appliance_id, {})
     mean_current = baselines.get("current", {}).get("mean", 2.0)
@@ -362,7 +445,7 @@ def _check_dryer_faults(appliance_id, reading_data, baselines, now, cur, conn):
                         appliance_id,
                         "fault_dryer_belt_snapped",
                         (
-                            f"Belt snapped - motor current dropped below LCL {current_lcl:.3f}A "
+                            f"Belt snapped - motor current dropped below minimum {current_lcl:.3f}A "
                             f"for 3 consecutive readings (last: {current:.3f}A)"
                         ),
                         current,
@@ -389,7 +472,7 @@ def _check_dryer_faults(appliance_id, reading_data, baselines, now, cur, conn):
                         appliance_id,
                         "fault_dryer_roller_wear",
                         (
-                            f"Barrel roller worn out - motor current exceeded UCL {current_ucl:.3f}A "
+                            f"Barrel roller worn out - motor current exceeded maximum {current_ucl:.3f}A "
                             f"for 3 consecutive readings (last: {current:.3f}A)"
                         ),
                         current,
@@ -463,16 +546,16 @@ def _finalize_dryer_cycle(appliance_id, baselines, now):
                     severity = "critical"
                     msg = (
                         f"CRITICAL - Exhaust ventilation blockage detected: "
-                        f"gauge pressure {max_gauge_pressure:.2f} hPa > UCL {pressure_ucl:.2f} hPa, "
-                        f"end RH {end_rh_avg:.1f}% > UCL {rhexhaust_ucl:.1f}%, "
-                        f"max temp {max_temp:.1f}C > UCL {texhaust_ucl:.1f}C"
+                        f"gauge pressure {max_gauge_pressure:.2f} hPa > maximum {pressure_ucl:.2f} hPa, "
+                        f"end RH {end_rh_avg:.1f}% > maximum {rhexhaust_ucl:.1f}%, "
+                        f"max temp {max_temp:.1f}C > maximum {texhaust_ucl:.1f}C"
                     )
                 else:
                     severity = "warning"
                     msg = (
                         f"Warning - High exhaust RH and temperature: "
-                        f"end RH {end_rh_avg:.1f}% > UCL {rhexhaust_ucl:.1f}%, "
-                        f"max temp {max_temp:.1f}C > UCL {texhaust_ucl:.1f}C"
+                        f"end RH {end_rh_avg:.1f}% > maximum {rhexhaust_ucl:.1f}%, "
+                        f"max temp {max_temp:.1f}C > maximum {texhaust_ucl:.1f}C"
                     )
                 _insert_fault_alert(
                     appliance_id,
@@ -497,7 +580,7 @@ def _finalize_dryer_cycle(appliance_id, baselines, now):
             else:
                 severity = "warning"
                 msg = (
-                    f"Clothes not fully dried - end RH {end_rh_avg:.1f}% exceeds UCL "
+                    f"Clothes not fully dried - end RH {end_rh_avg:.1f}% exceeds maximum "
                     f"{rhexhaust_ucl:.1f}%"
                 )
             _insert_fault_alert(
@@ -521,7 +604,7 @@ def _finalize_dryer_cycle(appliance_id, baselines, now):
                     appliance_id,
                     "fault_dryer_belt_snapped",
                     (
-                        f"Belt snapped - last 3 motor readings all below LCL {current_lcl:.3f}A"
+                        f"Belt snapped - last 3 motor readings all below minimum {current_lcl:.3f}A"
                     ),
                     last_3[-1],
                     current_lcl,
@@ -545,7 +628,7 @@ def _finalize_dryer_cycle(appliance_id, baselines, now):
                         "fault_dryer_roller_wear",
                         (
                             f"Barrel roller worn out - motor baseline median {median_current:.3f}A "
-                            f"exceeded UCL {current_ucl:.3f}A during cycle"
+                            f"exceeded maximum {current_ucl:.3f}A during cycle"
                         ),
                         median_current,
                         current_ucl,
@@ -576,3 +659,122 @@ def clear_appliance_trackers(appliance_id):
     keys = [k for k in FAULT_ALERT_COOLDOWN if k[0] == appliance_id]
     for k in keys:
         FAULT_ALERT_COOLDOWN.pop(k, None)
+
+
+# ---------------------------------------------------------------------------
+# Dryer cycle rehydration (GAP-5)
+# ---------------------------------------------------------------------------
+
+REHYDRATE_READING_LIMIT = 2000          # ~5.5 h of readings at a 10 s cadence
+REHYDRATE_COOLDOWN_WINDOW_HOURS = 24    # alerts fired within this window re-arm cooldowns
+
+
+def _seed_alert_cooldowns_from_db(appliance_id, cur):
+    """Re-arm per-(appliance, fault-type) cooldowns from alerts already fired
+    recently, so replaying history after a restart does not re-notify."""
+    cutoff = config.now_wib() - timedelta(hours=REHYDRATE_COOLDOWN_WINDOW_HOURS)
+    cur.execute(
+        """
+        SELECT alert_type, MAX(created_at)
+        FROM alerts
+        WHERE appliance_id = %s AND created_at >= %s
+        GROUP BY alert_type
+        """,
+        (appliance_id, cutoff),
+    )
+    for alert_type, created_at in cur.fetchall():
+        if created_at is not None:
+            FAULT_ALERT_COOLDOWN[(appliance_id, alert_type)] = created_at
+
+
+def rehydrate_dryer_cycles():
+    """Rebuild in-memory dryer cycle state from DB readings at startup.
+
+    Cycle stats are RAM-only; without this, a backend restart mid-cycle would
+    silently skip that cycle's end-of-cycle fault evaluation. Replays the
+    trailing contiguous readings (gap <= 120 s) through the normal engine
+    with alert insertion enabled, after seeding cooldowns from the alerts
+    table. Never raises — rehydration must not break startup.
+    """
+    conn = get_conn()
+    if not conn:
+        return
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT DISTINCT a.id
+            FROM appliances a
+            JOIN sensor_nodes sn ON sn.appliance_id = a.id
+            WHERE a.type LIKE %s AND sn.status = 'paired'
+            """,
+            ("%Dryer%",),
+        )
+        appliance_ids = [row[0] for row in cur.fetchall()]
+    finally:
+        cur.close()
+        release_conn(conn)
+
+    for appliance_id in appliance_ids:
+        try:
+            _rehydrate_one_dryer(appliance_id)
+        except Exception as e:
+            print(f"Dryer rehydration failed for appliance {appliance_id}: {e}")
+
+
+def _rehydrate_one_dryer(appliance_id):
+    readings = models.get_recent_dryer_readings(
+        appliance_id, limit=REHYDRATE_READING_LIMIT
+    )
+    if not readings:
+        return
+
+    # Replay only the trailing contiguous block (gap <= 120 s between
+    # consecutive readings). Over-inclusion is safe: the engine replicates
+    # its own idle-finalize segmentation while replaying.
+    start_idx = len(readings) - 1
+    while start_idx > 0:
+        gap = (
+            readings[start_idx]["time"] - readings[start_idx - 1]["time"]
+        ).total_seconds()
+        if gap > 120:
+            break
+        start_idx -= 1
+
+    conn = get_conn()
+    if not conn:
+        return
+    cur = conn.cursor()
+    try:
+        baseline_configured, alert_enabled = _get_appliance_alert_gates(
+            appliance_id, cur
+        )
+        if not baseline_configured or not alert_enabled:
+            return
+        _seed_alert_cooldowns_from_db(appliance_id, cur)
+        baselines = models.get_spc_baselines(appliance_id)
+        for r in readings[start_idx:]:
+            reading_data = {
+                "texhaust": r["texhaust"],
+                "rhexhaust": r["rh_exhaust"],
+                "pressure": r["pressure"],
+                "current": max(0.0, float(r["imotor"] or 0.0)),
+                "_actual_time": config.to_wib(r["time"]),
+            }
+            _check_dryer_faults(
+                appliance_id, reading_data, baselines,
+                reading_data["_actual_time"], cur, conn,
+            )
+
+        # If the rebuilt cycle already ended physically while the backend was
+        # down (last reading older than the 120 s boundary), finalize it NOW so
+        # its end-of-cycle faults are evaluated immediately instead of waiting
+        # for the next telemetry message's sweep.
+        stats = DRYER_CYCLE_STATS.get(appliance_id, {})
+        if stats.get("in_cycle") and "last_time" in stats:
+            age = (config.now_wib() - stats["last_time"]).total_seconds()
+            if age > 120:
+                _finalize_dryer_cycle(appliance_id, baselines, config.now_wib())
+    finally:
+        cur.close()
+        release_conn(conn)

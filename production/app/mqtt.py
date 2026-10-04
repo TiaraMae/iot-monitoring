@@ -1,13 +1,17 @@
 """MQTT client setup and message dispatch."""
 
-import random
+import os
 
 import paho.mqtt.client as mqtt
 
 from app import config
 
 
-CLIENT_ID = f"ProductionBackend_{random.randint(10000, 99999)}"
+# Stable ID: restarts RESUME this one durable session instead of minting a new
+# client (+ a lingering session) per process start; if two backends ever
+# connected at once, the broker's same-client-ID takeover kicks the older one
+# (MQTT-level split-brain protection on top of the local single-instance lock).
+CLIENT_ID = "ProductionBackend"
 
 mqtt_client = mqtt.Client(
     mqtt.CallbackAPIVersion.VERSION2,
@@ -72,14 +76,34 @@ def on_message(client, userdata, msg):
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
 
-try:
-    mqtt_client.connect(
-        config.MQTT_HOST,
-        config.MQTT_PORT,
-        60,
-        clean_start=False,
-        properties=_mqtt_connect_props,
-    )
-    mqtt_client.loop_start()
-except Exception as e:
-    print(f"MQTT connection error: {e}")
+_started = False
+
+
+def start_mqtt():
+    """Connect to the broker and start the network loop — once per process.
+
+    Called from create_app(); importing this module alone must NOT connect
+    (tests and side scripts would otherwise ghost-connect as duplicate
+    backends and double-process every sensor message). Set IOT_DISABLE_MQTT=1
+    to skip the connection entirely — every test does this so test runs never
+    touch the shared broker (each ghost connection burns ~60 session-minutes
+    of broker quota by leaving a 1-hour persistent session behind).
+    """
+    global _started
+    if _started:
+        return
+    _started = True
+    if os.getenv("IOT_DISABLE_MQTT"):
+        print("MQTT disabled (IOT_DISABLE_MQTT=1) — not connecting.")
+        return
+    try:
+        mqtt_client.connect(
+            config.MQTT_HOST,
+            config.MQTT_PORT,
+            60,
+            clean_start=False,
+            properties=_mqtt_connect_props,
+        )
+        mqtt_client.loop_start()
+    except Exception as e:
+        print(f"MQTT connection error: {e}")

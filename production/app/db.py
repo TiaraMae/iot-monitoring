@@ -169,6 +169,8 @@ def _run_startup_migrations():
             ("appliances", "map_h", "REAL DEFAULT 60.0"),
             ("appliances", "map_on_map", "BOOLEAN DEFAULT FALSE"),
             ("appliances", "current_sensor", "TEXT"),
+            ("appliances", "calibrated_at", "TIMESTAMP"),
+            ("appliances", "initial_calibrated_at", "TIMESTAMP"),
             ("appliances", "updated_at", "TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()"),
             ("sensor_nodes", "last_seen", "TIMESTAMP WITHOUT TIME ZONE"),
             ("dryer_readings", "abs_pressure", "REAL"),
@@ -200,6 +202,27 @@ def _run_startup_migrations():
             UPDATE appliances
             SET current_sensor = CASE WHEN cf = 33.0 THEN 'SCT013-015' ELSE 'ZHT103C' END
             WHERE current_sensor IS NULL
+        """)
+
+        # Display-window start: the moment of the FIRST successful calibration.
+        # Backfill from calibrated_at for rows calibrated before this column
+        # existed (their appliance row was recreated at pairing/re-pair, so
+        # calibrated_at is the true initial-calibration moment).
+        cur.execute("""
+            UPDATE appliances
+            SET initial_calibrated_at = calibrated_at
+            WHERE initial_calibrated_at IS NULL AND calibrated_at IS NOT NULL
+        """)
+
+        # Delta-T is the only HVAC alert trigger; compressor-current UCL/LCL
+        # baselines for HVAC appliances were removed from the UI/API. Purge
+        # any legacy rows so nothing stale can render. Dryer rows are kept.
+        cur.execute("""
+            DELETE FROM spc_manual_baselines b
+            USING appliances a
+            WHERE b.appliance_id = a.id
+              AND b.metric_name = 'current'
+              AND a.type NOT LIKE '%%Dryer%%'
         """)
 
         conn.commit()

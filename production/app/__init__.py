@@ -44,6 +44,11 @@ def create_app():
     login_manager.login_view = "auth.login"
     limiter.init_app(app)
 
+    # All times in the system are WIB; the DB uses naive local NOW(), which is
+    # only correct if the host clock is set to Jakarta time (UTC+7).
+    print(f"Timezone: {config.TIMEZONE} — all times are WIB; "
+          f"server clock must be set to Jakarta (UTC+7).")
+
     from app.auth import auth_bp
     from app.devices import devices_bp
     from app.calibration import calibration_bp
@@ -80,7 +85,17 @@ def create_app():
         response.headers["Cache-Control"] = "no-store"
         return response
 
-    # Start MQTT client as a side effect of importing the module.
+    # Start MQTT only when the server actually starts, and only once per
+    # process — importing app.mqtt alone no longer connects (GAP-16).
     from app import mqtt
+    mqtt.start_mqtt()
+
+    # Rebuild orphaned dryer cycles from DB readings (GAP-5). Never fatal:
+    # the system runs fine even if rehydration has to be skipped.
+    try:
+        from app import alerts
+        alerts.rehydrate_dryer_cycles()
+    except Exception as e:
+        print(f"Dryer cycle rehydration skipped: {e}")
 
     return app

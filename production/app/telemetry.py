@@ -1,13 +1,12 @@
 """MQTT telemetry ingestion."""
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
 from app import models, config
 from app import alerts
 
 
-UNPAIRED_CACHE = {}
 DEDUPE_CACHE = {}
 
 
@@ -21,12 +20,12 @@ def _safe_float(value, default=0.0):
 
 
 def _compute_actual_time(data):
-    now_utc = datetime.now(timezone.utc)
+    now = config.now_wib()
     if "agoms" in data:
-        return now_utc - timedelta(milliseconds=max(0, int(data["agoms"])))
+        return now - timedelta(milliseconds=max(0, int(data["agoms"])))
     if "ago_ms" in data:
-        return now_utc - timedelta(milliseconds=max(0, int(data["ago_ms"])))
-    return now_utc - timedelta(seconds=max(0, int(data.get("ago", 0))))
+        return now - timedelta(milliseconds=max(0, int(data["ago_ms"])))
+    return now - timedelta(seconds=max(0, int(data.get("ago", 0))))
 
 
 def handle_telemetry(mac, payload):
@@ -38,9 +37,9 @@ def handle_telemetry(mac, payload):
         return
 
     actual_time = _compute_actual_time(data)
-    now_utc = datetime.now(timezone.utc)
-    if actual_time > now_utc + timedelta(minutes=1):
-        actual_time = now_utc
+    now = config.now_wib()
+    if actual_time > now + timedelta(minutes=1):
+        actual_time = now
 
     # Deduplicate messages that arrive too close together.
     last_time = DEDUPE_CACHE.get(mac)
@@ -61,12 +60,9 @@ def handle_telemetry(mac, payload):
     current = max(0.0, _safe_float(data.get("CurrentA"), 0.0))
 
     if node["appliance_id"] is None or node["status"] != "paired":
-        UNPAIRED_CACHE[node["id"]] = {
-            "data": data,
-            "amps": current,
-            "time": actual_time,
-            "mac": mac,
-        }
+        # Unpaired nodes never stream telemetry (firmware only publishes once
+        # calibrated), so there is no live data to preview here — the node
+        # simply stays visible in the unpaired-node scan list via last_seen.
         return
 
     appliance = models.get_appliance(node["appliance_id"])
@@ -102,13 +98,20 @@ def handle_telemetry(mac, payload):
         tsupply_raw = _safe_float(data.get("DS2Temp"), None)
         treturn = (treturn_raw + appliance["treturn_offset"]) if treturn_raw is not None else None
         tsupply = (tsupply_raw + appliance["tsupply_offset"]) if tsupply_raw is not None else None
-        delta_t = abs(treturn - tsupply) if treturn is not None and tsupply is not None else None
+        # Signed delta-T (GAP-8): positive = healthy cooling. A negative value
+        # means the probes are swapped (or no cooling) and trips the low-delta-T
+        # alert like any other below-LCL reading.
+        delta_t = (treturn - tsupply) if treturn is not None and tsupply is not None else None
 
         models.insert_hvac_reading(
             node["id"], actual_time, treturn, tsupply, current
         )
 
-        if current >= config.RUNNING_CURRENT_THRESHOLD and delta_t is not None:
+        # Skip alert evaluation during an active calibration session: offsets
+        # are zeroed for the session, so the raw delta-T of the calibration
+        # cooling run must not trip alerts.
+        if (current >= config.RUNNING_CURRENT_THRESHOLD and delta_t is not None
+                and appliance.get("operational_status") != "calibrating"):
             reading_data = {
                 "current": current,
                 "delta_t": delta_t,
