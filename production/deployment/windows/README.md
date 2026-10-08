@@ -95,14 +95,18 @@ After SSL exists, delete the temp config and use `nginx-iot-monitor.conf`
 powershell -ExecutionPolicy Bypass -File deployment\windows\setup-ssl.ps1
 ```
 
-- Requires Certbot for Windows at `C:\Certbot\bin\certbot.exe` (installs certs
-  to `C:\Certbot\live\iotmonitor.sgu.ac.id\`).
-- Uses the **webroot** plugin (`C:\nginx\html`) — nginx must be running during
-  issuance and renewal.
-- Creates a daily 03:00 renewal task (`Certbot-AutoRenew-iotmonitor.sgu.ac.id`)
-  that reloads nginx after a successful renew.
-- **Never stop nginx in a renewal pre-hook** — that exact mistake caused the
-  2026-09-02 outage in v4. Webroot validation needs nginx alive.
+- **Certbot discontinued Windows support in Feb 2024** — this uses **simple-acme**
+  (drop-in win-acme replacement, same author). Extract the latest `win-x64
+  (pluggable)` release zip to `C:\win-acme\` first:
+  https://github.com/simple-acme/simple-acme/releases/latest
+- Uses the **filesystem (webroot)** plugin — nginx serves the ACME challenge
+  from `C:\nginx\html`; nginx must be running during issuance and renewal.
+- Exports PEM files to `C:\ssl\iotmonitor.sgu.ac.id\` and installs a
+  post-renewal hook (`C:\nginx\reload-after-cert.cmd`) that reloads nginx.
+- simple-acme creates its **own daily renewal Scheduled Task** on first run —
+  no separate renewal task needed.
+- **Never stop nginx around renewal** — webroot validation needs it alive
+  (that exact mistake caused the 2026-09-02 outage in v4).
 
 ## 6. Verification
 
@@ -124,7 +128,7 @@ Check `logs\service.err.log` if the service won't start.
 | Remove service | `C:\nssm\nssm.exe remove IoT-Backend confirm` |
 | Reload nginx | `C:\nginx\nginx.exe -s reload` |
 | Nginx service | `Restart-Service IoT-Nginx` |
-| Force renew cert | `Start-ScheduledTask -TaskName Certbot-AutoRenew-iotmonitor.sgu.ac.id` |
+| Force renew cert | Run `C:\win-acme\wacs.exe --renew` (or wait for its scheduled task; it reloads nginx itself) |
 | Backend logs | `C:\IoTMonitoring_Production\logs\` |
 
 ## Still TODO (Ubuntu path)

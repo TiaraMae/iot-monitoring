@@ -1,48 +1,60 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Obtain and configure Let's Encrypt SSL certificate for Windows
+    Obtain and configure Let's Encrypt SSL certificate using simple-acme
 .DESCRIPTION
-    Installs Certbot for Windows, obtains SSL certificate for the subdomain,
-    and configures Nginx to use it. Also sets up auto-renewal via Task Scheduler.
+    Certbot DISCONTINUED Windows support in Feb 2024, so this script uses
+    simple-acme (the community drop-in replacement for win-acme, made by the
+    same author): https://github.com/simple-acme/simple-acme
+
+    - Validates via the filesystem (webroot) plugin: nginx must be running on
+      port 80 serving C:\nginx\html for the ACME challenge.
+    - Exports PEM files for nginx to C:\ssl\<domain>\  (cert+chain and key).
+    - Installs a post-renewal hook that reloads nginx.
+    - Creates its OWN daily renewal Scheduled Task on first run
+      ("simple-acme renew ...") — no manual renewal task needed.
+
+    NEVER stop nginx around renewal: webroot validation requires it alive
+    (that exact mistake caused the 2026-09-02 v4 outage).
 #>
 
 param(
     [string]$Domain = "iotmonitor.sgu.ac.id",
-    [string]$CertbotPath = "C:\Certbot\bin\certbot.exe",
-    [string]$NginxPath = "C:\nginx\nginx.exe",
-    [string]$NginxConfDir = "C:\nginx\conf",
-    [string]$Email = "tiara.mae@student.sgu.ac.id"
+    [string]$WacsPath = "C:\win-acme\wacs.exe",
+    [string]$NginxDir = "C:\nginx",
+    [string]$Email = "tiara.mae@student.sgu.ac.id",
+    [string]$PemDir = "C:\ssl\iotmonitor.sgu.ac.id"
 )
 
 $ErrorActionPreference = "Stop"
 
-Write-Host "=== Let's Encrypt SSL Setup ===" -ForegroundColor Cyan
+Write-Host "=== Let's Encrypt SSL Setup (simple-acme) ===" -ForegroundColor Cyan
 Write-Host "Domain: $Domain" -ForegroundColor White
 Write-Host ""
 
-# Check if Certbot is installed
-if (-not (Test-Path $CertbotPath)) {
-    Write-Host "Certbot not found at: $CertbotPath" -ForegroundColor Yellow
+# Check simple-acme is installed (extract the release zip to C:\win-acme)
+if (-not (Test-Path $WacsPath)) {
+    Write-Host "simple-acme not found at: $WacsPath" -ForegroundColor Yellow
     Write-Host ""
-    Write-Host "Please install Certbot for Windows:" -ForegroundColor Cyan
-    Write-Host "1. Download from: https://dl.eff.org/certbot-beta-installer-win_amd64.exe" -ForegroundColor White
-    Write-Host "2. Run the installer (installs to C:\Certbot\ by default)" -ForegroundColor White
+    Write-Host "Install it:" -ForegroundColor Cyan
+    Write-Host "1. Download simple-acme win-x64 (pluggable) from:" -ForegroundColor White
+    Write-Host "   https://github.com/simple-acme/simple-acme/releases/latest" -ForegroundColor White
+    Write-Host "2. Extract the zip so that $WacsPath exists" -ForegroundColor White
     Write-Host "3. Re-run this script" -ForegroundColor White
     Write-Host ""
-    Write-Error "Certbot not installed. Aborting."
+    Write-Error "simple-acme not installed. Aborting."
 }
 
-# Check if Nginx is installed
-if (-not (Test-Path $NginxPath)) {
-    Write-Error "Nginx not found at: $NginxPath. Please install Nginx for Windows first."
+# Check nginx is installed
+if (-not (Test-Path "$NginxDir\nginx.exe")) {
+    Write-Error "Nginx not found at: $NginxDir\nginx.exe. Please install Nginx for Windows first."
 }
 
 Write-Host "Obtaining SSL certificate for $Domain..." -ForegroundColor Cyan
-Write-Host "Make sure port 80 is accessible from the internet for ACME validation." -ForegroundColor Yellow
+Write-Host "Port 80 must be reachable from the internet (ACME webroot validation)." -ForegroundColor Yellow
 Write-Host ""
 
-# Create Nginx temp config for standalone challenge (port 80 must be free)
+# Create nginx temp config that only serves the ACME challenge on port 80
 $tempConf = @"
 server {
     listen 80;
@@ -57,89 +69,84 @@ server {
 "@
 
 # Backup existing nginx config
-$nginxConf = "$NginxConfDir\nginx.conf"
-$backupConf = "$NginxConfDir\nginx.conf.backup.$(Get-Date -Format yyyyMMddHHmmss)"
+$nginxConf = "$NginxDir\conf\nginx.conf"
+$backupConf = "$NginxDir\conf\nginx.conf.backup.$(Get-Date -Format yyyyMMddHHmmss)"
 if (Test-Path $nginxConf) {
     Copy-Item $nginxConf $backupConf
     Write-Host "Backed up nginx.conf to: $backupConf" -ForegroundColor Green
 }
 
-# Write temp minimal config for certbot standalone
-$tempConf | Out-File -FilePath "$NginxConfDir\nginx.conf" -Encoding UTF8
+# Write temp minimal config for the validation window
+$tempConf | Out-File -FilePath $nginxConf -Encoding utf8NoBOM
 
-# Restart Nginx with temp config
-Write-Host "Restarting Nginx with temporary config..." -ForegroundColor Cyan
-& $NginxPath -s reload 2>$null
+# (Re)start nginx with the temp config
+Write-Host "Restarting nginx with temporary config..." -ForegroundColor Cyan
+& "$NginxDir\nginx.exe" -s reload 2>$null
 Start-Sleep -Seconds 2
 if (-not $?) {
-    & $NginxPath
+    & "$NginxDir\nginx.exe"
     Start-Sleep -Seconds 3
 }
 
-# Obtain certificate using webroot (nginx serves the challenge)
-Write-Host "Running Certbot..." -ForegroundColor Cyan
-& $CertbotPath certonly `
-    --webroot `
-    -w C:/nginx/html `
-    -d $Domain `
-    --agree-tos `
-    --non-interactive `
-    --email $Email `
-    --no-eff-email
+# nginx reload hook used after (re)newal: run from the nginx dir so it finds
+# its prefix/config regardless of the scheduler's working directory.
+$reloadScript = "$NginxDir\reload-after-cert.cmd"
+@"
+@echo off
+cd /d $NginxDir
+nginx.exe -s reload
+"@ | Out-File -FilePath $reloadScript -Encoding ascii
+
+# Obtain certificate: manual host, filesystem validation via nginx webroot,
+# PEM export for nginx, and reload nginx after every successful renewal.
+Write-Host "Running simple-acme (wacs)..." -ForegroundColor Cyan
+& $WacsPath `
+    --source manual `
+    --host $Domain `
+    --validation filesystem `
+    --webroot "$NginxDir\html" `
+    --store pemfiles `
+    --pemfilespath $PemDir `
+    --installation script `
+    --script $reloadScript `
+    --accepttos `
+    --emailaddress $Email
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Error "Certbot failed. Check that port 80 is accessible and the domain resolves to this server's public IP."
+    Write-Error "simple-acme failed. Check that port 80 is reachable from the internet and the domain resolves to this server's public IP."
 }
 
 Write-Host ""
 Write-Host "Certificate obtained successfully!" -ForegroundColor Green
-Write-Host "Certificate path: C:\Certbot\live\$Domain\" -ForegroundColor White
+Write-Host "PEM files at: $PemDir\" -ForegroundColor White
 
-# Verify certificate files exist
-$certPath = "C:\Certbot\live\$Domain\fullchain.pem"
-$keyPath = "C:\Certbot\live\$Domain\privkey.pem"
-if (-not (Test-Path $certPath) -or -not (Test-Path $keyPath)) {
-    Write-Error "Certificate files not found. Something went wrong."
+# Verify the files nginx will use exist
+$chainPem = "$PemDir\$Domain-chain.pem"
+$keyPem   = "$PemDir\$Domain-key.pem"
+if (-not (Test-Path $chainPem) -or (-not (Test-Path $keyPem))) {
+    Write-Error "Expected PEM files not found ($chainPem / $keyPem). Check the simple-acme output above."
 }
 
-# Set up auto-renewal via Task Scheduler
-# IMPORTANT: The certificate uses the webroot plugin, so nginx MUST be running
-# during renewal to serve the ACME challenge from C:/nginx/html/.well-known/.
-# Do NOT stop nginx in a pre-hook - that breaks validation and the cert expires
-# silently (this exact mistake caused the 2026-09-02 outage). The deploy-hook
-# reloads nginx only AFTER a successful renewal so the new cert is loaded.
-$taskName = "Certbot-AutoRenew-$Domain"
-$existingTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-if ($existingTask) {
-    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
-    Write-Host "Removed existing renewal task: $taskName" -ForegroundColor Yellow
+# Confirm the auto-renewal scheduled task exists (created by simple-acme)
+$renewTask = Get-ScheduledTask | Where-Object { $_.TaskName -match "simple-acme|win-acme" }
+if ($renewTask) {
+    Write-Host "Auto-renewal task present: $($renewTask.TaskName)" -ForegroundColor Green
+} else {
+    Write-Warning "No simple-acme renewal task found. Check simple-acme's output — it should create one named 'simple-acme renew (...)'."
 }
 
-$action = New-ScheduledTaskAction -Execute $CertbotPath -Argument "renew --quiet --logs-dir C:\Certbot\log-system --deploy-hook `"$NginxPath -s reload`""
-# Note: --logs-dir keeps the SYSTEM task's log separate from any manual admin runs;
-# certbot locks its log file to the last account that ran it (fatal Permission
-# denied for the other account otherwise).
-$trigger = New-ScheduledTaskTrigger -Daily -At "03:00"
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopOnIdleEnd -WakeToRun
-$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest
-
-Register-ScheduledTask `
-    -TaskName $taskName `
-    -Action $action `
-    -Trigger $trigger `
-    -Settings $settings `
-    -Principal $principal `
-    -Description "Auto-renew Let's Encrypt SSL certificate for $Domain"
-
-Write-Host ""
-Write-Host "Auto-renewal task created: $taskName" -ForegroundColor Green
-Write-Host "Renewal runs daily at 03:00 AM (nginx must be running - do not stop it)" -ForegroundColor White
-Write-Host "Verify the task once: Start-ScheduledTask -TaskName `"$taskName`", then check C:\Certbot\logs\letsencrypt.log" -ForegroundColor White
 Write-Host ""
 Write-Host "=== SSL Setup Complete ===" -ForegroundColor Cyan
 Write-Host ""
+Write-Host "Renewal: simple-acme runs its own scheduled task; nginx is reloaded" -ForegroundColor White
+Write-Host "automatically after each successful renewal via $reloadScript" -ForegroundColor White
+Write-Host "(webroot validation needs nginx running — never stop it for renewal)." -ForegroundColor Yellow
+Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
-Write-Host "1. Copy deployment/windows/nginx-iot-monitor.conf to C:\nginx\conf\sites-enabled\" -ForegroundColor White
-Write-Host "2. Update server_name in nginx-iot-monitor.conf to: $Domain" -ForegroundColor White
-Write-Host "3. Reload Nginx: C:\nginx\nginx.exe -s reload" -ForegroundColor White
+Write-Host "1. Copy deployment/windows/nginx-iot-monitor.conf to C:\nginx\conf\" -ForegroundColor White
+Write-Host "2. Update server_name / paths if your layout differs" -ForegroundColor White
+Write-Host "3. Reload nginx: C:\nginx\nginx.exe -s reload" -ForegroundColor White
 Write-Host "4. Test HTTPS: https://$Domain" -ForegroundColor White
+Write-Host ""
+Write-Host "Force-renewal check (run once to be safe):" -ForegroundColor Yellow
+Write-Host "  & '$WacsPath' --renew --baseuri https://acme-v02.api.letsencrypt.org/" -ForegroundColor White
