@@ -79,12 +79,13 @@ if (Test-Path $nginxConf) {
 # Write temp minimal config for the validation window
 $tempConf | Out-File -FilePath $nginxConf -Encoding ascii
 
-# (Re)start nginx with the temp config
+# (Re)start nginx with the temp config. -p pins the prefix so logs/conf
+# resolve relative to the nginx dir even when launched from elsewhere.
 Write-Host "Restarting nginx with temporary config..." -ForegroundColor Cyan
-& "$NginxDir\nginx.exe" -s reload 2>$null
+& "$NginxDir\nginx.exe" -p "$NginxDir/" -s reload 2>$null
 Start-Sleep -Seconds 2
 if (-not $?) {
-    & "$NginxDir\nginx.exe"
+    & "$NginxDir\nginx.exe" -p "$NginxDir/"
     Start-Sleep -Seconds 3
 }
 
