@@ -56,14 +56,22 @@ Write-Host ""
 
 # Create nginx temp config that only serves the ACME challenge on port 80
 $tempConf = @"
-server {
-    listen 80;
+worker_processes  1;
+events {
+    worker_connections  1024;
+}
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+    server {
+        listen 80;
     server_name $Domain;
     location /.well-known/acme-challenge/ {
         root C:/nginx/html;
     }
-    location / {
-        return 200 "OK";
+        location / {
+            return 200 "OK";
+        }
     }
 }
 "@
@@ -97,6 +105,9 @@ $reloadScript = "$NginxDir\reload-after-cert.cmd"
 cd /d $NginxDir
 nginx.exe -s reload
 "@ | Out-File -FilePath $reloadScript -Encoding ascii
+
+# Make sure the ACME webroot path exists for the filesystem validation
+New-Item -ItemType Directory -Path "$NginxDir\html\.well-known\acme-challenge" -Force | Out-Null
 
 # Obtain certificate: manual host, filesystem validation via nginx webroot,
 # PEM export for nginx, and reload nginx after every successful renewal.
@@ -144,9 +155,10 @@ Write-Host "automatically after each successful renewal via $reloadScript" -Fore
 Write-Host "(webroot validation needs nginx running -- never stop it for renewal)." -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
-Write-Host "1. Copy deployment/windows/nginx-iot-monitor.conf to C:\nginx\conf\" -ForegroundColor White
-Write-Host "2. Update server_name / paths if your layout differs" -ForegroundColor White
-Write-Host "3. Reload nginx: C:\nginx\nginx.exe -s reload" -ForegroundColor White
+Write-Host "1. Copy deployment/windows/nginx.conf OVER C:\nginx\conf\nginx.conf:" -ForegroundColor White
+Write-Host "     copy C:\IoTMonitoring\production\deployment\windows\nginx.conf C:\nginx\conf\nginx.conf" -ForegroundColor White
+Write-Host "2. Test config: C:\nginx\nginx.exe -p C:\nginx\ -t" -ForegroundColor White
+Write-Host "3. Reload nginx: C:\nginx\nginx.exe -p C:\nginx\ -s reload" -ForegroundColor White
 Write-Host "4. Test HTTPS: https://$Domain" -ForegroundColor White
 Write-Host ""
 Write-Host "Force-renewal check (run once to be safe):" -ForegroundColor Yellow
