@@ -87,15 +87,15 @@ if (Test-Path $nginxConf) {
 # Write temp minimal config for the validation window
 $tempConf | Out-File -FilePath $nginxConf -Encoding ascii
 
-# (Re)start nginx with the temp config. -p pins the prefix so logs/conf
-# resolve relative to the nginx dir even when launched from elsewhere.
+# Start nginx fresh with the temp config. Kill stray processes and remove a
+# stale pid file first: 'nginx -s reload' against a dead master's pid file
+# fails with OpenEvent(...) and would abort the whole script.
 Write-Host "Restarting nginx with temporary config..." -ForegroundColor Cyan
-& "$NginxDir\nginx.exe" -p "$NginxDir/" -s reload 2>$null
-Start-Sleep -Seconds 2
-if (-not $?) {
-    & "$NginxDir\nginx.exe" -p "$NginxDir/"
-    Start-Sleep -Seconds 3
-}
+Get-Process nginx -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 1
+Remove-Item "$NginxDir\logs\nginx.pid" -Force -ErrorAction SilentlyContinue
+& "$NginxDir\nginx.exe" -p "$NginxDir/"
+Start-Sleep -Seconds 3
 
 # nginx reload hook used after (re)newal: run from the nginx dir so it finds
 # its prefix/config regardless of the scheduler's working directory.
