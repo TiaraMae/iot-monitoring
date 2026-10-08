@@ -77,7 +77,7 @@ if (Test-Path $nginxConf) {
 }
 
 # Write temp minimal config for the validation window
-$tempConf | Out-File -FilePath $nginxConf -Encoding utf8NoBOM
+$tempConf | Out-File -FilePath $nginxConf -Encoding ascii
 
 # (Re)start nginx with the temp config
 Write-Host "Restarting nginx with temporary config..." -ForegroundColor Cyan
