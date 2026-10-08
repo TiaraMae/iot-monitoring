@@ -110,6 +110,8 @@ nginx.exe -s reload
 
 # Make sure the ACME webroot path exists for the filesystem validation
 New-Item -ItemType Directory -Path "$NginxDir\html\.well-known\acme-challenge" -Force | Out-Null
+# The pemfiles store plugin requires the target directory to already exist
+New-Item -ItemType Directory -Path $PemDir -Force | Out-Null
 
 # Obtain certificate: manual host, filesystem validation via nginx webroot,
 # PEM export for nginx, and reload nginx after every successful renewal.
