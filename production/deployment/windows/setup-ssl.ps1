@@ -94,7 +94,9 @@ Write-Host "Restarting nginx with temporary config..." -ForegroundColor Cyan
 Get-Process nginx -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
 Remove-Item "$NginxDir\logs\nginx.pid" -Force -ErrorAction SilentlyContinue
-& "$NginxDir\nginx.exe" -p "$NginxDir/"
+# Start-Process (not '&') because nginx.exe stays in the foreground otherwise
+# and would block this script forever.
+Start-Process -FilePath "$NginxDir\nginx.exe" -ArgumentList '-p', "$NginxDir/" -WorkingDirectory $NginxDir
 Start-Sleep -Seconds 3
 
 # nginx reload hook used after (re)newal: run from the nginx dir so it finds
