@@ -45,7 +45,7 @@ New-NetFirewallRule `
     -Description "Allow inbound HTTPS for IoT Monitoring dashboard"
 Write-Host "[+] Created: Allow inbound HTTPS (443)" -ForegroundColor Green
 
-# Inbound block PostgreSQL (5432) — local only
+# Inbound block PostgreSQL (5432) -- local only
 New-NetFirewallRule `
     -DisplayName "IoT-Monitor-Postgres-Block" `
     -Direction Inbound `
@@ -56,7 +56,7 @@ New-NetFirewallRule `
     -Description "Block external access to PostgreSQL"
 Write-Host "[+] Created: Block inbound PostgreSQL (5432)" -ForegroundColor Green
 
-# Inbound block Flask direct (5000) — must go through Nginx
+# Inbound block Flask direct (5000) -- must go through Nginx
 New-NetFirewallRule `
     -DisplayName "IoT-Monitor-Flask-Block" `
     -Direction Inbound `

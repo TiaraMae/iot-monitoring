@@ -4,7 +4,7 @@
     Install Nginx as a Windows service using NSSM (auto-start on boot)
 .DESCRIPTION
     Nginx for Windows does not install itself as a service. This script wraps
-    it with NSSM so it survives reboots and restarts on failure — required for
+    it with NSSM so it survives reboots and restarts on failure -- required for
     the daily 03:00 Certbot renewal (webroot validation needs nginx running;
     stopping it in a renewal pre-hook caused the 2026-09-02 v4 outage).
 #>
@@ -75,5 +75,5 @@ Write-Host "  Restart:  Restart-Service $ServiceName" -ForegroundColor White
 Write-Host "  Reload cfg: $NginxExe -s reload   (no downtime)" -ForegroundColor White
 Write-Host "  Remove:   & '$NssmPath' remove $ServiceName confirm" -ForegroundColor White
 Write-Host ""
-Write-Host "NOTE: keep this service running 24/7 — the Certbot renewal task" -ForegroundColor Yellow
+Write-Host "NOTE: keep this service running 24/7 -- the Certbot renewal task" -ForegroundColor Yellow
 Write-Host "      (03:00 daily) validates via webroot served by nginx." -ForegroundColor Yellow

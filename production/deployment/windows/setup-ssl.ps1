@@ -12,7 +12,7 @@
     - Exports PEM files for nginx to C:\ssl\<domain>\  (cert+chain and key).
     - Installs a post-renewal hook that reloads nginx.
     - Creates its OWN daily renewal Scheduled Task on first run
-      ("simple-acme renew ...") — no manual renewal task needed.
+      ("simple-acme renew ...") -- no manual renewal task needed.
 
     NEVER stop nginx around renewal: webroot validation requires it alive
     (that exact mistake caused the 2026-09-02 v4 outage).
@@ -132,7 +132,7 @@ $renewTask = Get-ScheduledTask | Where-Object { $_.TaskName -match "simple-acme|
 if ($renewTask) {
     Write-Host "Auto-renewal task present: $($renewTask.TaskName)" -ForegroundColor Green
 } else {
-    Write-Warning "No simple-acme renewal task found. Check simple-acme's output — it should create one named 'simple-acme renew (...)'."
+    Write-Warning "No simple-acme renewal task found. Check simple-acme's output -- it should create one named 'simple-acme renew (...)'."
 }
 
 Write-Host ""
@@ -140,7 +140,7 @@ Write-Host "=== SSL Setup Complete ===" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Renewal: simple-acme runs its own scheduled task; nginx is reloaded" -ForegroundColor White
 Write-Host "automatically after each successful renewal via $reloadScript" -ForegroundColor White
-Write-Host "(webroot validation needs nginx running — never stop it for renewal)." -ForegroundColor Yellow
+Write-Host "(webroot validation needs nginx running -- never stop it for renewal)." -ForegroundColor Yellow
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
 Write-Host "1. Copy deployment/windows/nginx-iot-monitor.conf to C:\nginx\conf\" -ForegroundColor White
