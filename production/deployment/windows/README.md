@@ -1,8 +1,8 @@
 # Windows Deployment — IoT Monitoring (Production)
 
-Target host: the Windows mini-PC serving `iotmonitor.sgu.ac.id`
-(public IP 103.235.34.149, local 10.11.11.37). All steps run on that host in
-**Administrator PowerShell**. Ported from `iot_thesis_v4/deployment/windows`
+Target host: the Windows mini-PC serving `iotmonitor.sgu.ac.id` (local IP:
+see `AGENTS.md` §1 — network details live only in that gitignored file, never in
+tracked docs). All steps run on that host in **Administrator PowerShell**. Ported from `iot_thesis_v4/deployment/windows`
 for the production app (`run:app`, Waitress, single-process lock).
 
 ## Architecture
@@ -75,6 +75,13 @@ Pre-SSL (temporary, plain HTTP on 80):
    (or inline it into `C:\nginx\conf\nginx.conf`).
 2. `C:\nginx\nginx.exe`  (start)
 
+Make nginx survive reboots (recommended) — install it as an auto-start
+service (also required so the 03:00 Certbot renewal always finds nginx up):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deployment\windows\setup-nginx-service.ps1
+```
+
 After SSL exists, delete the temp config and use `nginx-iot-monitor.conf`
 (80 → ACME challenge + 301; 443 TLS 1.2/3 with the Let's Encrypt cert;
 `/login` rate-limited; `/static` aliased to `C:\IoTMonitoring_Production\app\static`).
@@ -116,6 +123,7 @@ Check `logs\service.err.log` if the service won't start.
 | Stop for maintenance | `Stop-Service IoT-Backend` |
 | Remove service | `C:\nssm\nssm.exe remove IoT-Backend confirm` |
 | Reload nginx | `C:\nginx\nginx.exe -s reload` |
+| Nginx service | `Restart-Service IoT-Nginx` |
 | Force renew cert | `Start-ScheduledTask -TaskName Certbot-AutoRenew-iotmonitor.sgu.ac.id` |
 | Backend logs | `C:\IoTMonitoring_Production\logs\` |
 
