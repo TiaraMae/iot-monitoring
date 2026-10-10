@@ -180,8 +180,9 @@ def main():
             check('hvac daily: headers',
                   headers == ["Date", "Avg Return Temp (°C)", "Avg Supply Temp (°C)",
                               "Avg Delta-T (°C)", "Avg Current (A)", "Avg Power (kW)", "Energy (kWh)"])
-            check('hvac daily: one row per day, oldest first',
-                  len(data) == 2 and data[0][0] == '2026-10-08' and data[1][0] == '2026-10-09')
+            check('hvac daily: one row per day + total row, oldest first',
+                  len(data) == 3 and data[0][0] == '2026-10-08' and data[1][0] == '2026-10-09'
+                  and data[2][0] == 'Total (all days)')
             if len(data) == 2:
                 a, b = data
                 # Temps are post-warmup averages (constant fixture -> 26/16,
@@ -196,6 +197,12 @@ def main():
                 check('hvac daily: day B averages',
                       b[1] == 25.0 and b[2] == 15.0 and b[4] == 2.0 and b[5] == 440.0)
                 check('hvac daily: day B energy', abs(b[6] - 0.0721) < 1e-9)
+                t = data[2]
+                # Total row: averages-of-averages for temps/delta/current,
+                # sums for power and energy.
+                check('hvac daily: total row',
+                      t[1] == 25.5 and t[2] == 15.5 and t[3] == 10.0 and t[4] == 3.1
+                      and t[5] == 1364.0 and abs(t[6] - 0.2243) < 1e-9)
             check('hvac daily: _daily filename marker',
                   '_daily' in resp.headers.get('Content-Disposition', ''))
 
@@ -213,14 +220,19 @@ def main():
             check('dryer daily: headers',
                   headers == ["Date", "Avg Exhaust Temp (°C)", "Avg Exhaust RH (%)",
                               "Avg Gauge Pressure (hPa)", "Avg Current (A)", "Avg Power (kW)", "Energy (kWh)"])
-            check('dryer daily: one row per day, oldest first',
-                  len(data) == 2 and data[0][0] == '2026-10-08' and data[1][0] == '2026-10-09')
+            check('dryer daily: one row per day + total row, oldest first',
+                  len(data) == 3 and data[0][0] == '2026-10-08' and data[1][0] == '2026-10-09'
+                  and data[2][0] == 'Total (all days)')
             if len(data) == 2:
                 a, b = data
                 check('dryer daily: day A averages',
                       a[1] == 60.0 and a[2] == 40.0 and a[3] == 2.5 and a[4] == 4.2 and a[5] == 924.0)
                 check('dryer daily: day A energy', abs(a[6] - 0.1522) < 1e-9)
                 check('dryer daily: day B energy', abs(b[6] - 0.1442) < 1e-9)
+                t = data[2]
+                check('dryer daily: total row',
+                      t[1] == 57.5 and t[2] == 37.5 and t[3] == 2.25 and t[4] == 4.1
+                      and t[5] == 1804.0 and abs(t[6] - 0.2964) < 1e-9)
 
             if failures:
                 print(f'\n{len(failures)} check(s) FAILED')

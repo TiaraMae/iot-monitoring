@@ -29,13 +29,18 @@ def _is_dryer(app_type):
 
 
 def _daily_export_rows(is_dry, raw, voltage):
-    """Build (headers, rows) for the per-day aggregate Excel export.
+    """Build (headers, rows, day_count) for the per-day aggregate Excel export.
 
     Rows cover RUNNING readings only. The sensor-value averages skip the
     first AVG_DELTA_T_WARMUP_MINUTES of each run (same rule as the on-screen
     HVAC Daily Averages table); Avg Current / Avg Power cover the WHOLE run
     (inrush included) so they stay consistent with the Energy column, which
     integrates the full running cycles of each day.
+
+    A trailing "Total (all days)" row is appended when at least one day
+    exists: averages-of-averages for the sensor values and Avg Current, sums
+    for Avg Power and Energy (those accumulate per day). day_count excludes
+    the total row.
     """
     if is_dry:
         dicts = [{"time": r[0], "texhaust": r[1], "rh_exhaust": r[2],
@@ -75,7 +80,17 @@ def _daily_export_rows(is_dry, raw, voltage):
                          else None)
             rows.append([s["date"], s["avg_treturn"], s["avg_tsupply"],
                          avg_delta, s["avg_current"], avg_power, energy])
-    return headers, rows
+    day_count = len(rows)
+    if rows:
+        total = ["Total (all days)"]
+        for idx in range(1, len(headers) - 2):
+            vals = [r[idx] for r in rows if r[idx] is not None]
+            total.append(round(sum(vals) / len(vals), 3) if vals else None)
+        for idx in (len(headers) - 2, len(headers) - 1):
+            vals = [r[idx] for r in rows if r[idx] is not None]
+            total.append(round(sum(vals), 4) if vals else None)
+        rows.append(total)
+    return headers, rows, day_count
 
 
 def get_cf_deductor(current_sensor):
@@ -660,7 +675,7 @@ def api_export_excel(appliance_id):
             raw = cur.fetchall()
 
         if granularity == "daily":
-            headers, rows = _daily_export_rows(is_dry, raw, voltage)
+            headers, rows, day_count = _daily_export_rows(is_dry, raw, voltage)
         elif is_dry:
             headers = ["Timestamp", "Exhaust Temp (°C)", "Exhaust RH (%)", "Gauge Pressure (hPa)", "Raw Absolute Pressure (hPa)", "Current (A)", "Power (kW)"]
             rows = []
@@ -689,7 +704,9 @@ def api_export_excel(appliance_id):
         ws.cell(row=3, column=1, value=f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=len(headers))
         count_label = "Days" if granularity == "daily" else "Data Points"
-        ws.cell(row=4, column=1, value=f"{count_label}: {len(rows)}")
+        if granularity != "daily":
+            day_count = len(rows)
+        ws.cell(row=4, column=1, value=f"{count_label}: {day_count}")
 
         for col, header in enumerate(headers, start=1):
             cell = ws.cell(row=6, column=col, value=header)

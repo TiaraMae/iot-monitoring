@@ -969,10 +969,10 @@
                     </select>
                 </div>
                 <div class="form-group">
-                    <label class="form-label">Data Granularity</label>
+                    <label class="form-label">Data Type</label>
                     <select id="export-granularity" class="form-control" onchange="toggleExportGranularity()">
                         <option value="points">All Data Points</option>
-                        <option value="daily">Daily Averages (per day)</option>
+                        <option value="daily">Per Day (Daily Averages)</option>
                     </select>
                 </div>
                 <div id="custom-date-inputs">
@@ -1081,7 +1081,9 @@ function escapeHtml(text) {
 }
 
 async function fetchJson(url, options = {}) {
-    const resp = await fetch(url, { credentials: 'same-origin', ...options });
+    // no-store: API responses must never come from the browser cache (a
+    // stale /latest would freeze cards in their last-known state).
+    const resp = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...options });
     const text = await resp.text();
     let data;
     try { data = JSON.parse(text); } catch (e) { data = text; }
@@ -1268,6 +1270,9 @@ function updateLiveData() {
         .then(results => {
             results.forEach((data, i) => {
                 if (!data) return;
+                // One failing appliance/response must never freeze the other
+                // cards: isolate per-card updates and log for diagnosis.
+                try {
                 const a = appliances[i];
                 // Live status convergence: /latest carries the fresh status, so
                 // sync it into the appliances array and re-render dependent UI
@@ -1318,9 +1323,14 @@ function updateLiveData() {
                         }
                     }
                 }
-                if (selectedApplianceId === a.id) updateDetailData();
+                } catch (e) {
+                    console.error('live card update failed for appliance', appliances[i] && appliances[i].id, e);
+                }
+                // NOTE: the detail modal self-polls via detailPollTimer while
+                // open — no updateDetailData() call here (it duplicated every
+                // /latest request and coupled the two polls' failure modes).
             });
-        });
+        }).catch(e => console.error('live poll error', e));
 }
 
 
@@ -2167,6 +2177,7 @@ function showExportModal() {
     }
     document.getElementById('export-include-idle').checked = detailShowIdle;
     toggleExportDateInputs();
+    toggleExportGranularity();
 }
 
 function closeExportModal() {
@@ -2179,10 +2190,14 @@ function toggleExportDateInputs() {
 }
 
 function toggleExportGranularity() {
-    // Daily aggregates are running-only by design, so the idle-data toggle
-    // only applies to per-point exports.
     const daily = document.getElementById('export-granularity').value === 'daily';
+    // Per-day rows are running-only by design, so the idle-data toggle only
+    // applies to per-point exports. Per-day exports also take WHOLE calendar
+    // days, so the time + AM/PM inputs are hidden (dates only).
     document.getElementById('export-idle-row').style.display = daily ? 'none' : 'block';
+    ['export-start-time', 'export-start-ampm', 'export-end-time', 'export-end-ampm'].forEach(id => {
+        document.getElementById(id).style.display = daily ? 'none' : '';
+    });
 }
 
 function downloadExcel() {
@@ -2195,11 +2210,21 @@ function downloadExcel() {
     params.push('granularity=' + granularity);
     params.push('filtered=' + (includeIdle ? 'false' : 'true'));
     if (range === 'custom') {
-        const start = combineDateTime('export-start-date', 'export-start-time', 'export-start-ampm');
-        const end = combineDateTime('export-end-date', 'export-end-time', 'export-end-ampm');
-        if (!start || !end) { alert('Please fill in date, time, and AM/PM for both export fields.'); return; }
-        params.push('start_date=' + encodeURIComponent(start));
-        params.push('end_date=' + encodeURIComponent(end));
+        if (granularity === 'daily') {
+            // Whole calendar days: 00:00:00 start, 23:59:59 end (the backend
+            // adds +1 s to the end, so the final day is fully included).
+            const sd = document.getElementById('export-start-date').value;
+            const ed = document.getElementById('export-end-date').value;
+            if (!sd || !ed) { alert('Please pick the start and end dates.'); return; }
+            params.push('start_date=' + encodeURIComponent(sd + 'T00:00:00'));
+            params.push('end_date=' + encodeURIComponent(ed + 'T23:59:59'));
+        } else {
+            const start = combineDateTime('export-start-date', 'export-start-time', 'export-start-ampm');
+            const end = combineDateTime('export-end-date', 'export-end-time', 'export-end-ampm');
+            if (!start || !end) { alert('Please fill in date, time, and AM/PM for both export fields.'); return; }
+            params.push('start_date=' + encodeURIComponent(start));
+            params.push('end_date=' + encodeURIComponent(end));
+        }
     }
     if (params.length) url += '?' + params.join('&');
     window.location.href = url;
@@ -2386,8 +2411,13 @@ async function refreshUnpaired() {
 function startPolling() {
     if (pollTimer) clearInterval(pollTimer);
     pollTimer = setInterval(() => {
-        updateLiveData();
-        if (document.getElementById('view-add-device').classList.contains('active')) refreshUnpaired();
+        try {
+            updateLiveData();
+            if (document.getElementById('view-add-device').classList.contains('active')) refreshUnpaired();
+        } catch (e) {
+            // The interval must survive any single-tick failure.
+            console.error('poll tick error', e);
+        }
     }, 5000);
 }
 
@@ -2403,9 +2433,11 @@ document.addEventListener('keydown', (e) => {
 });
 
 document.addEventListener('DOMContentLoaded', () => {
+    // Start the card poll FIRST: an error anywhere else on this handler must
+    // never leave the dashboard without its live-update loop.
+    startPolling();
     initEnergySummary();
     updateLiveData();
-    startPolling();
 });
 
 </script>
