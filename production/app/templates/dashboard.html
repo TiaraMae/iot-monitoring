@@ -2421,8 +2421,13 @@ function startPolling() {
     }, 5000);
 }
 
-window.addEventListener('beforeunload', () => {
-    if (pollTimer) clearInterval(pollTimer);
+// Never clear pollTimer on unload: browsers discard timers with the page
+// context anyway, and clearing here kills the card poll permanently if the
+// page is restored from the back-forward cache (beforeunload fires on the
+// way in, DOMContentLoaded does NOT re-fire on restore). The pageshow guard
+// below guarantees the poll is always alive.
+window.addEventListener('pageshow', () => {
+    if (!pollTimer) startPolling();  // idempotent: startPolling clears first
 });
 
 document.addEventListener('keydown', (e) => {
