@@ -44,43 +44,6 @@ def _compute_energy_kwh(readings, voltage):
     return round(energy_ws / 3_600_000, 4)
 
 
-def _compute_daily_energy(readings, voltage):
-    """Compute daily energy splitting cycles by >120s gaps or current below threshold."""
-    energy_ws = 0.0
-    in_cycle = False
-    cycle_readings = []
-    for i, r in enumerate(readings):
-        # Index (not tuple-unpack): the analytics query may carry extra
-        # columns (treturn/tsupply) alongside time and current.
-        time_val, current = r[0], r[1]
-        current = float(current) if current is not None else 0.0
-        if in_cycle and i > 0:
-            gap = (time_val - readings[i - 1][0]).total_seconds()
-            if gap > 120:
-                for j in range(1, len(cycle_readings)):
-                    dt = (cycle_readings[j][0] - cycle_readings[j - 1][0]).total_seconds()
-                    energy_ws += cycle_readings[j - 1][1] * voltage * dt
-                in_cycle = False
-                cycle_readings = []
-        if current >= config.RUNNING_CURRENT_THRESHOLD and not in_cycle:
-            in_cycle = True
-            cycle_readings = [(time_val, current)]
-        elif in_cycle:
-            if cycle_readings and cycle_readings[-1][0] != time_val:
-                cycle_readings.append((time_val, current))
-        if current < config.RUNNING_CURRENT_THRESHOLD and in_cycle:
-            for j in range(1, len(cycle_readings)):
-                dt = (cycle_readings[j][0] - cycle_readings[j - 1][0]).total_seconds()
-                energy_ws += cycle_readings[j - 1][1] * voltage * dt
-            in_cycle = False
-            cycle_readings = []
-    if in_cycle and cycle_readings:
-        for j in range(1, len(cycle_readings)):
-            dt = (cycle_readings[j][0] - cycle_readings[j - 1][0]).total_seconds()
-            energy_ws += cycle_readings[j - 1][1] * voltage * dt
-    return round(energy_ws / 3_600_000, 4)
-
-
 @analytics_bp.route("/api/device/<int:appliance_id>/hvac_analytics")
 @login_required
 def hvac_analytics(appliance_id):
@@ -157,7 +120,7 @@ def hvac_analytics(appliance_id):
         for day in daily_averages:
             date_key = datetime.fromisoformat(day["date"]).date()
             day_readings = readings_by_date.get(date_key, [])
-            day["daily_energy_kwh"] = _compute_daily_energy(day_readings, voltage)
+            day["daily_energy_kwh"] = models.compute_daily_energy(day_readings, voltage)
 
         return jsonify({"daily_averages": daily_averages})
     except Exception as e:

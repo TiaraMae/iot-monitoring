@@ -2,6 +2,7 @@
 
 import json
 import time
+from collections import defaultdict
 from datetime import datetime, timedelta
 
 import requests
@@ -25,6 +26,55 @@ EVENT_DEDUPE_CACHE = {}
 
 def _is_dryer(app_type):
     return "Dryer" in (app_type or "")
+
+
+def _daily_export_rows(is_dry, raw, voltage):
+    """Build (headers, rows) for the per-day aggregate Excel export.
+
+    Averages cover RUNNING readings only and skip the first
+    AVG_DELTA_T_WARMUP_MINUTES of each run (same rule as the on-screen HVAC
+    Daily Averages table); the energy column integrates the full running
+    cycles of each day.
+    """
+    if is_dry:
+        dicts = [{"time": r[0], "texhaust": r[1], "rh_exhaust": r[2],
+                  "pressure": r[3], "imotor": r[5]} for r in raw]
+        fields = ["texhaust", "rh_exhaust", "pressure"]
+        current_idx = 5
+        headers = ["Date", "Avg Exhaust Temp (°C)", "Avg Exhaust RH (%)",
+                   "Avg Gauge Pressure (hPa)", "Avg Current (A)",
+                   "Avg Power (kW)", "Energy (kWh)"]
+    else:
+        dicts = [{"time": r[0], "treturn": r[1], "tsupply": r[2],
+                  "icompressor": r[3]} for r in raw]
+        fields = ["treturn", "tsupply"]
+        current_idx = 3
+        headers = ["Date", "Avg Return Temp (°C)", "Avg Supply Temp (°C)",
+                   "Avg Delta-T (°C)", "Avg Current (A)",
+                   "Avg Power (kW)", "Energy (kWh)"]
+    stats = models.compute_daily_export_averages(
+        dicts, config.RUNNING_CURRENT_THRESHOLD,
+        config.AVG_DELTA_T_WARMUP_MINUTES, fields,
+        current_key="imotor" if is_dry else "icompressor")
+    by_date = defaultdict(list)
+    for r in raw:
+        by_date[r[0].date()].append((r[0], r[current_idx]))
+    rows = []
+    for s in reversed(stats):  # chronological order, oldest day first
+        day = datetime.fromisoformat(s["date"]).date()
+        energy = models.compute_daily_energy(by_date.get(day, []), voltage)
+        avg_current = s["avg_current"] or 0.0
+        avg_power = round(avg_current * voltage, 3)
+        if is_dry:
+            rows.append([s["date"], s["avg_texhaust"], s["avg_rh_exhaust"],
+                         s["avg_pressure"], s["avg_current"], avg_power, energy])
+        else:
+            avg_delta = (round(s["avg_treturn"] - s["avg_tsupply"], 2)
+                         if s["avg_treturn"] is not None and s["avg_tsupply"] is not None
+                         else None)
+            rows.append([s["date"], s["avg_treturn"], s["avg_tsupply"],
+                         avg_delta, s["avg_current"], avg_power, energy])
+    return headers, rows
 
 
 def get_cf_deductor(current_sensor):
@@ -578,8 +628,16 @@ def api_export_excel(appliance_id):
             query_params.append(end_date)
 
         is_dry = _is_dryer(appliance["type"])
-        current_filter = " AND r.imotor >= {}".format(config.RUNNING_CURRENT_THRESHOLD) if (filtered and is_dry) else ""
-        current_filter_hvac = " AND r.icompressor >= {}".format(config.RUNNING_CURRENT_THRESHOLD) if (filtered and not is_dry) else ""
+        granularity = request.args.get("granularity", "points")
+        if granularity not in ("points", "daily"):
+            granularity = "points"
+        voltage = models.get_appliance_voltage(appliance_id)
+
+        # The idle/running SQL filter only applies to per-point exports; the
+        # daily aggregate is running-only by definition (see _daily_export_rows).
+        apply_current_filter = filtered and granularity == "points"
+        current_filter = " AND r.imotor >= {}".format(config.RUNNING_CURRENT_THRESHOLD) if (apply_current_filter and is_dry) else ""
+        current_filter_hvac = " AND r.icompressor >= {}".format(config.RUNNING_CURRENT_THRESHOLD) if (apply_current_filter and not is_dry) else ""
 
         if is_dry:
             cur.execute(f"""
@@ -589,10 +647,7 @@ def api_export_excel(appliance_id):
                 WHERE sn.appliance_id = %s {date_filter}{current_filter}
                 ORDER BY r.time ASC
             """, tuple(query_params))
-            headers = ["Timestamp", "Exhaust Temp (°C)", "Exhaust RH (%)", "Gauge Pressure (hPa)", "Raw Absolute Pressure (hPa)", "Current (A)"]
-            rows = []
-            for r in cur.fetchall():
-                rows.append([r[0], r[1], r[2], r[3], r[4], r[5]])
+            raw = cur.fetchall()
         else:
             cur.execute(f"""
                 SELECT r.time, r.treturn, r.tsupply, r.icompressor
@@ -601,11 +656,23 @@ def api_export_excel(appliance_id):
                 WHERE sn.appliance_id = %s {date_filter}{current_filter_hvac}
                 ORDER BY r.time ASC
             """, tuple(query_params))
-            headers = ["Timestamp", "Return Temp (°C)", "Supply Temp (°C)", "Current (A)", "Delta-T (°C)"]
+            raw = cur.fetchall()
+
+        if granularity == "daily":
+            headers, rows = _daily_export_rows(is_dry, raw, voltage)
+        elif is_dry:
+            headers = ["Timestamp", "Exhaust Temp (°C)", "Exhaust RH (%)", "Gauge Pressure (hPa)", "Raw Absolute Pressure (hPa)", "Current (A)", "Power (kW)"]
             rows = []
-            for r in cur.fetchall():
+            for r in raw:
+                power = round(r[5] * voltage, 3) if r[5] is not None else None
+                rows.append([r[0], r[1], r[2], r[3], r[4], r[5], power])
+        else:
+            headers = ["Timestamp", "Return Temp (°C)", "Supply Temp (°C)", "Current (A)", "Power (kW)", "Delta-T (°C)"]
+            rows = []
+            for r in raw:
                 delta = round(abs((r[1] or 0) - (r[2] or 0)), 2) if (r[1] is not None and r[2] is not None) else None
-                rows.append([r[0], r[1], r[2], r[3], delta])
+                power = round(r[3] * voltage, 3) if r[3] is not None else None
+                rows.append([r[0], r[1], r[2], r[3], power, delta])
 
         wb = Workbook()
         ws = wb.active
@@ -620,7 +687,8 @@ def api_export_excel(appliance_id):
         ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(headers))
         ws.cell(row=3, column=1, value=f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=len(headers))
-        ws.cell(row=4, column=1, value=f"Data Points: {len(rows)}")
+        count_label = "Days" if granularity == "daily" else "Data Points"
+        ws.cell(row=4, column=1, value=f"{count_label}: {len(rows)}")
 
         for col, header in enumerate(headers, start=1):
             cell = ws.cell(row=6, column=col, value=header)
@@ -633,7 +701,8 @@ def api_export_excel(appliance_id):
                 if j == 1 and isinstance(val, datetime):
                     ws.cell(row=i, column=j, value=val.strftime("%Y-%m-%d %H:%M:%S"))
                 elif isinstance(val, float):
-                    ws.cell(row=i, column=j, value=round(val, 3))
+                    # 4 decimals: kWh energy values lose meaning at 3 (0.1082 -> 0.108).
+                    ws.cell(row=i, column=j, value=round(val, 4))
                 else:
                     ws.cell(row=i, column=j, value=val)
 
@@ -650,7 +719,10 @@ def api_export_excel(appliance_id):
 
         # Build a descriptive filename that includes the range/filter info.
         safe_name = appliance["name"].replace(" ", "_").replace("/", "_").replace("\\", "_")
-        filter_suffix = "filtered" if filtered else "unfiltered"
+        if granularity == "daily":
+            filter_suffix = "daily"
+        else:
+            filter_suffix = "filtered" if filtered else "unfiltered"
 
         def _fmt_dt_filename(iso_str):
             try:

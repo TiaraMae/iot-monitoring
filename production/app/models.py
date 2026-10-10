@@ -438,6 +438,98 @@ def compute_daily_running_averages(rows, threshold, warmup_minutes, limit=30):
     ]
 
 
+def compute_daily_export_averages(rows, threshold, warmup_minutes, fields,
+                                  current_key="icompressor", limit=10000):
+    """Per-calendar-day averages of `fields` (plus the run current) over
+    RUNNING readings, skipping the first `warmup_minutes` of each run — the
+    same warmup rule as compute_daily_running_averages, generalized for the
+    Excel daily export (HVAC and dryer).
+
+    rows: chronologically ordered dicts carrying at least "time" and
+    `current_key`. `fields` lists the extra keys to average; None values are
+    skipped per-field. Returns newest-first:
+    [{"date": "YYYY-MM-DD", "avg_<field>": x|None, ..., "avg_current": y}]
+    limited to the `limit` most recent days with data.
+    """
+    warmup = timedelta(minutes=warmup_minutes)
+    segment_start = None
+    buckets = {}  # date -> {field: [sum, count], "__cur": [sum, count]}
+    for r in rows:
+        current = r.get(current_key)
+        running = (current or 0.0) >= threshold
+        if not running:
+            segment_start = None
+            continue
+        t = r.get("time")
+        if segment_start is None:
+            segment_start = t
+        if t is None or t - segment_start < warmup:
+            continue
+        b = buckets.setdefault(t.date(), {})
+        cb = b.setdefault("__cur", [0.0, 0])
+        cb[0] += float(current)
+        cb[1] += 1
+        for f in fields:
+            v = r.get(f)
+            if v is None:
+                continue
+            fb = b.setdefault(f, [0.0, 0])
+            fb[0] += float(v)
+            fb[1] += 1
+    out = []
+    for d, b in sorted(buckets.items(), key=lambda kv: kv[0], reverse=True)[:limit]:
+        row = {"date": d.isoformat()}
+        for f in fields:
+            fb = b.get(f)
+            row[f"avg_{f}"] = round(fb[0] / fb[1], 2) if fb and fb[1] else None
+        cb = b.get("__cur")
+        row["avg_current"] = round(cb[0] / cb[1], 3) if cb and cb[1] else None
+        out.append(row)
+    return out
+
+
+def compute_daily_energy(readings, voltage):
+    """Compute daily energy splitting cycles by >120s gaps or current below threshold.
+
+    readings: chronologically ordered tuples whose first two items are
+    (time, current); extra trailing columns are ignored (the analytics query
+    may carry treturn/tsupply alongside time and current).
+    """
+    energy_ws = 0.0
+    in_cycle = False
+    cycle_readings = []
+    for i, r in enumerate(readings):
+        # Index (not tuple-unpack): the analytics query may carry extra
+        # columns (treturn/tsupply) alongside time and current.
+        time_val, current = r[0], r[1]
+        current = float(current) if current is not None else 0.0
+        if in_cycle and i > 0:
+            gap = (time_val - readings[i - 1][0]).total_seconds()
+            if gap > 120:
+                for j in range(1, len(cycle_readings)):
+                    dt = (cycle_readings[j][0] - cycle_readings[j - 1][0]).total_seconds()
+                    energy_ws += cycle_readings[j - 1][1] * voltage * dt
+                in_cycle = False
+                cycle_readings = []
+        if current >= config.RUNNING_CURRENT_THRESHOLD and not in_cycle:
+            in_cycle = True
+            cycle_readings = [(time_val, current)]
+        elif in_cycle:
+            if cycle_readings and cycle_readings[-1][0] != time_val:
+                cycle_readings.append((time_val, current))
+        if current < config.RUNNING_CURRENT_THRESHOLD and in_cycle:
+            for j in range(1, len(cycle_readings)):
+                dt = (cycle_readings[j][0] - cycle_readings[j - 1][0]).total_seconds()
+                energy_ws += cycle_readings[j - 1][1] * voltage * dt
+            in_cycle = False
+            cycle_readings = []
+    if in_cycle and cycle_readings:
+        for j in range(1, len(cycle_readings)):
+            dt = (cycle_readings[j][0] - cycle_readings[j - 1][0]).total_seconds()
+            energy_ws += cycle_readings[j - 1][1] * voltage * dt
+    return round(energy_ws / 3_600_000, 4)
+
+
 def get_avg_delta_t_running_24h(appliance_id):
     """Average running delta-T over the last 24 h (5-min per-run warmup applied)."""
     conn = get_conn()

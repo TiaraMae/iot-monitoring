@@ -968,6 +968,13 @@
                         <option value="all">All Data Since Calibration</option>
                     </select>
                 </div>
+                <div class="form-group">
+                    <label class="form-label">Data Granularity</label>
+                    <select id="export-granularity" class="form-control" onchange="toggleExportGranularity()">
+                        <option value="points">All Data Points</option>
+                        <option value="daily">Daily Averages (per day)</option>
+                    </select>
+                </div>
                 <div id="custom-date-inputs">
                     <div class="form-group">
                         <label class="form-label">Start Date</label>
@@ -992,7 +999,7 @@
                         </div>
                     </div>
                 </div>
-                <div class="form-group">
+                <div class="form-group" id="export-idle-row">
                     <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer; font-weight:400;">
                         <input type="checkbox" id="export-include-idle" /> Include idle data
                     </label>
@@ -1840,7 +1847,10 @@ function updateDetailData() {
         }
         const offlineBadge = document.getElementById('detail-offline-status');
         const runBadge = document.getElementById('detail-run-status');
-        if (!data.has_data) {
+        // A silent node must never claim Running: show Offline (same
+        // convention as the mini card) and suppress the run badge, even when
+        // historical readings exist — the stale last reading may say "running".
+        if (data.is_offline || !data.has_data) {
             offlineBadge.style.display = 'inline-block';
             offlineBadge.textContent = data.is_offline ? 'Offline' : 'Awaiting Data';
             offlineBadge.className = 'status-badge ' + (data.is_offline ? 'status-danger' : 'status-warning');
@@ -2168,12 +2178,21 @@ function toggleExportDateInputs() {
     document.getElementById('custom-date-inputs').style.display = range === 'custom' ? 'block' : 'none';
 }
 
+function toggleExportGranularity() {
+    // Daily aggregates are running-only by design, so the idle-data toggle
+    // only applies to per-point exports.
+    const daily = document.getElementById('export-granularity').value === 'daily';
+    document.getElementById('export-idle-row').style.display = daily ? 'none' : 'block';
+}
+
 function downloadExcel() {
     if (!selectedApplianceId) return;
     const range = document.getElementById('export-range').value;
     const includeIdle = document.getElementById('export-include-idle').checked;
+    const granularity = document.getElementById('export-granularity').value;
     let url = '/api/device/' + selectedApplianceId + '/export_excel';
     const params = [];
+    params.push('granularity=' + granularity);
     params.push('filtered=' + (includeIdle ? 'false' : 'true'));
     if (range === 'custom') {
         const start = combineDateTime('export-start-date', 'export-start-time', 'export-start-ampm');
