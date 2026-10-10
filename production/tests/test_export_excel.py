@@ -3,9 +3,13 @@
 Covers both appliance types:
 - points mode (default): a Power (kW) column (= current x appliance voltage)
   is appended to every row for HVAC and dryer exports.
-- daily mode: one row per calendar day of RUNNING averages (same warmup rule
-  as the on-screen HVAC Daily Averages table) plus Avg Power and Energy (kWh);
-  the idle-data filter is ignored and the filename carries a _daily marker.
+- daily mode: one row per calendar day of RUNNING readings. The temperature
+  averages skip the first 5 min of each run (same rule as the on-screen HVAC
+  Daily Averages table), but Avg Current / Avg Power cover the WHOLE run
+  (inrush included) so they reconcile with the Energy (kWh) column, which
+  integrates the full run. The idle-data filter is ignored and the filename
+  carries a _daily marker. The day-A fixtures use a stepped 5 A -> 3 A inrush
+  profile precisely to prove the warmup is included in current/power.
 
 Self-contained: creates its own user/appliance/node fixtures and cleans up.
 """
@@ -75,10 +79,14 @@ def setup_fixture():
     sql("INSERT INTO sensor_nodes (mac_address, status, appliance_id, last_seen) VALUES (%s, 'paired', %s, NOW())",
         (DRY_MAC, DRY_ID))
 
-    # HVAC: a 3.0 A run on day A, a 2.0 A run on day B, plus one idle point on day A.
+    # HVAC: day A run starts with 6 min of 5.0 A inrush then settles at 3.0 A
+    # (the stepped profile proves the daily Avg Current/Power INCLUDE the
+    # warmup, unlike the temperature averages); day B is a flat 2.0 A run.
+    # One idle point on day A exercises the default idle exclusion.
     hvac_rows = []
     for i in range(RUN_POINTS):
-        hvac_rows.append((HVAC_MAC, DAY_A + i * CADENCE, 26.0, 16.0, 3.0))
+        day_a_amps = 5.0 if i < 36 else 3.0
+        hvac_rows.append((HVAC_MAC, DAY_A + i * CADENCE, 26.0, 16.0, day_a_amps))
         hvac_rows.append((HVAC_MAC, DAY_B + i * CADENCE, 25.0, 15.0, 2.0))
     hvac_rows.append((HVAC_MAC, DAY_A + timedelta(hours=1), 27.0, 26.0, 0.05))
     conn = models.get_conn()
@@ -95,7 +103,8 @@ def setup_fixture():
     # Dryer: a 5.0 A run on day A, a 4.0 A run on day B.
     dry_rows = []
     for i in range(RUN_POINTS):
-        dry_rows.append((dry_node_id, DAY_A + i * CADENCE, 60.0, 40.0, 2.5, 1010.0, 5.0))
+        day_a_amps = 5.0 if i < 36 else 3.0
+        dry_rows.append((dry_node_id, DAY_A + i * CADENCE, 60.0, 40.0, 2.5, 1010.0, day_a_amps))
         dry_rows.append((dry_node_id, DAY_B + i * CADENCE, 55.0, 35.0, 2.0, 1009.0, 4.0))
     cur.executemany("""
         INSERT INTO dryer_readings (sensor_node_id, time, texhaust, rh_exhaust, pressure, abs_pressure, imotor)
@@ -157,7 +166,7 @@ def main():
             # default filtered=true drops the single idle point: 2 runs x 60
             check('hvac points: idle excluded by default', len(data) == 2 * RUN_POINTS)
             row_a = data[0]
-            check('hvac points: power = I x V', abs(row_a[4] - 3.0 * 220.0) < 1e-6)
+            check('hvac points: power = I x V', abs(row_a[4] - 5.0 * 220.0) < 1e-6)
             check('hvac points: delta-t present', abs(row_a[5] - 10.0) < 1e-6)
 
             resp = client.get(url + '?filtered=false')
@@ -175,9 +184,15 @@ def main():
                   len(data) == 2 and data[0][0] == '2026-10-08' and data[1][0] == '2026-10-09')
             if len(data) == 2:
                 a, b = data
+                # Temps are post-warmup averages (constant fixture -> 26/16,
+                # delta 10.0). Avg current MUST include the 6-min 5.0 A inrush:
+                # (36 x 5 + 24 x 3) / 60 = 4.2 A -> 924 W. Excluding warmup
+                # would wrongly give 3.4 A -> 748 W.
                 check('hvac daily: day A averages',
-                      a[1] == 26.0 and a[2] == 16.0 and a[3] == 10.0 and a[4] == 3.0 and a[5] == 660.0)
-                check('hvac daily: day A energy', abs(a[6] - 0.1082) < 1e-9)  # 59 x 10 s x 3 A x 220 V
+                      a[1] == 26.0 and a[2] == 16.0 and a[3] == 10.0 and a[4] == 4.2 and a[5] == 924.0)
+                # Energy integrates the full run (left-Riemann, prev current):
+                # (36 gaps x 5 A + 23 gaps x 3 A) x 220 V x 10 s.
+                check('hvac daily: day A energy', abs(a[6] - 0.1522) < 1e-9)
                 check('hvac daily: day B averages',
                       b[1] == 25.0 and b[2] == 15.0 and b[4] == 2.0 and b[5] == 440.0)
                 check('hvac daily: day B energy', abs(b[6] - 0.0721) < 1e-9)
@@ -203,8 +218,8 @@ def main():
             if len(data) == 2:
                 a, b = data
                 check('dryer daily: day A averages',
-                      a[1] == 60.0 and a[2] == 40.0 and a[3] == 2.5 and a[4] == 5.0 and a[5] == 1100.0)
-                check('dryer daily: day A energy', abs(a[6] - 0.1803) < 1e-9)  # 59 x 10 s x 5 A x 220 V
+                      a[1] == 60.0 and a[2] == 40.0 and a[3] == 2.5 and a[4] == 4.2 and a[5] == 924.0)
+                check('dryer daily: day A energy', abs(a[6] - 0.1522) < 1e-9)
                 check('dryer daily: day B energy', abs(b[6] - 0.1442) < 1e-9)
 
             if failures:

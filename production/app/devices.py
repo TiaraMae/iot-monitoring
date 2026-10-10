@@ -31,10 +31,11 @@ def _is_dryer(app_type):
 def _daily_export_rows(is_dry, raw, voltage):
     """Build (headers, rows) for the per-day aggregate Excel export.
 
-    Averages cover RUNNING readings only and skip the first
-    AVG_DELTA_T_WARMUP_MINUTES of each run (same rule as the on-screen HVAC
-    Daily Averages table); the energy column integrates the full running
-    cycles of each day.
+    Rows cover RUNNING readings only. The sensor-value averages skip the
+    first AVG_DELTA_T_WARMUP_MINUTES of each run (same rule as the on-screen
+    HVAC Daily Averages table); Avg Current / Avg Power cover the WHOLE run
+    (inrush included) so they stay consistent with the Energy column, which
+    integrates the full running cycles of each day.
     """
     if is_dry:
         dicts = [{"time": r[0], "texhaust": r[1], "rh_exhaust": r[2],

@@ -440,10 +440,16 @@ def compute_daily_running_averages(rows, threshold, warmup_minutes, limit=30):
 
 def compute_daily_export_averages(rows, threshold, warmup_minutes, fields,
                                   current_key="icompressor", limit=10000):
-    """Per-calendar-day averages of `fields` (plus the run current) over
-    RUNNING readings, skipping the first `warmup_minutes` of each run — the
-    same warmup rule as compute_daily_running_averages, generalized for the
-    Excel daily export (HVAC and dryer).
+    """Per-calendar-day averages over RUNNING readings for the Excel daily
+    export (HVAC and dryer).
+
+    Two warmup rules, by design:
+    - `fields` (temperature / RH / pressure) skip the first `warmup_minutes`
+      of each run — the same rule as compute_daily_running_averages, because
+      the first minutes of a run carry transient sensor values.
+    - `avg_current` covers the WHOLE run including warmup: inrush current is
+      real power draw, and the export's Energy column integrates the full
+      run, so Avg Current x voltage must too or the two never reconcile.
 
     rows: chronologically ordered dicts carrying at least "time" and
     `current_key`. `fields` lists the extra keys to average; None values are
@@ -463,12 +469,14 @@ def compute_daily_export_averages(rows, threshold, warmup_minutes, fields,
         t = r.get("time")
         if segment_start is None:
             segment_start = t
+        # Avg current: all running readings (warmup included — see docstring).
+        if t is not None:
+            b = buckets.setdefault(t.date(), {})
+            cb = b.setdefault("__cur", [0.0, 0])
+            cb[0] += float(current)
+            cb[1] += 1
         if t is None or t - segment_start < warmup:
             continue
-        b = buckets.setdefault(t.date(), {})
-        cb = b.setdefault("__cur", [0.0, 0])
-        cb[0] += float(current)
-        cb[1] += 1
         for f in fields:
             v = r.get(f)
             if v is None:
