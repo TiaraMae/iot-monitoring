@@ -33,14 +33,14 @@ def _daily_export_rows(is_dry, raw, voltage):
 
     Rows cover RUNNING readings only. The sensor-value averages skip the
     first AVG_DELTA_T_WARMUP_MINUTES of each run (same rule as the on-screen
-    HVAC Daily Averages table); Avg Current / Avg Power cover the WHOLE run
-    (inrush included) so they stay consistent with the Energy column, which
+    HVAC Daily Averages table); Avg Current covers the WHOLE run (inrush
+    included) so it stays consistent with the Energy column, which
     integrates the full running cycles of each day.
 
     A trailing "Total (all days)" row is appended when at least one day
-    exists: averages-of-averages for the sensor values and Avg Current, sums
-    for Avg Power and Energy (those accumulate per day). day_count excludes
-    the total row.
+    exists: averages-of-averages for the sensor values and Avg Current, and
+    the sum of the per-day Energy values (energy accumulates per day).
+    day_count excludes the total row.
     """
     if is_dry:
         dicts = [{"time": r[0], "texhaust": r[1], "rh_exhaust": r[2],
@@ -49,7 +49,7 @@ def _daily_export_rows(is_dry, raw, voltage):
         current_idx = 5
         headers = ["Date", "Avg Exhaust Temp (°C)", "Avg Exhaust RH (%)",
                    "Avg Gauge Pressure (hPa)", "Avg Current (A)",
-                   "Avg Power (kW)", "Energy (kWh)"]
+                   "Energy (kWh)"]
     else:
         dicts = [{"time": r[0], "treturn": r[1], "tsupply": r[2],
                   "icompressor": r[3]} for r in raw]
@@ -57,7 +57,7 @@ def _daily_export_rows(is_dry, raw, voltage):
         current_idx = 3
         headers = ["Date", "Avg Return Temp (°C)", "Avg Supply Temp (°C)",
                    "Avg Delta-T (°C)", "Avg Current (A)",
-                   "Avg Power (kW)", "Energy (kWh)"]
+                   "Energy (kWh)"]
     stats = models.compute_daily_export_averages(
         dicts, config.RUNNING_CURRENT_THRESHOLD,
         config.AVG_DELTA_T_WARMUP_MINUTES, fields,
@@ -69,26 +69,25 @@ def _daily_export_rows(is_dry, raw, voltage):
     for s in reversed(stats):  # chronological order, oldest day first
         day = datetime.fromisoformat(s["date"]).date()
         energy = models.compute_daily_energy(by_date.get(day, []), voltage)
-        avg_current = s["avg_current"] or 0.0
-        avg_power = round(avg_current * voltage, 3)
         if is_dry:
             rows.append([s["date"], s["avg_texhaust"], s["avg_rh_exhaust"],
-                         s["avg_pressure"], s["avg_current"], avg_power, energy])
+                         s["avg_pressure"], s["avg_current"], energy])
         else:
             avg_delta = (round(s["avg_treturn"] - s["avg_tsupply"], 2)
                          if s["avg_treturn"] is not None and s["avg_tsupply"] is not None
                          else None)
             rows.append([s["date"], s["avg_treturn"], s["avg_tsupply"],
-                         avg_delta, s["avg_current"], avg_power, energy])
+                         avg_delta, s["avg_current"], energy])
     day_count = len(rows)
     if rows:
         total = ["Total (all days)"]
-        for idx in range(1, len(headers) - 2):
+        # All columns except Energy are averages -> average-of-averages;
+        # Energy accumulates per day -> sum.
+        for idx in range(1, len(headers) - 1):
             vals = [r[idx] for r in rows if r[idx] is not None]
             total.append(round(sum(vals) / len(vals), 3) if vals else None)
-        for idx in (len(headers) - 2, len(headers) - 1):
-            vals = [r[idx] for r in rows if r[idx] is not None]
-            total.append(round(sum(vals), 4) if vals else None)
+        vals = [r[len(headers) - 1] for r in rows if r[len(headers) - 1] is not None]
+        total.append(round(sum(vals), 4) if vals else None)
         rows.append(total)
     return headers, rows, day_count
 
@@ -677,18 +676,16 @@ def api_export_excel(appliance_id):
         if granularity == "daily":
             headers, rows, day_count = _daily_export_rows(is_dry, raw, voltage)
         elif is_dry:
-            headers = ["Timestamp", "Exhaust Temp (°C)", "Exhaust RH (%)", "Gauge Pressure (hPa)", "Raw Absolute Pressure (hPa)", "Current (A)", "Power (kW)"]
+            headers = ["Timestamp", "Exhaust Temp (°C)", "Exhaust RH (%)", "Gauge Pressure (hPa)", "Raw Absolute Pressure (hPa)", "Current (A)"]
             rows = []
             for r in raw:
-                power = round(r[5] * voltage, 3) if r[5] is not None else None
-                rows.append([r[0], r[1], r[2], r[3], r[4], r[5], power])
+                rows.append([r[0], r[1], r[2], r[3], r[4], r[5]])
         else:
-            headers = ["Timestamp", "Return Temp (°C)", "Supply Temp (°C)", "Current (A)", "Power (kW)", "Delta-T (°C)"]
+            headers = ["Timestamp", "Return Temp (°C)", "Supply Temp (°C)", "Current (A)", "Delta-T (°C)"]
             rows = []
             for r in raw:
                 delta = round(abs((r[1] or 0) - (r[2] or 0)), 2) if (r[1] is not None and r[2] is not None) else None
-                power = round(r[3] * voltage, 3) if r[3] is not None else None
-                rows.append([r[0], r[1], r[2], r[3], power, delta])
+                rows.append([r[0], r[1], r[2], r[3], delta])
 
         wb = Workbook()
         ws = wb.active

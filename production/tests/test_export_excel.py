@@ -1,8 +1,8 @@
-"""Verify /api/device/<id>/export_excel: Power column + daily granularity.
+"""Verify /api/device/<id>/export_excel: daily granularity + Total row.
 
 Covers both appliance types:
-- points mode (default): a Power (kW) column (= current x appliance voltage)
-  is appended to every row for HVAC and dryer exports.
+- points mode (default): raw readings with timestamps (no power/energy
+  columns — power was dropped; energy only exists in the daily aggregate).
 - daily mode: one row per calendar day of RUNNING readings. The temperature
   averages skip the first 5 min of each run (same rule as the on-screen HVAC
   Daily Averages table), but Avg Current / Avg Power cover the WHOLE run
@@ -160,14 +160,13 @@ def main():
             resp = client.get(url)
             check('hvac points: 200', resp.status_code == 200)
             headers, data = sheet_rows(resp)
-            check('hvac points: Power column after Current',
+            check('hvac points: columns (no power column)',
                   headers == ["Timestamp", "Return Temp (°C)", "Supply Temp (°C)",
-                              "Current (A)", "Power (kW)", "Delta-T (°C)"])
+                              "Current (A)", "Delta-T (°C)"])
             # default filtered=true drops the single idle point: 2 runs x 60
             check('hvac points: idle excluded by default', len(data) == 2 * RUN_POINTS)
             row_a = data[0]
-            check('hvac points: power = I x V', abs(row_a[4] - 5.0 * 220.0) < 1e-6)
-            check('hvac points: delta-t present', abs(row_a[5] - 10.0) < 1e-6)
+            check('hvac points: delta-t present', abs(row_a[4] - 10.0) < 1e-6)
 
             resp = client.get(url + '?filtered=false')
             _, data = sheet_rows(resp)
@@ -177,9 +176,9 @@ def main():
             resp = client.get(url + '?granularity=daily')
             check('hvac daily: 200', resp.status_code == 200)
             headers, data = sheet_rows(resp)
-            check('hvac daily: headers',
+            check('hvac daily: headers (no avg power column)',
                   headers == ["Date", "Avg Return Temp (°C)", "Avg Supply Temp (°C)",
-                              "Avg Delta-T (°C)", "Avg Current (A)", "Avg Power (kW)", "Energy (kWh)"])
+                              "Avg Delta-T (°C)", "Avg Current (A)", "Energy (kWh)"])
             check('hvac daily: one row per day + total row, oldest first',
                   len(data) == 3 and data[0][0] == '2026-10-08' and data[1][0] == '2026-10-09'
                   and data[2][0] == 'Total (all days)')
@@ -187,22 +186,22 @@ def main():
                 a, b = data
                 # Temps are post-warmup averages (constant fixture -> 26/16,
                 # delta 10.0). Avg current MUST include the 6-min 5.0 A inrush:
-                # (36 x 5 + 24 x 3) / 60 = 4.2 A -> 924 W. Excluding warmup
-                # would wrongly give 3.4 A -> 748 W.
+                # (36 x 5 + 24 x 3) / 60 = 4.2 A. Excluding warmup would
+                # wrongly give 3.4 A.
                 check('hvac daily: day A averages',
-                      a[1] == 26.0 and a[2] == 16.0 and a[3] == 10.0 and a[4] == 4.2 and a[5] == 924.0)
+                      a[1] == 26.0 and a[2] == 16.0 and a[3] == 10.0 and a[4] == 4.2)
                 # Energy integrates the full run (left-Riemann, prev current):
                 # (36 gaps x 5 A + 23 gaps x 3 A) x 220 V x 10 s.
-                check('hvac daily: day A energy', abs(a[6] - 0.1522) < 1e-9)
+                check('hvac daily: day A energy', abs(a[5] - 0.1522) < 1e-9)
                 check('hvac daily: day B averages',
                       b[1] == 25.0 and b[2] == 15.0 and b[4] == 2.0 and b[5] == 440.0)
-                check('hvac daily: day B energy', abs(b[6] - 0.0721) < 1e-9)
+                check('hvac daily: day B energy', abs(b[5] - 0.0721) < 1e-9)
                 t = data[2]
                 # Total row: averages-of-averages for temps/delta/current,
-                # sums for power and energy.
+                # sum for energy.
                 check('hvac daily: total row',
                       t[1] == 25.5 and t[2] == 15.5 and t[3] == 10.0 and t[4] == 3.1
-                      and t[5] == 1364.0 and abs(t[6] - 0.2243) < 1e-9)
+                      and abs(t[5] - 0.2243) < 1e-9)
             check('hvac daily: _daily filename marker',
                   '_daily' in resp.headers.get('Content-Disposition', ''))
 
@@ -210,29 +209,29 @@ def main():
             url = f'/api/device/{DRY_ID}/export_excel'
             resp = client.get(url)
             headers, data = sheet_rows(resp)
-            check('dryer points: Power column',
+            check('dryer points: columns (no power column)',
                   headers == ["Timestamp", "Exhaust Temp (°C)", "Exhaust RH (%)", "Gauge Pressure (hPa)",
-                              "Raw Absolute Pressure (hPa)", "Current (A)", "Power (kW)"])
-            check('dryer points: power = I x V', data and abs(data[0][6] - 5.0 * 220.0) < 1e-6)
+                              "Raw Absolute Pressure (hPa)", "Current (A)"])
+            check('dryer points: rows present', len(data) == 2 * RUN_POINTS)
 
             resp = client.get(url + '?granularity=daily')
             headers, data = sheet_rows(resp)
-            check('dryer daily: headers',
+            check('dryer daily: headers (no avg power column)',
                   headers == ["Date", "Avg Exhaust Temp (°C)", "Avg Exhaust RH (%)",
-                              "Avg Gauge Pressure (hPa)", "Avg Current (A)", "Avg Power (kW)", "Energy (kWh)"])
+                              "Avg Gauge Pressure (hPa)", "Avg Current (A)", "Energy (kWh)"])
             check('dryer daily: one row per day + total row, oldest first',
                   len(data) == 3 and data[0][0] == '2026-10-08' and data[1][0] == '2026-10-09'
                   and data[2][0] == 'Total (all days)')
             if len(data) == 2:
                 a, b = data
                 check('dryer daily: day A averages',
-                      a[1] == 60.0 and a[2] == 40.0 and a[3] == 2.5 and a[4] == 4.2 and a[5] == 924.0)
-                check('dryer daily: day A energy', abs(a[6] - 0.1522) < 1e-9)
-                check('dryer daily: day B energy', abs(b[6] - 0.1442) < 1e-9)
+                      a[1] == 60.0 and a[2] == 40.0 and a[3] == 2.5 and a[4] == 4.2)
+                check('dryer daily: day A energy', abs(a[5] - 0.1522) < 1e-9)
+                check('dryer daily: day B energy', abs(b[5] - 0.1442) < 1e-9)
                 t = data[2]
                 check('dryer daily: total row',
                       t[1] == 57.5 and t[2] == 37.5 and t[3] == 2.25 and t[4] == 4.1
-                      and t[5] == 1804.0 and abs(t[6] - 0.2964) < 1e-9)
+                      and abs(t[5] - 0.2964) < 1e-9)
 
             if failures:
                 print(f'\n{len(failures)} check(s) FAILED')
