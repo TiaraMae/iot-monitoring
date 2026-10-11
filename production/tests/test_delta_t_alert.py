@@ -286,6 +286,73 @@ def main():
                 'current': 2.5, 'delta_t': 2.0, '_actual_time': t4 + timedelta(seconds=300)})
             check('disconnect+backfill: alert fires on schedule', count_alerts() == 2)
 
+            # 9. A saved timing/threshold change restarts the below-clock
+            #    (partial reset) but never duplicates an alert for a run that
+            #    already alerted — even when the config is changed repeatedly.
+            #    Exercised through the REAL endpoints: POST settings (devices
+            #    path) and POST baseline_config (analytics path).
+            alerts.DELTA_T_TRACKER.pop(APPLIANCE_ID, None)
+            clear_readings_and_alerts()
+            t5 = datetime.now(timezone.utc)
+            models.update_appliance_settings(APPLIANCE_ID, {
+                'delta_t_lcl': 8.0, 'delta_t_delay_minutes': 2, 'alert_enabled': True,
+            })
+            # 60 s continuously below LCL under a 2-min delay: no fire yet.
+            for i in range(1, 7):
+                alerts.check_hvac_delta_t_alert(APPLIANCE_ID, {
+                    'current': 2.5, 'delta_t': 2.0,
+                    '_actual_time': t5 + timedelta(seconds=10 * i)})
+            check('config change: no alert before the 2-min delay', count_alerts() == 0)
+
+            client = app.test_client()
+            client.post('/login', data={'email': 'test_dashboard@example.com',
+                                        'password': 'Test1234'})
+            # User saves a config (same values is fine — saving is what resets).
+            resp = client.post(f'/api/device/{APPLIANCE_ID}/settings',
+                               json={'delta_t_delay_minutes': 2})
+            check('config change: settings POST accepted', resp.status_code == 200)
+            tr = alerts.DELTA_T_TRACKER.get(APPLIANCE_ID)
+            check('config change: below-clock cleared, run state kept',
+                  tr is not None and tr['below_since'] is None and tr['in_run'] is True)
+
+            # Continue below LCL: the stale 60 s from the old clock must NOT
+            # count. Without the reset the alert would fire at +130 s elapsed
+            # (60 pre-save + 70 post-save >= 120 s). With a clean clock, +130
+            # is only 60 s -> still no alert.
+            for i in range(7, 14):
+                alerts.check_hvac_delta_t_alert(APPLIANCE_ID, {
+                    'current': 2.5, 'delta_t': 2.0,
+                    '_actual_time': t5 + timedelta(seconds=10 * i)})
+            check('config change: stale below-time does not carry over',
+                  count_alerts() == 0)
+            for i in range(14, 20):
+                alerts.check_hvac_delta_t_alert(APPLIANCE_ID, {
+                    'current': 2.5, 'delta_t': 2.0,
+                    '_actual_time': t5 + timedelta(seconds=10 * i)})
+            check('config change: alert fires on the new clock after the delay',
+                  count_alerts() == 1)
+
+            # Repeated changes through the baseline editor path: the run
+            # already alerted, so the preserved latch must prevent a second
+            # alert no matter how often the timing is re-saved.
+            resp = client.post(f'/api/device/{APPLIANCE_ID}/baseline_config',
+                               json={'metrics': {'deltat': {'lcl': 8.0}},
+                                     'alert_delay_minutes': 1})
+            check('config change: baseline_config POST accepted', resp.status_code == 200)
+            tr = alerts.DELTA_T_TRACKER.get(APPLIANCE_ID)
+            check('config change: baseline save also cleared the below-clock',
+                  tr is not None and tr['below_since'] is None)
+            saved = sql("SELECT delta_t_lcl, delta_t_delay_minutes FROM appliances WHERE id = %s",
+                        (APPLIANCE_ID,), fetch='one')
+            check('config change: engine-visible values updated',
+                  saved[0] == 8.0 and saved[1] == 1)
+            for i in range(20, 29):  # 90 s below under the fresh 1-min clock
+                alerts.check_hvac_delta_t_alert(APPLIANCE_ID, {
+                    'current': 2.5, 'delta_t': 2.0,
+                    '_actual_time': t5 + timedelta(seconds=10 * i)})
+            check('repeated changes: already-alerted run never re-alerts',
+                  count_alerts() == 1)
+
             # Calibration guard: raw (zeroed-offset) readings during a calibration
             # session must NOT create alerts; the same input under 'normal' must.
             # (The engine needs two low readings to fire: the first starts the

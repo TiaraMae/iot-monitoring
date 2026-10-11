@@ -225,6 +225,17 @@ def _run_startup_migrations():
               AND a.type NOT LIKE '%%Dryer%%'
         """)
 
+        # Speed up History-Range mode: the detail modal polls latest_n every
+        # 5 s with a COUNT + time-range query over the readings tables.
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_hvac_readings_node_time
+            ON hvac_readings (sensor_node_id, time)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_dryer_readings_node_time
+            ON dryer_readings (sensor_node_id, time)
+        """)
+
         conn.commit()
     except Exception as e:
         print(f"Startup migration error: {e}")

@@ -305,6 +305,30 @@ def check_hvac_delta_t_alert(appliance_id, reading_data):
                 print(f"Discord delivery failed for appliance {appliance_id}: {e}")
 
 
+def reset_delta_t_timing(appliance_id):
+    """Clear the below-minimum timing accumulators without discarding run identity.
+
+    Called whenever delta_t_lcl / delta_t_delay_minutes are saved so the new
+    config starts from a clean clock: continuous below-time accumulated under
+    the previous config must not count toward the new delay. Only below_since /
+    dip_start are cleared — in_run, last_ts, alerted_in_run and last_alert_time
+    are preserved, so a run that already alerted keeps its latch (exactly one
+    alert per compressor run) and the run/gap-close bookkeeping is untouched.
+
+    Safe to call repeatedly and when no tracker entry exists (no-op). Repeated
+    config changes can therefore only postpone an alert (the clock restarts at
+    each save), never cause a spurious or duplicate one. Dict operations are
+    atomic under the GIL, so the MQTT ingest thread and the Flask save thread
+    cannot corrupt each other; at worst one reading's partial state is
+    discarded and the clock restarts.
+    """
+    tracker = DELTA_T_TRACKER.get(appliance_id)
+    if tracker is None:
+        return
+    tracker["below_since"] = None
+    tracker["dip_start"] = None
+
+
 # ---------------------------------------------------------------------------
 # Dryer fault detection (ported from v4)
 # ---------------------------------------------------------------------------

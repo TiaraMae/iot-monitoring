@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 
 from app.db import get_conn, release_conn
 from app import config, models, mqtt
+from app import alerts
 
 
 analytics_bp = Blueprint("analytics", __name__)
@@ -497,6 +498,11 @@ def api_baseline_config(appliance_id):
                 finally:
                     cur.close()
                     release_conn(conn)
+                # The saved LCL/delay apply from the next reading onward; the
+                # below-clock accumulated under the previous config must not
+                # count toward the new delay. Run identity (incl. the
+                # one-alert-per-run latch) is preserved.
+                alerts.reset_delta_t_timing(appliance_id)
         node = models.get_node_by_appliance(appliance_id)
         if node and node.get("mac_address"):
             mqtt.send_node_command(node["mac_address"], "baseline:set")

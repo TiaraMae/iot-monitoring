@@ -16,6 +16,7 @@ from openpyxl.utils import get_column_letter
 
 from app import config, models, mqtt
 from app import calibration
+from app import alerts
 from app.db import get_conn, release_conn
 
 
@@ -478,6 +479,12 @@ def api_device_settings(appliance_id):
         return jsonify({"error": "No valid fields provided"}), 400
 
     if models.update_appliance_settings(appliance_id, updates):
+        # A saved timing/threshold change must start from a clean clock: the
+        # below-minimum time accumulated under the previous config may not
+        # count toward the new delay. Run identity (incl. the one-alert-per-run
+        # latch) is preserved — see alerts.reset_delta_t_timing.
+        if "delta_t_lcl" in updates or "delta_t_delay_minutes" in updates:
+            alerts.reset_delta_t_timing(appliance_id)
         return jsonify({"success": True})
     return jsonify({"error": "Failed to update settings"}), 500
 
@@ -551,15 +558,59 @@ def api_device_latest_n(appliance_id):
         return jsonify({"error": "db"}), 500
     cur = conn.cursor()
     try:
-        if is_dry:
+        # History Range mode must cover the WHOLE selected window. A wide range
+        # holds more readings than the chart cap (~3 h at the 10 s cadence),
+        # and the old behavior — ORDER BY time DESC LIMIT cap — silently kept
+        # only the newest slice, hiding everything before the last ~3 h. When
+        # the range overflows the cap, evenly stride-sample every Nth reading
+        # across the entire range instead (each point a real measurement, not
+        # an average). Ranges that fit (stride 1) use the plain capped query,
+        # byte-identical to live mode and to the pre-downsampling behavior.
+        # Live mode (no start/end) never reaches this branch. The stride is an
+        # int computed from a COUNT over the identical filters, so the sampled
+        # set matches what the uncapped query would have returned.
+        stride = 1
+        if start and end:
+            table = "dryer_readings" if is_dry else "hvac_readings"
+            cur_filter = current_filter if is_dry else current_filter_hvac
             cur.execute(f"""
-                SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.abs_pressure, r.imotor
-                FROM dryer_readings r
+                SELECT COUNT(*) FROM {table} r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
-                WHERE sn.appliance_id = %s {time_filter}{current_filter}
-                ORDER BY r.time DESC
-                LIMIT %s
-            """, tuple(params))
+                WHERE sn.appliance_id = %s {time_filter}{cur_filter}
+            """, (appliance_id, start, end))
+            count = cur.fetchone()[0]
+            if count == 0:
+                return jsonify([])
+            stride = max(1, -(-count // config.MAX_CHART_POINTS))
+
+        if is_dry:
+            if stride > 1:
+                # (rn - 1) % stride = 0 always includes the range's FIRST
+                # reading; (time, id) ordering keeps sampling deterministic
+                # even with duplicate timestamps. ceil(count/stride) <= cap,
+                # so no LIMIT is needed on the sampled path.
+                cur.execute(f"""
+                    SELECT time, texhaust, rh_exhaust, pressure, abs_pressure, imotor
+                    FROM (
+                        SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure,
+                               r.abs_pressure, r.imotor,
+                               ROW_NUMBER() OVER (ORDER BY r.time ASC, r.id ASC) AS rn
+                        FROM dryer_readings r
+                        JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                        WHERE sn.appliance_id = %s {time_filter}{current_filter}
+                    ) t
+                    WHERE (rn - 1) %% {stride} = 0
+                    ORDER BY time DESC
+                """, (appliance_id, start, end))
+            else:
+                cur.execute(f"""
+                    SELECT r.time, r.texhaust, r.rh_exhaust, r.pressure, r.abs_pressure, r.imotor
+                    FROM dryer_readings r
+                    JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                    WHERE sn.appliance_id = %s {time_filter}{current_filter}
+                    ORDER BY r.time DESC
+                    LIMIT %s
+                """, tuple(params))
             rows = cur.fetchall()
             return jsonify([
                 {
@@ -573,14 +624,28 @@ def api_device_latest_n(appliance_id):
                 for r in rows
             ])
 
-        cur.execute(f"""
-            SELECT r.time, r.treturn, r.tsupply, r.icompressor
-            FROM hvac_readings r
-            JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
-            WHERE sn.appliance_id = %s {time_filter}{current_filter_hvac}
-            ORDER BY r.time DESC
-            LIMIT %s
-        """, tuple(params))
+        if stride > 1:
+            cur.execute(f"""
+                SELECT time, treturn, tsupply, icompressor
+                FROM (
+                    SELECT r.time, r.treturn, r.tsupply, r.icompressor,
+                           ROW_NUMBER() OVER (ORDER BY r.time ASC, r.id ASC) AS rn
+                    FROM hvac_readings r
+                    JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                    WHERE sn.appliance_id = %s {time_filter}{current_filter_hvac}
+                ) t
+                WHERE (rn - 1) %% {stride} = 0
+                ORDER BY time DESC
+            """, (appliance_id, start, end))
+        else:
+            cur.execute(f"""
+                SELECT r.time, r.treturn, r.tsupply, r.icompressor
+                FROM hvac_readings r
+                JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
+                WHERE sn.appliance_id = %s {time_filter}{current_filter_hvac}
+                ORDER BY r.time DESC
+                LIMIT %s
+            """, tuple(params))
         rows = cur.fetchall()
         return jsonify([
             {
