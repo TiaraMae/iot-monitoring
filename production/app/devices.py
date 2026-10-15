@@ -123,6 +123,26 @@ def _send_type_config(mac, app_type, current_sensor, status):
         mqtt.send_node_command(mac, "restore:offsetcalibrationneeded")
 
 
+def _restore_normal_if_calibrated(node):
+    """Re-push `restore:normal` to a paired node whose appliance is fully
+    calibrated (DB operational_status "normal") whenever it checks in.
+
+    A node that reboots while the backend is unreachable loses its boot-time
+    config request (the publish goes nowhere), and the firmware only
+    re-requests config while unpaired — so a paired node sits connected to
+    the broker with its runtime calibration flag stuck false and silently
+    discards every sample (incident 2026-10-14..15: node "Connected" in the
+    broker, dashboard offline). The DB is the source of truth for calibration
+    state, so echo restore:normal on checkin; the firmware treats it as an
+    idempotent no-op when already normal.
+    """
+    if node["appliance_id"] is None or node["status"] != "paired":
+        return
+    appliance = models.get_appliance(node["appliance_id"])
+    if appliance and appliance["operational_status"] == "normal":
+        mqtt.send_node_command(node["mac_address"], "restore:normal")
+
+
 def handle_node_event(mac, payload):
     try:
         data = json.loads(payload)
@@ -176,6 +196,7 @@ def handle_node_event(mac, payload):
     if event_type == "checkin":
         if node:
             models.update_node_last_seen(node["id"])
+            _restore_normal_if_calibrated(node)
         return
 
     if not node or node["appliance_id"] is None or node["status"] != "paired":
