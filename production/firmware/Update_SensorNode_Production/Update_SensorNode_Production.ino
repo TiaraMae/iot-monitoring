@@ -1,6 +1,6 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include <PubSubClient.h>
+#include <MQTTClient.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <Wire.h>
@@ -79,7 +79,10 @@ const int MAX_QUEUE_SIZE = 200;
 // MQTT / DEVICE
 // =========================
 WiFiClientSecure espClient;
-PubSubClient client(espClient);
+// 1024-byte read+write buffers: control RX strings are tiny, telemetry TX
+// JSON fits well within 1024 (replaces PubSubClient's setBufferSize(1024)).
+// QoS 1 (below) needs a real MQTT stack — PubSubClient only does QoS 0.
+MQTTClient client(1024);
 String deviceMac = "";
 
 Preferences prefs;
@@ -256,7 +259,9 @@ void publishEventJson(const String& json) {
   Serial.println(topic);
   Serial.println(json);
 
-  client.publish(topic.c_str(), json.c_str());
+  // QoS 1 so the broker acks and can queue for a durable subscription;
+  // never retained.
+  client.publish(topic.c_str(), json.c_str(), false, 1);
 }
 
 void publishCheckin() {
@@ -279,7 +284,8 @@ bool publishTelemetry(const String& payload) {
   Serial.println(topic);
   Serial.println(payload);
 
-  bool ok = client.publish(topic.c_str(), payload.c_str());
+  // QoS 1: publish() returning true now means the broker accepted AND acked.
+  bool ok = client.publish(topic.c_str(), payload.c_str(), false, 1);
 
   if (!ok) {
     Serial.println("TX TELEMETRY FAILED: publish returned false");
@@ -481,12 +487,8 @@ void setupWifi() {
   }
 }
 
-void callback(char* topic, byte* payload, unsigned int length) {
-    String message = "";
-    message.reserve(length + 1);
-    for (unsigned int i = 0; i < length; i++) {
-        message += (char)payload[i];
-    }
+void callback(String &topic, String &payload) {
+    String message = payload;
 
     // Add this to remove hidden newlines or spaces!
     message.trim();
@@ -686,19 +688,25 @@ void checkConnection() {
 
       if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
         Serial.println("connected");
-        client.subscribe(("iot/production/nodes/" + deviceMac + "/control").c_str());
+        client.subscribe(("iot/production/nodes/" + deviceMac + "/control").c_str(), 1);
         digitalWrite(PINLED, HIGH);
         requestBackendConfig();
       } else {
-        Serial.print("failed rc=");
-        Serial.println(client.state());
+        // lwmqtt error code (lwmqtt_err_t) — arduino-mqtt has no state().
+        Serial.print("failed err=");
+        Serial.println((int)client.lastError());
       }
     }
     return;
   }
 
-  // Retry config request if still unpaired
-  if (applianceType == "unpaired" && now - lastConfigRequestTime >= 10000) {
+  // Retry config request: unpaired nodes re-ask every 10 s; paired nodes that
+  // are not calibration-acked re-ask every 60 s — the boot-time request may
+  // have been lost while the backend was down, and the firmware only persists
+  // the calibration ack for Dryers (2026-10-14 incident). The backend answers
+  // restore:* from DB truth, so re-asking is idempotent.
+  unsigned long cfgInterval = isPaired ? 60000 : 10000;
+  if ((!isPaired || !calibrationAcked) && now - lastConfigRequestTime >= cfgInterval) {
     requestBackendConfig();
   }
 }
@@ -944,9 +952,8 @@ void setup() {
   espClient.setCACert(ca_cert);
   espClient.setTimeout(20);
 
-  client.setServer(mqtt_server, mqtt_port);
-  client.setCallback(callback);
-  client.setBufferSize(1024);
+  client.begin(mqtt_server, mqtt_port, espClient);
+  client.onMessage(callback);
   client.setKeepAlive(15);
 
   Serial.println("System Ready.");

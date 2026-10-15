@@ -1153,19 +1153,26 @@ async function loadEnergySummary(month) {
         const data = await fetchJson('/api/energy_summary?month=' + encodeURIComponent(month));
         totalEl.textContent = (data.total_kwh != null ? data.total_kwh.toFixed(2) : '--') + ' kWh';
 
+        // Show only the device types the user actually has (by_type only
+        // contains present types); unknown future types fall back to a
+        // neutral box so the panel never renders blank.
         const byType = data.by_type || {};
-        const hvacKwh = byType['HVAC'] || byType['Air Conditioner'] || 0;
-        const dryerKwh = byType['Gas Dryer'] || byType['Dryer'] || 0;
-        typeEl.innerHTML = `
-            <div class="energy-type-item hvac">
-                <div class="energy-type-label">HVAC</div>
-                <div class="energy-type-value">${hvacKwh.toFixed(2)} kWh</div>
-            </div>
-            <div class="energy-type-item dryer">
-                <div class="energy-type-label">Dryer</div>
-                <div class="energy-type-value">${dryerKwh.toFixed(2)} kWh</div>
-            </div>
-        `;
+        const typeLabels = {
+            'hvac': { label: 'HVAC', cls: 'hvac' },
+            'air conditioner': { label: 'HVAC', cls: 'hvac' },
+            'gas dryer': { label: 'Dryer', cls: 'dryer' },
+            'dryer': { label: 'Dryer', cls: 'dryer' }
+        };
+        typeEl.innerHTML = Object.entries(byType).map(([rawType, kwh]) => {
+            const mapped = typeLabels[String(rawType).toLowerCase()];
+            const label = mapped ? mapped.label : escapeHtml(rawType);
+            const cls = mapped ? mapped.cls : '';
+            return `
+            <div class="energy-type-item ${cls}">
+                <div class="energy-type-label">${label}</div>
+                <div class="energy-type-value">${kwh.toFixed(2)} kWh</div>
+            </div>`;
+        }).join('');
 
         const apps = data.appliances || [];
         if (apps.length === 0) {

@@ -46,15 +46,21 @@ def send_node_command(mac, command):
         print(f"Cannot send command {command} to {mac}, MQTT disconnected.")
         return
     topic = f"{config.MQTT_TOPIC_PREFIX}/{mac}/control"
-    mqtt_client.publish(topic, command)
+    # QoS 1 so control delivery survives brief node/broker hiccups
+    # (delivery QoS = min(publish, subscribe); firmware subscribes at 1).
+    mqtt_client.publish(topic, command, qos=1)
     print(f"Backend -> Node {mac}: {command}")
 
 
 def on_connect(client, userdata, flags, rc, properties=None):
     if rc == 0:
         print(f"MQTT Connected Successfully! ID: {client._client_id}")
-        client.subscribe(f"{config.MQTT_TOPIC_PREFIX}/+/events")
-        client.subscribe(f"{config.MQTT_TOPIC_PREFIX}/+/telemetry")
+        # QoS 1 so the broker can queue for the durable backend session
+        # (clean_start=False, expiry 3600) while the backend is down —
+        # delivery QoS is min(publish, subscribe), so nodes must also
+        # publish at QoS 1 for this to matter.
+        client.subscribe(f"{config.MQTT_TOPIC_PREFIX}/+/events", qos=1)
+        client.subscribe(f"{config.MQTT_TOPIC_PREFIX}/+/telemetry", qos=1)
     else:
         print(f"MQTT Connection Failed with Code {rc}")
 
