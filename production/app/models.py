@@ -892,17 +892,17 @@ def save_spc_baselines(appliance_id, baselines):
         release_conn(conn)
 
 
-def insert_sensor_event(mac, event_type):
+def insert_sensor_event(mac, event_type, detail=None):
     conn = get_conn()
     if not conn:
         return None
     cur = conn.cursor()
     try:
         cur.execute("""
-            INSERT INTO sensor_events (sensor_node_mac, event_type, timestamp)
-            VALUES (%s, %s, NOW())
+            INSERT INTO sensor_events (sensor_node_mac, event_type, detail, timestamp)
+            VALUES (%s, %s, %s, NOW())
             RETURNING id
-        """, (mac, event_type))
+        """, (mac, event_type, detail))
         event_id = cur.fetchone()[0]
         conn.commit()
         return event_id

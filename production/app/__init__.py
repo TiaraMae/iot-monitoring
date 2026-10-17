@@ -54,12 +54,14 @@ def create_app():
     from app.calibration import calibration_bp
     from app.analytics import analytics_bp
     from app.api import api_bp
+    from app.ota import ota_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(devices_bp)
     app.register_blueprint(calibration_bp)
     app.register_blueprint(analytics_bp)
     app.register_blueprint(api_bp)
+    app.register_blueprint(ota_bp)
 
     @app.route("/")
     def landing():

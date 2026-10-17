@@ -84,3 +84,20 @@ CURRENT_SENSOR_PROFILES = {
     "ZHT103C": {"cf": 11.0, "deductor": 0.033},
 }
 DEFAULT_CURRENT_SENSOR = "SCT013-015"
+
+# --- OTA firmware updates (see OTA.md) ---
+# OTA_TOKEN guards the firmware download route (/firmware/<token>/<file>).
+# OTA_PUBLIC_BASE is the URL prefix the NODE uses to download (must be
+# reachable from the node: LAN IP + http for local dev, the public domain in
+# production). Downloads go straight to this server over HTTPS — they never
+# transit MQTT, keeping the free EMQX tier untouched. The route 503s when
+# OTA_TOKEN is unset (safe default).
+OTA_TOKEN = os.getenv("OTA_TOKEN") or None
+OTA_PUBLIC_BASE = (os.getenv("OTA_PUBLIC_BASE") or "").rstrip("/") or None
+OTA_FIRMWARE_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "firmware_ota",
+)
+# Compiled firmware binary name allowlist (no path traversal, .bin only).
+import re as _re
+OTA_FILENAME_RE = _re.compile(r"^[A-Za-z0-9_.-]+\.bin$")

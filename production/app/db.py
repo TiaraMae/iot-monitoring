@@ -176,6 +176,7 @@ def _run_startup_migrations():
             ("dryer_readings", "abs_pressure", "REAL"),
             ("alerts", "severity", "TEXT DEFAULT 'warning'"),
             ("alerts", "acknowledged", "BOOLEAN DEFAULT FALSE"),
+            ("sensor_events", "detail", "TEXT"),
         ]
         for table, column, dtype in columns:
             cur.execute(

@@ -1,5 +1,7 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <HTTPClient.h>
+#include <HTTPUpdate.h>
 #include <MQTTClient.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -11,6 +13,7 @@
 #include <esp_adc_cal.h>
 #include <Preferences.h>
 #include <esp_task_wdt.h>
+#include <mbedtls/sha256.h>
 
 // WiFi + MQTT credentials live in secrets.h (gitignored).
 // Copy secrets.h.example to secrets.h and fill in your own values.
@@ -41,6 +44,57 @@ const char* ca_cert =
 "8rGOmaFvE7FBcf6IKshPECBV1/MUReXgRPTqh5Uykw7+U0b6LJ3/iyK5S9kJRaTe\n"
 "pLiaWN0bfVKfjllDiIGknibVb63dDcY3fe0Dkhvld1927jyNxF1WW6LZZm6zNTfl\n"
 "MrY=\n"
+"-----END CERTIFICATE-----\n";
+
+// =========================
+// BUILD VARIANT + OTA CONFIG
+// =========================
+// FIRST_BOOT_TRIPLE_BEEP = 0 -> variant A: normal behavior + OTA support.
+// FIRST_BOOT_TRIPLE_BEEP = 1 -> variant B: A, plus three beeps on the FIRST
+//   boot after flashing (once ever; guarded by the NVS flag "fb3b").
+// Compile twice (flip the flag) and export one binary per variant.
+#define FIRST_BOOT_TRIPLE_BEEP 0
+
+// Release version: bump per release; MUST match the OTA .bin file name
+// (node_<FIRMWARE_VERSION>.bin). Incoming OTA triggers for the version the
+// node already runs are ignored (idempotent re-trigger safety).
+#define FIRMWARE_VERSION "20261016-1"
+
+// ISRG Root X1 CA Certificate (Let's Encrypt)
+// Used ONLY for the OTA HTTP(S) download client. The MQTT client keeps using
+// the DigiCert root (EMQX Cloud). Source:
+// https://letsencrypt.org/certs/isrgrootx1.pem
+const char* ota_ca_cert =
+"-----BEGIN CERTIFICATE-----\n"
+"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\n"
 "-----END CERTIFICATE-----\n";
 
 // =========================
@@ -86,6 +140,36 @@ MQTTClient client(1024);
 String deviceMac = "";
 
 Preferences prefs;
+
+// =========================
+// NVS NETWORK CONFIG (netcfg)
+// =========================
+// Per-appliance WiFi/MQTT credentials pushed by the backend
+// (setwifi:/setmqtt: on the control topic) and persisted here. They SURVIVE
+// OTA updates, which makes binaries network-portable: any build flashed to
+// any node connects with ITS OWN credentials. Empty = fall back to the
+// compiled-in secrets.h values (backward compatible with existing nodes).
+String netSsid = "";
+String netPass = "";
+String netMqttUser = "";
+String netMqttPass = "";
+
+void loadNetConfig() {
+  prefs.begin("netcfg", true);
+  netSsid = prefs.getString("ssid", "");
+  netPass = prefs.getString("pass", "");
+  netMqttUser = prefs.getString("muser", "");
+  netMqttPass = prefs.getString("mpass", "");
+  prefs.end();
+  if (netSsid.length() > 0) {
+    Serial.print("NETCFG: WiFi creds loaded from NVS (ssid=");
+    Serial.print(netSsid);
+    Serial.println(")");
+  }
+  if (netMqttUser.length() > 0) {
+    Serial.println("NETCFG: MQTT creds loaded from NVS");
+  }
+}
 
 // =========================
 // DEVICE TYPE / FLOW STATE
@@ -266,7 +350,7 @@ void publishEventJson(const String& json) {
 
 void publishCheckin() {
   if (!client.connected()) return;
-  String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"checkin\"}";
+  String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"checkin\",\"fw\":\"" FIRMWARE_VERSION "\"}";
   publishEventJson(ev);
   lastCheckinTime = millis();
   Serial.println("TX CHECKIN");
@@ -312,7 +396,7 @@ void publishCalibrationFailRequest(unsigned long elapsedMs, const String& reason
 unsigned long lastConfigRequestTime = 0;
 
 void requestBackendConfig() {
-  String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"event_request_config\"}";
+  String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"event_request_config\",\"fw\":\"" FIRMWARE_VERSION "\"}";
   publishEventJson(ev);
   lastConfigRequestTime = millis();
   Serial.println("Requested backend config.");
@@ -466,7 +550,8 @@ void setupWifi() {
   delay(100);
   WiFi.mode(WIFI_STA);
   WiFi.setTxPower(WIFI_POWER_8_5dBm);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.begin(netSsid.length() > 0 ? netSsid.c_str() : WIFI_SSID,
+             netPass.length() > 0 ? netPass.c_str() : WIFI_PASS);
 
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 30) {
@@ -487,6 +572,312 @@ void setupWifi() {
   }
 }
 
+// =========================
+// POST-OTA SELF-TEST GUARD
+// =========================
+// Set right before an OTA reboot (NVS "otapend"). On boot it arms a 10-min
+// timer: the first successful MQTT connect clears it (new firmware works);
+// on timeout the node rolls back to the previous app slot (bad build, TLS
+// mismatch, wrong host) — no USB visit needed. Harmless when the BROKER is
+// down: the old firmware could not connect either, and the node keeps
+// retrying whichever image it ends up on.
+bool otaPending = false;
+unsigned long otaBootAt = 0;
+const unsigned long OTA_SELFTEST_MS = 10UL * 60UL * 1000UL;
+
+void clearOtaPending() {
+  if (!otaPending) return;
+  otaPending = false;
+  prefs.begin("nodecfg", false);
+  prefs.putBool("otapend", false);
+  prefs.end();
+  Serial.println("OTA self-test PASSED (MQTT connected on new firmware)");
+  publishEventJson("{\"mac\":\"" + deviceMac + "\",\"event\":\"ota_confirmed\"}");
+}
+
+void checkOtaSelfTest(unsigned long now) {
+  if (!otaPending || now - otaBootAt < OTA_SELFTEST_MS) return;
+  otaPending = false;
+  prefs.begin("nodecfg", false);
+  prefs.putBool("otapend", false);
+  prefs.end();
+  Serial.println("OTA self-test FAILED (no MQTT in 10 min) -> rolling back");
+  publishEventJson("{\"mac\":\"" + deviceMac + "\",\"event\":\"ota_rollback\"}");
+  delay(500);  // let the event flush
+  if (Update.rollBack()) {
+    ESP.restart();
+  }
+  Serial.println("OTA rollback refused; keeping current firmware");
+}
+
+// =========================
+// OTA FIRMWARE UPDATE (see OTA.md)
+// =========================
+// Command (control topic): ota:<url>:<sha256-hex>. The URL host must match
+// OTA_ALLOWED_HOST (secrets.h). The download goes straight to our server
+// over HTTPS — it never transits MQTT (free-broker friendly). Update flow:
+//   WAITING (gates: calibration soft-wait, offline-buffer drain) -> DOWNLOADING
+//   -> verify SHA-256 -> switch slot -> reboot. Any failure keeps the current
+//   firmware running and reports ota_fail on the events topic.
+enum OtaPhase { OTA_IDLE, OTA_WAITING, OTA_DOWNLOADING };
+OtaPhase otaPhase = OTA_IDLE;
+String otaUrl = "";
+String otaSha256 = "";
+String otaFileName = "";
+unsigned long otaRequestedAt = 0;
+unsigned long otaWaitingNotifiedAt = 0;
+const unsigned long OTA_BUFFER_DRAIN_TIMEOUT_MS = 5UL * 60UL * 1000UL;
+
+void publishOtaEvent(const char* event, const String& extra = "") {
+  String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"" + event + "\"";
+  if (otaFileName.length() > 0) ev += ",\"file\":\"" + otaFileName + "\"";
+  if (extra.length() > 0) ev += "," + extra;
+  ev += "}";
+  publishEventJson(ev);
+}
+
+void otaFail(const String& code) {
+  Serial.println("OTA FAILED: " + code);
+  publishOtaEvent("ota_fail", "\"code\":\"" + code + "\"");
+  otaPhase = OTA_IDLE;
+  otaUrl = "";
+  otaSha256 = "";
+  otaFileName = "";
+}
+
+void notifyOtaWaiting(unsigned long now, const char* reason) {
+  if (now - otaWaitingNotifiedAt >= 15000) {
+    otaWaitingNotifiedAt = now;
+    publishOtaEvent("ota_waiting", "\"reason\":\"" + String(reason) + "\"");
+    Serial.printf("OTA: waiting (%s), buffer=%d\n", reason, (int)offlineQueue.size());
+  }
+}
+
+// Stage an OTA request from the control topic (never flash inside the MQTT
+// callback — the actual work happens in handleOta() on the main loop).
+void handleOtaCommand(const String& arg) {
+  // format: <url>:<sha256-hex> (split at the LAST colon; the URL itself
+  // contains colons for the scheme/port)
+  int idx = arg.lastIndexOf(':');
+  if (idx <= 0 || idx == (int)arg.length() - 1) {
+    Serial.println("OTA: malformed command");
+    return;
+  }
+  String url = arg.substring(0, idx);
+  String sha = arg.substring(idx + 1);
+  sha.toLowerCase();
+  if (sha.length() != 64) {
+    Serial.println("OTA: bad sha256 digest");
+    return;
+  }
+  bool hostOk = url.startsWith("https://" OTA_ALLOWED_HOST "/") ||
+                url.startsWith("http://" OTA_ALLOWED_HOST "/");
+  if (!hostOk) {
+    Serial.println("OTA: host not in allowlist");
+    return;
+  }
+  if (otaPhase != OTA_IDLE) {
+    Serial.println("OTA: update already in progress");
+    return;
+  }
+  otaUrl = url;
+  otaSha256 = sha;
+  int slash = url.lastIndexOf('/');
+  otaFileName = (slash >= 0) ? url.substring(slash + 1) : url;
+
+  // Idempotent triggers: a .bin for the version we already run is a no-op.
+  if (otaFileName.startsWith("node_") && otaFileName.endsWith(".bin")) {
+    String offered = otaFileName.substring(5, otaFileName.length() - 4);
+    if (offered == FIRMWARE_VERSION) {
+      Serial.println("OTA: already running " + offered + " -> no-op");
+      publishOtaEvent("ota_done", "\"skipped\":true");
+      otaUrl = "";
+      otaSha256 = "";
+      otaFileName = "";
+      return;
+    }
+  }
+
+  otaRequestedAt = millis();
+  otaWaitingNotifiedAt = 0;
+  otaPhase = OTA_WAITING;
+  publishOtaEvent("ota_received");
+  Serial.println("OTA: staged " + otaFileName);
+}
+
+// setwifi:<ssid>:<pass> — persist per-appliance WiFi creds and reconnect.
+void handleSetWifi(const String& arg) {
+  int idx = arg.indexOf(':');
+  if (idx <= 0) {
+    Serial.println("SETWIFI: malformed");
+    return;
+  }
+  String ssid = arg.substring(0, idx);
+  String pass = arg.substring(idx + 1);
+  prefs.begin("netcfg", false);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  prefs.end();
+  netSsid = ssid;
+  netPass = pass;
+  Serial.println("SETWIFI: saved, reconnecting...");
+  WiFi.disconnect();
+  delay(200);
+  WiFi.begin(netSsid.c_str(), netPass.c_str());
+}
+
+// setmqtt:<user>:<pass> — persist per-appliance MQTT creds and reconnect.
+void handleSetMqtt(const String& arg) {
+  int idx = arg.indexOf(':');
+  if (idx <= 0) {
+    Serial.println("SETMQTT: malformed");
+    return;
+  }
+  String user = arg.substring(0, idx);
+  String pass = arg.substring(idx + 1);
+  prefs.begin("netcfg", false);
+  prefs.putString("muser", user);
+  prefs.putString("mpass", pass);
+  prefs.end();
+  netMqttUser = user;
+  netMqttPass = pass;
+  Serial.println("SETMQTT: saved, reconnecting MQTT...");
+  client.disconnect();
+}
+
+// Stream the download into the INACTIVE OTA slot while computing SHA-256.
+void startOtaDownload() {
+  Serial.println("OTA: downloading " + otaUrl);
+  WiFiClientSecure otaClient;
+  otaClient.setCACert(ota_ca_cert);
+  otaClient.setTimeout(60);
+
+  HTTPClient http;
+  http.setTimeout(60000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  if (!http.begin(otaClient, otaUrl)) {
+    otaFail("http_begin");
+    return;
+  }
+  int httpCode = http.GET();
+  if (httpCode != 200) {
+    http.end();
+    otaFail("http_" + String(httpCode));
+    return;
+  }
+  int total = http.getSize();
+  if (total <= 0) {
+    http.end();
+    otaFail("no_size");
+    return;
+  }
+  if (!Update.begin(total, U_FLASH)) {
+    http.end();
+    otaFail("update_begin");
+    return;
+  }
+
+  mbedtls_sha256_context ctx;
+  mbedtls_sha256_init(&ctx);
+  mbedtls_sha256_starts(&ctx, 0);
+
+  WiFiClient* stream = http.getStreamPtr();
+  uint8_t buf[2048];
+  int written = 0;
+  int lastPct = -1;
+  while (written < total) {
+    esp_task_wdt_reset();
+    client.loop();  // keep the MQTT session alive during the download
+    int avail = stream->available();
+    if (avail <= 0) {
+      if (!stream->connected()) break;
+      delay(10);
+      continue;
+    }
+    int n = stream->read(buf, (avail > (int)sizeof(buf)) ? sizeof(buf) : avail);
+    if (n <= 0) continue;
+    if (Update.write(buf, n) != n) {
+      mbedtls_sha256_free(&ctx);
+      http.end();
+      otaFail("write");
+      return;
+    }
+    mbedtls_sha256_update(&ctx, buf, n);
+    written += n;
+    int pct = (written * 100) / total;
+    if (pct >= lastPct + 25) {
+      lastPct = pct;
+      publishOtaEvent("ota_progress", "\"pct\":" + String(pct));
+    }
+  }
+  http.end();
+
+  uint8_t digest[32];
+  mbedtls_sha256_finish(&ctx, digest);
+  mbedtls_sha256_free(&ctx);
+
+  char hex[65];
+  for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", digest[i]);
+  hex[64] = 0;
+  if (String(hex) != otaSha256) {
+    Update.abort();
+    Serial.printf("OTA: digest mismatch got=%s want=%s\n", hex, otaSha256.c_str());
+    otaFail("digest");
+    return;
+  }
+  if (written != total) {
+    Update.abort();
+    otaFail("incomplete");
+    return;
+  }
+  if (!Update.end(false)) {
+    otaFail("update_end");
+    return;
+  }
+
+  Serial.println("OTA: image verified, rebooting into new firmware");
+  publishOtaEvent("ota_done");
+  // Arm the post-OTA self-test guard BEFORE the reboot: if the new image
+  // cannot reach the broker within 10 min it rolls itself back.
+  prefs.begin("nodecfg", false);
+  prefs.putBool("otapend", true);
+  prefs.end();
+  delay(500);  // let the event flush
+  ESP.restart();
+}
+
+// Called every loop(): runs the staged update through its safety gates.
+void handleOta() {
+  if (otaPhase == OTA_IDLE) return;
+  unsigned long now = millis();
+
+  // Gate 1 (soft): let an active calibration session finish — interrupting it
+  // would waste the user's probe work. It is time-boxed at 10 min by design
+  // and self-recovers if rebooted mid-session.
+  if (calibState != CALIBIDLE || calibrationSavePending) {
+    notifyOtaWaiting(now, "calibration");
+    return;
+  }
+
+  // Gate 2 (hard, data safety): the offline buffer lives in RAM and a reboot
+  // wipes it. The node is connected (it received the command), so flushing
+  // is fast; if the backlog will not drain in 5 min, abort CLEANLY — no
+  // flash, no data lost.
+  if (!offlineQueue.empty()) {
+    notifyOtaWaiting(now, "buffer");
+    if (now - otaRequestedAt > OTA_BUFFER_DRAIN_TIMEOUT_MS) {
+      otaFail("buf_timeout");
+    }
+    return;
+  }
+
+  if (otaPhase == OTA_WAITING) {
+    otaPhase = OTA_DOWNLOADING;
+    publishOtaEvent("ota_started");
+    startOtaDownload();
+  }
+}
+
 void callback(String &topic, String &payload) {
     String message = payload;
 
@@ -496,6 +887,22 @@ void callback(String &topic, String &payload) {
     Serial.print("RX CONTROL <- ");
     Serial.println(topic);
     Serial.println(message);
+
+    // OTA firmware update (staged by handleOta() on the main loop — never
+    // flash inside the MQTT callback)
+    if (message.startsWith("ota:")) {
+        handleOtaCommand(message.substring(4));
+        return;
+    }
+    // Per-appliance network credentials (persisted in NVS netcfg)
+    if (message.startsWith("setwifi:")) {
+        handleSetWifi(message.substring(8));
+        return;
+    }
+    if (message.startsWith("setmqtt:")) {
+        handleSetMqtt(message.substring(8));
+        return;
+    }
 
     // Pair/type feedback
     if (message == "settype:hvac") {
@@ -673,7 +1080,8 @@ void checkConnection() {
       delay(100);
       WiFi.mode(WIFI_STA);
       WiFi.setTxPower(WIFI_POWER_8_5dBm);
-      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      WiFi.begin(netSsid.length() > 0 ? netSsid.c_str() : WIFI_SSID,
+             netPass.length() > 0 ? netPass.c_str() : WIFI_PASS);
     }
     return;
   }
@@ -686,8 +1094,11 @@ void checkConnection() {
       String clientId = "ESP32-" + deviceMac;
       Serial.print("WiFi OK. Connecting MQTT... ");
 
-      if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
+      if (client.connect(clientId.c_str(),
+                         netMqttUser.length() > 0 ? netMqttUser.c_str() : mqtt_user,
+                         netMqttPass.length() > 0 ? netMqttPass.c_str() : mqtt_pass)) {
         Serial.println("connected");
+        clearOtaPending();
         client.subscribe(("iot/production/nodes/" + deviceMac + "/control").c_str(), 1);
         digitalWrite(PINLED, HIGH);
         requestBackendConfig();
@@ -882,7 +1293,7 @@ void resetAverages() {
 void setup() {
   Serial.begin(115200);
   delay(3000);
-  Serial.println("Booting Sensor Node...");
+  Serial.println("Booting Sensor Node (OTA build " FIRMWARE_VERSION ")...");
 
   // Restore pairing state from NVS (survives power cycles)
   prefs.begin("nodecfg", true);
@@ -906,6 +1317,20 @@ void setup() {
     Serial.print(" DEDUCTOR="); Serial.println(nodeDeductor);
   }
 
+  // Per-appliance network credentials (NVS netcfg) — loaded BEFORE WiFi so
+  // the first connection already uses them when provisioned.
+  loadNetConfig();
+
+  // Post-OTA self-test: if the last boot was an OTA update, arm the guard —
+  // cleared by the first successful MQTT connect, otherwise rollback.
+  prefs.begin("nodecfg", true);
+  otaPending = prefs.getBool("otapend", false);
+  prefs.end();
+  if (otaPending) {
+    otaBootAt = millis();
+    Serial.println("OTA self-test armed: 10 min to reach the broker");
+  }
+
   pinMode(PINBUTTON, INPUT_PULLUP);
   pinMode(PINBUTTON2, INPUT_PULLUP);
   pinMode(PINLED, OUTPUT);
@@ -913,6 +1338,21 @@ void setup() {
 
   buzzerOff();
   digitalWrite(PINLED, LOW);
+
+#if FIRST_BOOT_TRIPLE_BEEP
+  // Variant B only: three beeps on the FIRST boot after flashing, once ever
+  // (NVS-guarded). Survives A->B->A: a later B reinstall stays silent.
+  prefs.begin("nodecfg", false);
+  if (!prefs.getBool("fb3b", false)) {
+    prefs.putBool("fb3b", true);
+    prefs.end();
+    Serial.println("FIRST BOOT (variant B) -> 3 beeps");
+    delay(400);
+    beepShort(3, 150, 150);
+  } else {
+    prefs.end();
+  }
+#endif
 
   analogReadResolution(12);
   analogSetPinAttenuation(PINSCTADC, ADC_11db);
@@ -962,6 +1402,8 @@ void setup() {
 void loop() {
   esp_task_wdt_reset();
   checkConnection();
+  handleOta();
+  checkOtaSelfTest(millis());
 
   if (client.connected()) {
     client.loop();

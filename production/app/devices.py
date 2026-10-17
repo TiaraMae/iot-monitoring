@@ -123,6 +123,24 @@ def _send_type_config(mac, app_type, current_sensor, status):
         mqtt.send_node_command(mac, "restore:offsetcalibrationneeded")
 
 
+# Latest firmware version seen per MAC (process memory). A checkin row is
+# only written to sensor_events when the reported version CHANGES, so the
+# table gains ~1 row per release instead of ~144/node/day.
+LAST_FW = {}
+
+
+def _record_fw_if_changed(mac, fw):
+    if not fw:
+        return
+    if LAST_FW.get(mac) == fw:
+        return
+    LAST_FW[mac] = fw
+    try:
+        models.insert_sensor_event(mac, "checkin_fw", fw)
+    except Exception as e:
+        print(f"Could not record fw for {mac}: {e}")
+
+
 def _restore_normal_if_calibrated(node):
     """Re-push `restore:normal` to a paired node whose appliance is fully
     calibrated (DB operational_status "normal") whenever it checks in.
@@ -197,6 +215,20 @@ def handle_node_event(mac, payload):
         if node:
             models.update_node_last_seen(node["id"])
             _restore_normal_if_calibrated(node)
+            _record_fw_if_changed(mac, data.get("fw"))
+        return
+
+    # OTA campaign events: persisted for the ota_tool status view. The node
+    # throttles ota_waiting (15 s) and ota_progress (25% steps) itself; the
+    # 5 s dedupe above also applies. Detail = compact payload JSON.
+    if event_type.startswith("ota_"):
+        if node:
+            models.update_node_last_seen(node["id"])
+        try:
+            detail = json.dumps(data, separators=(",", ":"))[:500]
+            models.insert_sensor_event(mac, event_type, detail)
+        except Exception as e:
+            print(f"Could not record {event_type} for {mac}: {e}")
         return
 
     if not node or node["appliance_id"] is None or node["status"] != "paired":
