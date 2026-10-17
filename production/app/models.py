@@ -20,7 +20,8 @@ def get_user_by_id(user_id):
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT id, email, name FROM users WHERE id = %s", (user_id,)
+            "SELECT id, email, name, is_admin, session_epoch "
+            "FROM users WHERE id = %s", (user_id,)
         )
         return _to_dict(cur, cur.fetchone())
     finally:
@@ -35,9 +36,72 @@ def get_user_by_email(email):
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT id, email, name, password_hash FROM users WHERE email = %s",
+            "SELECT id, email, name, password_hash, is_admin, session_epoch "
+            "FROM users WHERE email = %s",
             (email,),
         )
+        return _to_dict(cur, cur.fetchone())
+    finally:
+        cur.close()
+        release_conn(conn)
+
+
+def set_user_password(user_id, password_hash):
+    """Rehash a user's password. Bumps session_epoch (revokes existing
+    sessions) and clears any pending reset token. Single transaction."""
+    conn = get_conn()
+    if not conn:
+        return False
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE users
+            SET password_hash = %s,
+                session_epoch = session_epoch + 1,
+                reset_token = NULL,
+                reset_token_expires = NULL
+            WHERE id = %s
+        """, (password_hash, user_id))
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        release_conn(conn)
+
+
+def set_reset_token(user_id, token, expires_at):
+    conn = get_conn()
+    if not conn:
+        return False
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "UPDATE users SET reset_token = %s, reset_token_expires = %s WHERE id = %s",
+            (token, expires_at, user_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        release_conn(conn)
+
+
+def get_user_by_reset_token(token):
+    conn = get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT id, email, name FROM users
+            WHERE reset_token = %s AND reset_token_expires > NOW()
+        """, (token,))
         return _to_dict(cur, cur.fetchone())
     finally:
         cur.close()

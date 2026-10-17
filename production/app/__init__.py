@@ -21,7 +21,8 @@ def load_user(user_id):
 
     row = models.get_user_by_id(user_id)
     if row:
-        return User(row["id"], row["email"], row["name"])
+        return User(row["id"], row["email"], row["name"],
+                    row.get("is_admin"), row.get("session_epoch", 0))
     return None
 
 

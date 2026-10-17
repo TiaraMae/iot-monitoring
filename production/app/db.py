@@ -1,5 +1,7 @@
 """PostgreSQL connection pool and idempotent startup migrations."""
 
+import os
+
 import psycopg2
 import psycopg2.pool
 
@@ -177,6 +179,21 @@ def _run_startup_migrations():
             ("alerts", "severity", "TEXT DEFAULT 'warning'"),
             ("alerts", "acknowledged", "BOOLEAN DEFAULT FALSE"),
             ("sensor_events", "detail", "TEXT"),
+            ("users", "is_admin", "BOOLEAN DEFAULT FALSE"),
+            ("users", "created_at", "TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()"),
+            ("users", "reset_token", "TEXT"),
+            ("users", "reset_token_expires", "TIMESTAMP WITHOUT TIME ZONE"),
+            ("users", "session_epoch", "INTEGER DEFAULT 0"),
+            # Unused by the lean path (no admin console) but kept in parity
+            # with main so the schema converges on merge.
+            ("appliances", "firmware_version", "TEXT"),
+            ("appliances", "firmware_status", "TEXT"),
+            ("appliances", "firmware_detail", "TEXT"),
+            ("appliances", "firmware_updated_at", "TIMESTAMP WITHOUT TIME ZONE"),
+            ("appliances", "wifi_ssid", "TEXT"),
+            ("appliances", "wifi_pass", "TEXT"),
+            ("appliances", "mqtt_user", "TEXT"),
+            ("appliances", "mqtt_pass", "TEXT"),
         ]
         for table, column, dtype in columns:
             cur.execute(
@@ -236,6 +253,41 @@ def _run_startup_migrations():
             CREATE INDEX IF NOT EXISTS idx_dryer_readings_node_time
             ON dryer_readings (sensor_node_id, time)
         """)
+
+        # Owner-admin audit trail (OTA triggers, password resets, ...).
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS admin_audit (
+                id SERIAL PRIMARY KEY,
+                admin_user_id INTEGER REFERENCES users(id),
+                action TEXT NOT NULL,
+                target_type TEXT,
+                target_id TEXT,
+                detail TEXT,
+                created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
+            )
+        """)
+
+        # Owner admin account provisioning from env (idempotent): create when
+        # missing; when present only ensure is_admin (never overwrite a
+        # manually changed admin password). Inert without ADMIN_EMAIL/
+        # ADMIN_PASSWORD in the environment.
+        admin_email = (os.getenv("ADMIN_EMAIL") or "").strip().lower()
+        admin_password = os.getenv("ADMIN_PASSWORD") or ""
+        if admin_email and admin_password:
+            cur.execute("SELECT id, is_admin FROM users WHERE email = %s", (admin_email,))
+            row = cur.fetchone()
+            if row:
+                if not row[1]:
+                    cur.execute("UPDATE users SET is_admin = TRUE WHERE id = %s", (row[0],))
+            else:
+                import bcrypt as _bcrypt
+                _hash = _bcrypt.hashpw(admin_password.encode("utf-8"),
+                                       _bcrypt.gensalt()).decode("utf-8")
+                cur.execute(
+                    "INSERT INTO users (email, password_hash, name, is_admin) "
+                    "VALUES (%s, %s, %s, TRUE)",
+                    (admin_email, _hash, "System Owner"),
+                )
 
         conn.commit()
     except Exception as e:

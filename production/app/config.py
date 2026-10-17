@@ -101,3 +101,14 @@ OTA_FIRMWARE_DIR = os.path.join(
 # Compiled firmware binary name allowlist (no path traversal, .bin only).
 import re as _re
 OTA_FILENAME_RE = _re.compile(r"^[A-Za-z0-9_.-]+\.bin$")
+
+# --- Owner admin account (provisioning; inert without env vars; see OTA.md) ---
+ADMIN_EMAIL = (os.getenv("ADMIN_EMAIL") or "").strip().lower() or None
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD") or None
+
+# --- Email (password-reset self-service; Gmail SMTP) ---
+# Unset = the feature stays inert: forgot_password shows the same uniform
+# info message and the reset link is only written to the server log.
+SMTP_USER = os.getenv("SMTP_USER") or None
+SMTP_APP_PASSWORD = os.getenv("SMTP_APP_PASSWORD") or None
+PASSWORD_RESET_TOKEN_TTL_MINUTES = 15
