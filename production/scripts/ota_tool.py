@@ -74,6 +74,23 @@ def publish_command(mac, command):
             pass
 
 
+def find_node(mac):
+    """Any registered node by MAC (paired or not)."""
+    conn = models.get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT mac_address, status FROM sensor_nodes "
+            "WHERE UPPER(mac_address) = UPPER(%s)", (mac,))
+        r = cur.fetchone()
+        return {"mac": r[0], "status": r[1]} if r else None
+    finally:
+        cur.close()
+        models.release_conn(conn)
+
+
 def get_paired_nodes():
     conn = models.get_conn()
     if not conn:
@@ -234,6 +251,18 @@ def cmd_retry(args):
     print(f"Dispatched {ok}/{len(targets)}.")
 
 
+def cmd_cmd(args):
+    node = find_node(args.mac)
+    if not node:
+        sys.exit(f"No registered node with MAC {args.mac}")
+    head = args.command.split(':', 1)[0]
+    if head in ("setwifi", "setmqtt") and args.command.count(":") < 2:
+        sys.exit(f"{head} needs <value>:<value> — and SSID/password may not contain ':'")
+    print(f"Sending to {node['mac']} ({node['status']}):")
+    ok = publish_command(node["mac"], args.command)
+    sys.exit(0 if ok else 1)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Fleet OTA tool (see OTA.md)")
     sub = parser.add_subparsers(dest="mode", required=True)
@@ -251,6 +280,12 @@ def main():
     p_retry = sub.add_parser("retry", help="Re-send only to failed/pending online nodes")
     p_retry.add_argument("file", help=".bin file name or path")
     p_retry.set_defaults(func=cmd_retry)
+
+    p_cmd = sub.add_parser("cmd", help="Send a raw control command to one node "
+                                         "(setwifi:<ssid>:<pass>, setmqtt:<user>:<pass>, ...)")
+    p_cmd.add_argument("mac", help="Node MAC")
+    p_cmd.add_argument("command", help="Control payload (no 'ota:' prefix)")
+    p_cmd.set_defaults(func=cmd_cmd)
 
     args = parser.parse_args()
     args.func(args)
