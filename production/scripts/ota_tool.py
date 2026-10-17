@@ -158,8 +158,12 @@ def classify(node, ota_evt, fw_evt, want_version):
     if not is_online(node):
         return "offline", fw
     evt = (ota_evt or {}).get("type")
-    if evt == "ota_done":
+    # ota_confirmed is the self-test guard's success report — it arrives
+    # AFTER ota_done and is the strongest "updated" signal we have.
+    if evt in ("ota_done", "ota_confirmed"):
         return "updated", fw
+    if evt == "ota_rollback":
+        return "failed(rollback)", fw
     if evt == "ota_fail":
         code = ""
         try:
