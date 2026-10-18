@@ -95,6 +95,17 @@ def _revert_to_calibration_needed(appliance_id, tracker):
     models.update_operational_status(appliance_id, "offset_calibration_needed")
 
 
+def _notify_session_reset(appliance_id):
+    """After a BACKEND-side revert, tell the node to abort its calibration FSM.
+    Without this the firmware keeps "calibrating" in RAM until its own 10-min
+    timeout (the 2026-10-18 "stuck calibrating until power cycle" bug).
+    `offsetcalibrationfailack` resets calibState to IDLE in all firmware builds
+    that support calibration."""
+    node = models.get_node_by_appliance(appliance_id)
+    if node:
+        mqtt.send_node_command(node["mac_address"], "offsetcalibrationfailack")
+
+
 def reconcile_on_node_connect(appliance_id):
     """Called when a paired node (re)connects and requests its config while the
     appliance is `calibrating`. Two cases:
@@ -116,6 +127,7 @@ def reconcile_on_node_connect(appliance_id):
             tracker["suspected_dead_at"] = deadline
         return False
     _revert_to_calibration_needed(appliance_id, tracker)
+    _notify_session_reset(appliance_id)
     return True
 
 
@@ -132,14 +144,17 @@ def reconcile_calibration_state(appliance):
     tracker = CALIBRATION_TRACKER.get(appliance_id)
     if not tracker:
         _revert_to_calibration_needed(appliance_id, None)
+        _notify_session_reset(appliance_id)
         return True
     if _expire_tracker(appliance_id):
         _revert_to_calibration_needed(appliance_id, tracker)
+        _notify_session_reset(appliance_id)
         return True
     suspected = tracker.get("suspected_dead_at")
     if suspected and config.now_wib() > config.to_wib(suspected):
         CALIBRATION_TRACKER.pop(appliance_id, None)
         _revert_to_calibration_needed(appliance_id, tracker)
+        _notify_session_reset(appliance_id)
         return True
     return False
 
@@ -264,19 +279,24 @@ def handle_calibration_success_request(mac, appliance, data):
           f"treturn_offset={treturn_offset}, tsupply_offset={tsupply_offset}")
 
 
-def handle_calibration_fail_request(mac, appliance_id):
-    """Firmware timeout / approval-timeout: revert to calibration needed,
-    restoring the offsets that were zeroed when the session began."""
+def handle_calibration_fail_request(mac, appliance_id, reason=None):
+    """Firmware timeout / approval-timeout / sensor fault. Always ack with
+    `offsetcalibrationfailack` so the node resets its calibration FSM — even
+    when the DB was already reverted by a reconcile (previously the node never
+    got an ack in that case). Revert the appliance and restore the offsets
+    zeroed at session start only if it is still marked `calibrating`."""
     tracker = CALIBRATION_TRACKER.pop(appliance_id, None) or {}
     appliance = models.get_appliance(appliance_id)
-    if not appliance:
-        return
-    if appliance["operational_status"] == "calibrating":
+    if appliance and appliance["operational_status"] == "calibrating":
         prev = tracker.get("prev_offsets")
         if prev is not None:
             models.update_offsets(appliance_id, prev[0], prev[1])
         models.update_operational_status(appliance_id, "offset_calibration_needed")
-        mqtt.send_node_command(mac, "offsetcalibrationfailack")
+    mqtt.send_node_command(mac, "offsetcalibrationfailack")
+    try:
+        models.insert_sensor_event(mac, "calibration_fail", reason)
+    except Exception as e:
+        print(f"Could not record calibration_fail for {mac}: {e}")
 
 
 @calibration_bp.route("/api/device/<int:appliance_id>/calibration_status")

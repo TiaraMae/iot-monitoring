@@ -58,7 +58,7 @@ const char* ca_cert =
 // Release version: bump per release; MUST match the OTA .bin file name
 // (node_<FIRMWARE_VERSION>.bin). Incoming OTA triggers for the version the
 // node already runs are ignored (idempotent re-trigger safety).
-#define FIRMWARE_VERSION "20261016-1"
+#define FIRMWARE_VERSION "20261018-1"
 
 // ISRG Root X1 CA Certificate (Let's Encrypt)
 // Used ONLY for the OTA HTTP(S) download client. The MQTT client keeps using
@@ -189,6 +189,7 @@ bool maintenanceRequestPending = false;
 // CALIB_REQUIRED_DELTA °C below the captured baseline within 10 minutes.
 // =========================
 const unsigned long CALIB_TIMEOUT_MS = 10UL * 60UL * 1000UL;
+const unsigned long CALIB_BASELINE_TIMEOUT_MS = 60000UL;  // probe-fault fail-fast (was: silent until the 10-min timeout)
 const unsigned long CALIB_APPROVAL_TIMEOUT_MS = 10000UL;
 const float CALIB_REQUIRED_DELTA = 8.0;
 
@@ -433,6 +434,24 @@ void runCalibrationStateMachine(unsigned long now, float avgDS1T, float avgDS2T,
   }
 
   if (calibState == CALIBBASELINEWAIT) {
+    // Fail fast when a probe never becomes valid (e.g. dead DS18B20 on Port 2):
+    // a session that cannot capture its baseline can never proceed, so report
+    // a sensor fault after 60 s instead of hanging silent until the 10-min timeout.
+    if (now - calibStartedAt >= CALIB_BASELINE_TIMEOUT_MS) {
+      const char* fault = !ds2Valid ? "sensor_fault_ds2" : "sensor_fault_ds1";
+      Serial.printf("CALIBRATION BASELINE TIMEOUT (%s).\n", fault);
+      beepLongFailTwice();
+      publishCalibrationFailRequest(now - calibStartedAt, fault);
+      calibState = CALIBIDLE;
+      calibStartedAt = 0;
+      printWorkflow();
+      return;
+    }
+    // Keep the backend/UI alive while waiting: throttled progress with delta 0.
+    if (now - calibLastProgressAt >= 2000) {
+      calibLastProgressAt = now;
+      publishCalibrationProgress(avgDS1T, avgDS1T, 0.0);
+    }
     if (ds1Valid && ds2Valid) {
       calibBaseDS1 = avgDS1T;
       calibBaseDS2 = avgDS2T;
@@ -948,6 +967,10 @@ void callback(String &topic, String &payload) {
     if (message == "restore:offsetcalibrationneeded") {
         calibrationAcked = false;
         calibrationSavePending = false;
+        // Abort any orphaned calibration FSM so the node returns to the
+        // need-calibration flow immediately (backend-driven revert).
+        calibState = CALIBIDLE;
+        calibStartedAt = 0;
         Serial.println("RESTORE -> need calibration");
         printWorkflow();
         return;

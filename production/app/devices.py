@@ -117,9 +117,12 @@ def _send_type_config(mac, app_type, current_sensor, status):
     mqtt.send_node_command(mac, f"settype:{'dryer' if _is_dryer(app_type) else 'hvac'}")
     mqtt.send_node_command(mac, f"setcf:{cf}")
     mqtt.send_node_command(mac, f"setdeductor:{deductor}")
+    # Never push a restore while a calibration session is live: the node is
+    # mid-FSM and `restore:offsetcalibrationneeded` would desync it (it flips
+    # calibrationAcked but leaves calibState running — 2026-10-18 incident).
     if _is_dryer(app_type) or status == "normal":
         mqtt.send_node_command(mac, "restore:normal")
-    else:
+    elif status == "offset_calibration_needed":
         mqtt.send_node_command(mac, "restore:offsetcalibrationneeded")
 
 
@@ -261,7 +264,7 @@ def handle_node_event(mac, payload):
         return
 
     if event_type == "calibration_fail_request":
-        calibration.handle_calibration_fail_request(mac, node["appliance_id"])
+        calibration.handle_calibration_fail_request(mac, node["appliance_id"], data.get("reason"))
         return
 
 

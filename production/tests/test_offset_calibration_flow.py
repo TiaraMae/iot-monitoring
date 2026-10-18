@@ -81,6 +81,8 @@ def setup_fixture():
 
 
 def cleanup_fixture():
+    for mac in (TEST_MAC, DRYER_MAC):
+        sql("DELETE FROM sensor_events WHERE sensor_node_mac = %s", (mac,))
     for appliance_id in (APPLIANCE_ID, DRYER_APPLIANCE_ID):
         if not appliance_id:
             continue
@@ -327,11 +329,15 @@ def main():
             check('fail_request -> previous offsets restored',
                   get_offsets() == (0.0, -0.3))
 
-            # 10. fail_request while not calibrating (approval timeout) -> no ack.
+            # 10. fail_request while not calibrating (approval timeout) -> the
+            # node's FSM is aborted regardless, and the reason is recorded.
             devices.EVENT_DEDUPE_CACHE.clear()
             COMMANDS.clear()
             send_event(TEST_MAC, 'calibration_fail_request', elapsedms=10000, reason='approval_timeout')
-            check('approval-timeout fail_request not acked', not COMMANDS)
+            check('approval-timeout fail_request still acked', COMMANDS == ['offsetcalibrationfailack'])
+            check('fail reason recorded in sensor_events',
+                  sql("SELECT detail FROM sensor_events WHERE sensor_node_mac = %s AND event_type = 'calibration_fail' ORDER BY id DESC",
+                      (TEST_MAC,), fetch='one')[0] == 'approval_timeout')
 
             # 11. Dryer node -> calibration not supported.
             COMMANDS.clear()
@@ -407,7 +413,8 @@ def main():
             check('config still sent after revert',
                   'settype:hvac' in COMMANDS and 'restore:offsetcalibrationneeded' in COMMANDS)
 
-            # 16b. No tracker at all (backend restarted, node rebooted) -> revert.
+            # 16b. No tracker at all (backend restarted, node rebooted) -> revert
+            # plus a failack so the node's orphaned FSM resets (no power cycle).
             devices.EVENT_DEDUPE_CACHE.clear()
             models.update_operational_status(APPLIANCE_ID, 'calibrating')
             models.update_offsets(APPLIANCE_ID, 0.0, 0.0)
@@ -416,6 +423,8 @@ def main():
             send_event(TEST_MAC, 'event_request_config')
             check('reconnect with no tracker -> reverted to needed',
                   get_status() == 'offset_calibration_needed')
+            check('reconnect with no tracker -> failack resets node FSM',
+                  'offsetcalibrationfailack' in COMMANDS)
 
             # 16c. Live tracker (WiFi blip mid-session) -> session preserved for now.
             devices.EVENT_DEDUPE_CACHE.clear()
@@ -452,13 +461,35 @@ def main():
             past = calibration.config.now_wib() - timedelta(seconds=calibration.PROGRESS_GRACE_SECONDS + 5)
             tracker['suspected_dead_at'] = past
             appliance = models.get_appliance(APPLIANCE_ID)
+            COMMANDS.clear()
             check('dead session reverted by reconcile',
                   calibration.reconcile_calibration_state(appliance))
             check('dead session -> offset_calibration_needed',
                   get_status() == 'offset_calibration_needed')
             check('dead session -> previous offsets restored',
                   get_offsets() == (0.0, -0.3))
+            check('dead session -> node told to reset its FSM',
+                  COMMANDS == ['offsetcalibrationfailack'])
             calibration.CALIBRATION_TRACKER.pop(APPLIANCE_ID, None)
+
+            # 18. _send_type_config must never push a restore while a session is
+            # live (the 60 s config re-request used to send
+            # restore:offsetcalibrationneeded to a calibrating node).
+            COMMANDS.clear()
+            devices._send_type_config(TEST_MAC, 'HVAC', models.get_appliance(APPLIANCE_ID)['current_sensor'], 'calibrating')
+            check('config re-request while calibrating sends no restore',
+                  not [c for c in COMMANDS if c.startswith('restore:')])
+            check('config re-request while calibrating still sends type/cf/deductor',
+                  'settype:hvac' in COMMANDS
+                  and any(c.startswith('setcf:') for c in COMMANDS)
+                  and any(c.startswith('setdeductor:') for c in COMMANDS))
+
+            # 18b. Same re-request when calibration is actually needed keeps the
+            # restore (boot-time healing path unchanged).
+            COMMANDS.clear()
+            devices._send_type_config(TEST_MAC, 'HVAC', models.get_appliance(APPLIANCE_ID)['current_sensor'], 'offset_calibration_needed')
+            check('config re-request when needed sends restore:offsetcalibrationneeded',
+                  'restore:offsetcalibrationneeded' in COMMANDS)
 
             if failures:
                 print(f'\n{len(failures)} check(s) FAILED')
