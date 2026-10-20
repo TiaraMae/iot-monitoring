@@ -1,11 +1,14 @@
 """Verify the self-service password reset (backported from main).
 
 Flow under test (SMTP mocked; broker untouched):
-1. forgot_password page renders; with SMTP unset it explains email is not
-   configured (and the form is hidden) — feature is inert but safe.
+1. forgot_password page renders the form in BOTH states: with SMTP unset the
+   page says the link goes to the server log (fallback), with SMTP set it
+   stays silent about delivery.
+1b. SMTP unset: POST creates the 15-min single-use token for the known user
+   AND prints the reset link to the server log (lockout recovery path).
 2. POST /forgot_password answers uniformly for known AND unknown emails
    (no account enumeration), and when SMTP is "configured" a reset token is
-   stored for the known user only.
+   stored for the known user only and emailed.
 3. GET /reset_password/<token> renders for a valid token, rejects garbage.
 4. POST sets the new password, clears the token (single-use), bumps
    session_epoch (other sessions die), and the user can log in with the new
@@ -64,11 +67,29 @@ def main():
     saved_smtp_pass = config.SMTP_APP_PASSWORD
     try:
         with app.test_client() as client:
-            # --- 1. Inert state (SMTP unset): page renders, no crash.
+            # --- 1. SMTP unset: page renders WITH the form (log-link fallback).
             config.SMTP_USER = None
             config.SMTP_APP_PASSWORD = None
             r = client.get('/forgot_password')
             check('forgot page renders with SMTP unset', r.status_code == 200)
+            check('form still offered with SMTP unset', b'name="email"' in r.data)
+
+            # --- 1b. SMTP unset: token still created + link printed to the log.
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                r1 = client.post('/forgot_password', data={'email': TEST_EMAIL})
+            r2 = client.post('/forgot_password', data={'email': 'nobody@example.com'})
+            check('SMTP-unset known email -> uniform redirect', r1.status_code == 302)
+            check('SMTP-unset unknown email -> same uniform redirect', r2.status_code == 302)
+            token_row = sql(
+                "SELECT reset_token FROM users WHERE id = %s", (USER_ID,), fetch='one')
+            check('SMTP-unset: token stored for known user only',
+                  bool(token_row and token_row[0]))
+            check('SMTP-unset: reset link printed to server log',
+                  token_row[0] in buf.getvalue())
+            sql("UPDATE users SET reset_token = NULL, reset_token_expires = NULL "
+                "WHERE id = %s", (USER_ID,))
 
             # --- 2. Uniform response (no enumeration), SMTP mocked on.
             sent = []

@@ -174,21 +174,30 @@ def forgot_password():
     # Uniform response — never reveal whether the account exists.
     flash("If that email is registered, a reset link is on its way.", "info")
 
-    if config.SMTP_USER and config.SMTP_APP_PASSWORD:
-        user = models.get_user_by_email(email)
-        if user:
-            token = secrets.token_urlsafe(32)
-            expires = config.now_wib() + timedelta(
-                minutes=config.PASSWORD_RESET_TOKEN_TTL_MINUTES)
-            models.set_reset_token(user["id"], token, expires)
-            reset_url = url_for("auth.reset_password", token=token,
-                                _external=True)
+    user = models.get_user_by_email(email)
+    if user:
+        token = secrets.token_urlsafe(32)
+        expires = config.now_wib() + timedelta(
+            minutes=config.PASSWORD_RESET_TOKEN_TTL_MINUTES)
+        models.set_reset_token(user["id"], token, expires)
+        reset_url = url_for("auth.reset_password", token=token,
+                            _external=True)
+        if config.SMTP_USER and config.SMTP_APP_PASSWORD:
             try:
                 _send_reset_email(email, reset_url)
             except Exception as e:
                 print(f"Reset email to {email} failed: {e}")
                 flash("Could not send the email right now. Please try again "
                       "or contact your administrator.", "error")
+        else:
+            # SMTP not configured: deliver the link via the server log instead
+            # of email (fallback ported from main). Token is still 15-min,
+            # single-use; an operator on the host reads the log and hands the
+            # link to the user. This is the lockout recovery path that saved
+            # us nothing on 2026-10-20 — now it exists.
+            print(f"PASSWORD RESET LINK ({email}, SMTP not configured, "
+                  f"valid {config.PASSWORD_RESET_TOKEN_TTL_MINUTES} min): "
+                  f"{reset_url}")
     return redirect(url_for("auth.forgot_password"))
 
 
