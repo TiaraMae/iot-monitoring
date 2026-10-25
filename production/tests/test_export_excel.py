@@ -12,6 +12,12 @@ Covers both appliance types:
   profile precisely to prove the warmup is included in current/power.
 
 Self-contained: creates its own user/appliance/node fixtures and cleans up.
+
+Swapped-probe regression: Delta-T is SIGNED (treturn - tsupply). A reading with
+supply hotter than return (probes swapped) must surface as a NEGATIVE Delta-T
+in both latest_n (chart feed) and the points export — the alert FSM and /latest
+have always been signed; abs() here once hid exactly the condition the alerts
+warn about.
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -171,6 +177,25 @@ def main():
             resp = client.get(url + '?filtered=false')
             _, data = sheet_rows(resp)
             check('hvac points: include-idle adds the idle row', len(data) == 2 * RUN_POINTS + 1)
+
+            # ---------- Swapped-probe regression: Delta-T must stay signed ----------
+            node_id = sql("SELECT id FROM sensor_nodes WHERE mac_address = %s",
+                          (HVAC_MAC,), fetch='one')[0]
+            swapped_time = DAY_A + timedelta(hours=2)
+            sql("INSERT INTO hvac_readings (sensor_node_id, time, treturn, tsupply, icompressor) "
+                "VALUES (%s, %s, 15.0, 25.0, 3.0)", (node_id, swapped_time))
+            resp = client.get(f'/api/device/{HVAC_ID}/latest_n?limit=200')
+            swapped = [p for p in resp.get_json()
+                       if p['time'] == swapped_time.isoformat()]
+            check('latest_n: swapped-probe DeltaT stays negative',
+                  len(swapped) == 1 and swapped[0]['DeltaT'] == -10.0)
+            resp = client.get(url + '?filtered=true')
+            _, data = sheet_rows(resp)
+            check('points export: swapped-probe DeltaT stays negative',
+                  len(data) == 2 * RUN_POINTS + 1
+                  and any(r[4] == -10.0 for r in data))
+            sql("DELETE FROM hvac_readings WHERE sensor_node_id = %s AND time = %s",
+                (node_id, swapped_time))
 
             # ---------- HVAC, daily mode ----------
             resp = client.get(url + '?granularity=daily')

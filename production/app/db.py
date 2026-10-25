@@ -24,9 +24,32 @@ except Exception as e:
 
 
 def get_conn():
+    """Checkout a pooled connection, transparently replacing dead ones.
+
+    psycopg2 pools have no pre_ping: after a Postgres restart/crash the pool
+    keeps handing out dead connections and every query fails while the
+    service looks alive (the 44 h zombie of 2026-10-20). A 1-statement liveness
+    probe on checkout discards dead connections and rebuilds; if the database
+    is genuinely down we return None — the graceful-degradation contract every
+    model already implements — and the next checkout self-heals once Postgres
+    is back (no service restart required).
+    """
     try:
-        if db_pool:
-            return db_pool.getconn()
+        if not db_pool:
+            return None
+        conn = db_pool.getconn()
+        try:
+            with conn.cursor() as probe:
+                probe.execute("SELECT 1")
+                probe.fetchone()
+            return conn
+        except (psycopg2.OperationalError, psycopg2.InterfaceError):
+            db_pool.putconn(conn, close=True)
+            conn = db_pool.getconn()
+            with conn.cursor() as probe:
+                probe.execute("SELECT 1")
+                probe.fetchone()
+            return conn
     except Exception as e:
         print(f"DB Get Connection Error: {e}")
     return None

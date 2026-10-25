@@ -828,7 +828,7 @@ def get_alerts_for_appliance(appliance_id):
     cur = conn.cursor()
     try:
         cur.execute("""
-            SELECT id, alert_type, message, value, threshold, severity, created_at, resolved_at
+            SELECT id, alert_type, message, value, threshold, severity, created_at, resolved_at, acknowledged
             FROM alerts
             WHERE appliance_id = %s
             ORDER BY created_at DESC
@@ -844,6 +844,7 @@ def get_alerts_for_appliance(appliance_id):
                 "severity": r[5],
                 "created_at": r[6].isoformat() if r[6] else None,
                 "resolved_at": r[7].isoformat() if r[7] else None,
+                "acknowledged": bool(r[8]),
             }
             for r in rows
         ]

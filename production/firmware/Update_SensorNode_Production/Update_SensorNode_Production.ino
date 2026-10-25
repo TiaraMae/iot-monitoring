@@ -60,6 +60,11 @@ const char* ca_cert =
 // node already runs are ignored (idempotent re-trigger safety).
 #define FIRMWARE_VERSION "20261018-1"
 
+// Running/idle boundary for the current clamp, in amps. MUST stay equal to
+// the backend's config.RUNNING_CURRENT_THRESHOLD (app/config.py) — a
+// one-sided change desyncs running state, energy integration and alerts.
+#define RUNNING_CURRENT_AMPS 0.25
+
 // ISRG Root X1 CA Certificate (Let's Encrypt)
 // Used ONLY for the OTA HTTP(S) download client. The MQTT client keeps using
 // the DigiCert root (EMQX Cloud). Source:
@@ -1188,7 +1193,7 @@ float readCurrentIrms() {
 }
 
 bool isRunningByCurrent(float currentA) {
-  return currentA >= 0.25;
+  return currentA >= RUNNING_CURRENT_AMPS;
 }
 
 // =========================

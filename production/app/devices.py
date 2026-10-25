@@ -396,7 +396,9 @@ def api_device_latest(appliance_id):
     offline_timeout = (config.NEED_CALIBRATION_OFFLINE_TIMEOUT_SECONDS
                        if appliance["operational_status"] == "offset_calibration_needed"
                        else config.OFFLINE_TIMEOUT_SECONDS)
-    now = datetime.now()
+    # Signed delta-T (treturn - tsupply): a negative value means swapped
+    # probes and must stay visible here — the alert FSM and /latest are signed.
+    now = config.now_wib()
     is_offline = (
         (now - last_seen).total_seconds() > offline_timeout
         if last_seen else True
@@ -575,15 +577,37 @@ def api_acknowledge_alert(alert_id):
         cur.close()
         release_conn(conn)
 
-    if models.resolve_alert(alert_id):
+    # Acknowledge = "a human saw it" (flag only, stays in the active list).
+    if models.acknowledge_alert(alert_id):
         return jsonify({"success": True})
-    return jsonify({"error": "Failed to resolve"}), 500
+    return jsonify({"error": "Failed to acknowledge"}), 500
 
 
 @devices_bp.route("/api/alerts/<int:alert_id>/resolve", methods=["POST"])
 @login_required
 def api_resolve_alert(alert_id):
-    return api_acknowledge_alert(alert_id)
+    # Ownership check via appliance join (same as acknowledge).
+    conn = get_conn()
+    if not conn:
+        return jsonify({"error": "db"}), 500
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT a.user_id FROM alerts al
+            JOIN appliances a ON al.appliance_id = a.id
+            WHERE al.id = %s
+        """, (alert_id,))
+        row = cur.fetchone()
+        if not row or row[0] != current_user.id:
+            return jsonify({"error": "not found"}), 404
+    finally:
+        cur.close()
+        release_conn(conn)
+
+    # Resolve = "it's fixed" (leaves the active list).
+    if models.resolve_alert(alert_id):
+        return jsonify({"success": True})
+    return jsonify({"error": "Failed to resolve"}), 500
 
 
 @devices_bp.route("/api/device/<int:appliance_id>/latest_n")
@@ -708,7 +732,7 @@ def api_device_latest_n(appliance_id):
                 "time": r[0].isoformat(),
                 "Treturn": r[1],
                 "Tsupply": r[2],
-                "DeltaT": round(abs((r[1] or 0) - (r[2] or 0)), 2),
+                "DeltaT": round((r[1] or 0) - (r[2] or 0), 2),
                 "Icompressor": r[3],
                 "Tcoil": None,
                 "RHreturn": None,
@@ -805,7 +829,7 @@ def api_export_excel(appliance_id):
             headers = ["Timestamp", "Return Temp (°C)", "Supply Temp (°C)", "Current (A)", "Delta-T (°C)"]
             rows = []
             for r in raw:
-                delta = round(abs((r[1] or 0) - (r[2] or 0)), 2) if (r[1] is not None and r[2] is not None) else None
+                delta = round((r[1] or 0) - (r[2] or 0), 2) if (r[1] is not None and r[2] is not None) else None
                 rows.append([r[0], r[1], r[2], r[3], delta])
 
         wb = Workbook()

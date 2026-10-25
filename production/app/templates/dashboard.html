@@ -2152,7 +2152,10 @@ async function loadAlerts() {
             if (isResolved) {
                 resolveHtml = `<span style="color:var(--success); font-size:0.75rem;">Resolved: ${fmtTime(al.resolved_at)}</span>`;
             } else {
-                resolveHtml = `<button class="btn btn-sm btn-secondary" onclick="resolveAlert(${al.id})" style="margin-top:4px; font-size:0.7rem; padding:2px 8px;">Resolve</button>`;
+                const ackBtn = al.acknowledged
+                    ? `<span style="color:var(--text-muted); font-size:0.7rem; margin-right:6px;">Acknowledged</span>`
+                    : `<button class="btn btn-sm btn-secondary" onclick="acknowledgeAlert(${al.id})" style="margin-top:4px; font-size:0.7rem; padding:2px 8px; margin-right:6px;">Acknowledge</button>`;
+                resolveHtml = ackBtn + `<button class="btn btn-sm btn-secondary" onclick="resolveAlert(${al.id})" style="margin-top:4px; font-size:0.7rem; padding:2px 8px;">Resolve</button>`;
             }
             div.innerHTML = `${badge}<strong>${escapeHtml(al.alert_type)}</strong> — ${escapeHtml(al.message || '')}<br><span style="color:var(--text-muted); font-size:0.75rem;">${fmtTime(al.created_at)}</span><br>${resolveHtml}`;
             content.appendChild(div);
@@ -2162,9 +2165,16 @@ async function loadAlerts() {
 
 async function resolveAlert(alertId) {
     try {
-        await fetchJson('/api/alerts/' + alertId + '/acknowledge', { method: 'POST' });
+        await fetchJson('/api/alerts/' + alertId + '/resolve', { method: 'POST' });
         loadAlerts();
         refreshAppliances();
+    } catch (e) { alert(e.message); }
+}
+
+async function acknowledgeAlert(alertId) {
+    try {
+        await fetchJson('/api/alerts/' + alertId + '/acknowledge', { method: 'POST' });
+        loadAlerts();
     } catch (e) { alert(e.message); }
 }
 

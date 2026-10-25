@@ -39,12 +39,6 @@ FAULT_DISCORD_MAP = {
         "cause": "Age, overloading, or misalignment.",
         "action": "Replace drive belt immediately.",
     },
-    "fault_dryer_lint_blockage": {
-        "title": "Lint Blockage Detected",
-        "description": "Lint accumulation is restricting exhaust airflow.",
-        "cause": "Failure to clean lint filter or exhaust duct; exterior vent obstruction.",
-        "action": "Clean lint filter and inspect exhaust duct.",
-    },
     "fault_dryer_exhaust_ventilation_blockage": {
         "title": "Exhaust Ventilation Blockage",
         "description": "Exhaust airflow is severely restricted.",
@@ -97,22 +91,10 @@ def _insert_fault_alert(
         print(f"Fault alert insert error: {e}")
 
 
-def _post_discord_embed(webhook_url, embed):
-    """Synchronous POST of one embed; shared by the worker and the fallback."""
-    try:
-        try:
-            _discord_queue.put_nowait((webhook_url, embed))
-            _ensure_discord_worker()
-        except queue.Full:
-            # Queue saturated (webhook down for a while): never drop an alert
-            # silently — post synchronously as a last resort.
-            _post_discord_embed(webhook_url, embed)
-    except Exception as e:
-        print(f"Discord alert failed: {e}")
-
-
 # GAP-4: alerts are dispatched on a background worker so a slow/dead webhook
-# never stalls MQTT ingestion on the paho callback thread.
+# never stalls MQTT ingestion on the paho callback thread. The worker owns the
+# ONLY HTTP call — send_discord_alert only enqueues (embed building stays
+# synchronous and cheap; only the network I/O moves off the callback thread).
 _discord_queue = queue.Queue(maxsize=50)
 _discord_worker = None
 _discord_worker_lock = threading.Lock()
@@ -120,10 +102,11 @@ _discord_worker_lock = threading.Lock()
 
 def _discord_worker_loop():
     while True:
-        item = _discord_queue.get()
+        webhook_url, embed = _discord_queue.get()
         try:
-            webhook_url, embed = item
-            _post_discord_embed(webhook_url, embed)
+            resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=5)
+            if resp.status_code not in (200, 204):
+                print(f"Discord webhook returned {resp.status_code}: {resp.text}")
         except Exception as e:
             print(f"Discord worker error: {e}")
         finally:
@@ -183,9 +166,15 @@ def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=
                 "footer": {"text": "IoT Monitoring & Predictive Maintenance"},
             }
 
-        resp = requests.post(webhook_url, json={"embeds": [embed]}, timeout=5)
-        if resp.status_code not in (200, 204):
-            print(f"Discord webhook returned {resp.status_code}: {resp.text}")
+        # Hand the embed to the background worker (never POST from the MQTT
+        # callback thread). A full queue means Discord has been unreachable
+        # for hours (50-deep buffer + 10-min fault cooldowns) — log and drop
+        # rather than ever block ingestion.
+        try:
+            _discord_queue.put_nowait((webhook_url, embed))
+            _ensure_discord_worker()
+        except queue.Full:
+            print("Discord alert dropped: notification queue full")
     except Exception as e:
         print(f"Discord alert failed: {e}")
 
