@@ -172,7 +172,7 @@ def forgot_password():
 
     email = request.form.get("email", "").strip().lower()
     # Uniform response — never reveal whether the account exists.
-    flash("If that email is registered, a reset link is on its way.", "info")
+    flash("Please check your email for password reset link", "success")
 
     user = models.get_user_by_email(email)
     if user:

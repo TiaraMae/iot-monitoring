@@ -13,6 +13,11 @@ Flow under test (SMTP mocked; broker untouched):
    emailed reset link MUST be https — an http link reached a real user and
    timed out on a network blocking port 80. Also: the reset form enforces
    minlength client-side and carries the new "Create new password" copy.
+2c. Flashes render INSIDE the auth card: the forgot POST redirect shows the
+   green "Please check your email for password reset link" message in-card,
+   and a mismatched reset POST shows "Passwords do not match" in-card (the
+   client-side pw-mismatch guard also prevents that round trip in real
+   browsers).
 3. GET /reset_password/<token> renders for a valid token, rejects garbage.
 4. POST sets the new password, clears the token (single-use), bumps
    session_epoch (other sessions die), and the user can log in with the new
@@ -145,6 +150,21 @@ def main():
             check('reset page copy updated',
                   b'Create new password' in r.data
                   and b'Must be 8-64' not in r.data)
+            check('reset page has client-side mismatch guard',
+                  b'pw-mismatch' in r.data and b'id="reset-form"' in r.data)
+
+            # --- 2c. Flashes render inside the auth card. (The forgot route is
+            # rate-limited at 5/min per IP and the earlier phases already spent
+            # that budget — reset the limiter storage before this extra POST.)
+            from app import limiter
+            limiter.reset()
+            r = client.post('/forgot_password', data={'email': TEST_EMAIL},
+                            follow_redirects=True)
+            check('forgot flash reworded and rendered in-card',
+                  b'Please check your email for password reset link' in r.data)
+            token_row = sql(
+                "SELECT reset_token FROM users WHERE id = %s", (USER_ID,), fetch='one')
+            token = token_row[0]
             r = client.get('/reset_password/bogustoken')
             check('bogus token redirected away', r.status_code == 302)
 
@@ -152,6 +172,14 @@ def main():
             r = client.post(f'/reset_password/{token}',
                             data={'password': 'short', 'confirm': 'short'})
             check('too-short password rejected', r.status_code == 302)
+
+            # --- 4b. Mismatch flash renders inside the card.
+            r = client.post(f'/reset_password/{token}',
+                            data={'password': 'SomePass123',
+                                  'confirm': 'Different123'},
+                            follow_redirects=True)
+            check('mismatch flash rendered in-card',
+                  b'Passwords do not match' in r.data)
 
             # --- 5. Successful reset: login with NEW password works.
             epoch_before = sql(
