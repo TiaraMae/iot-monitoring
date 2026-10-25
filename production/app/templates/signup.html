@@ -56,11 +56,11 @@
         </div>
         <div class="form-group">
             <label for="password">Password</label>
-            <input type="password" id="password" name="password" required placeholder="At least 6 characters">
+            <input type="password" id="password" name="password" required minlength="8" maxlength="64" placeholder="At least 8 characters">
         </div>
         <div class="form-group">
             <label for="confirm">Confirm Password</label>
-            <input type="password" id="confirm" name="confirm" required placeholder="Re-enter password">
+            <input type="password" id="confirm" name="confirm" required minlength="8" maxlength="64" placeholder="Re-enter password">
         </div>
         <button type="submit" class="btn">Sign Up</button>
     </form>

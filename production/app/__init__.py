@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify, redirect, url_for, render_template, m
 from flask_login import LoginManager, login_required, current_user
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from app import config
 
@@ -40,6 +41,13 @@ def create_app():
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
     app.config["SESSION_COOKIE_SECURE"] = os.getenv("FLASK_ENV") == "production"
+
+    # Trust nginx's X-Forwarded-* headers (single proxy hop — x_for=1): external
+    # URLs (e.g. password-reset links in emails) get the real https scheme, and
+    # flask-limiter keys on the real client IP instead of nginx's. Waitress must
+    # stay unreachable except through nginx (deployment/windows firewall script).
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1,
+                            x_prefix=1)
 
     login_manager.init_app(app)
     login_manager.login_view = "auth.login"

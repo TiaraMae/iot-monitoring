@@ -9,6 +9,10 @@ Flow under test (SMTP mocked; broker untouched):
 2. POST /forgot_password answers uniformly for known AND unknown emails
    (no account enumeration), and when SMTP is "configured" a reset token is
    stored for the known user only and emailed.
+2b. ProxyFix: with X-Forwarded-Proto: https present (as nginx sends it), the
+   emailed reset link MUST be https — an http link reached a real user and
+   timed out on a network blocking port 80. Also: the reset form enforces
+   minlength client-side and carries the new "Create new password" copy.
 3. GET /reset_password/<token> renders for a valid token, rejects garbage.
 4. POST sets the new password, clears the token (single-use), bumps
    session_epoch (other sessions die), and the user can log in with the new
@@ -111,9 +115,36 @@ def main():
             reset_url = sent[0][1]
             check('reset url carries the token', token in reset_url)
 
+            # --- 2b. ProxyFix: behind nginx the request arrives as plain http,
+            # but with X-Forwarded-Proto present (nginx always sends it) the
+            # emailed link MUST be https. An http link reached a real user and
+            # ERR_CONNECTION_TIMED_OUT on a network blocking port 80.
+            sent.clear()
+            r3 = client.post('/forgot_password', data={'email': TEST_EMAIL},
+                             environ_overrides={
+                                 'HTTP_X_FORWARDED_PROTO': 'https',
+                                 'HTTP_X_FORWARDED_FOR': '203.0.113.9',
+                                 'HTTP_X_FORWARDED_HOST':
+                                     'iotmonitor.sgu.ac.id',
+                             })
+            check('forwarded forgot POST -> uniform redirect', r3.status_code == 302)
+            check('forwarded reset email link is https',
+                  len(sent) == 1 and sent[0][1].startswith('https://'))
+            # The forwarded request rotated the token — follow the fresh one.
+            token_row = sql(
+                "SELECT reset_token FROM users WHERE id = %s", (USER_ID,), fetch='one')
+            check('token rotated after second request',
+                  bool(token_row and token_row[0] and token_row[0] in sent[0][1]))
+            token = token_row[0]
+
             # --- 3. Reset page: valid token renders, garbage rejected.
             r = client.get(f'/reset_password/{token}')
             check('valid token page renders', r.status_code == 200)
+            check('reset form enforces minlength client-side',
+                  b'minlength="8"' in r.data and b'maxlength="64"' in r.data)
+            check('reset page copy updated',
+                  b'Create new password' in r.data
+                  and b'Must be 8-64' not in r.data)
             r = client.get('/reset_password/bogustoken')
             check('bogus token redirected away', r.status_code == 302)
 
