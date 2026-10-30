@@ -2098,8 +2098,8 @@ function buildMonthGroupsHTML(rows, monthKeyFn, colspan, cellHtmlFn, rowNoun) {
         if (!cur || cur.key !== mk) { cur = { key: mk, rows: [] }; groups.push(cur); }
         cur.rows.push(r);
     }
-    return groups.map((g, gi) => {
-        const collapsed = gi > 0;
+    return groups.map((g) => {
+        const collapsed = true;  // all months start closed; click a header to open it
         const header = `<tr class="month-group-header${collapsed ? ' collapsed' : ''}" data-month="${g.key}"><td colspan="${colspan}"><span class="month-chevron">▾</span>${monthKeyLabel(g.key)}<span class="month-count">(${g.rows.length} ${g.rows.length === 1 ? rowNoun : rowNoun + 's'})</span></td></tr>`;
         const body = g.rows.map(r =>
             `<tr class="month-row" data-month="${g.key}"${collapsed ? ' style="display:none"' : ''}>${cellHtmlFn(r)}</tr>`
