@@ -58,7 +58,7 @@ const char* ca_cert =
 // Release version: bump per release; MUST match the OTA .bin file name
 // (node_<FIRMWARE_VERSION>.bin). Incoming OTA triggers for the version the
 // node already runs are ignored (idempotent re-trigger safety).
-#define FIRMWARE_VERSION "20261030-4"
+#define FIRMWARE_VERSION "20261030-5"
 
 // Running/idle boundary for the current clamp, in amps. MUST stay equal to
 // the backend's config.RUNNING_CURRENT_THRESHOLD (app/config.py) — a
@@ -1150,6 +1150,11 @@ void checkConnection() {
     }
     return;
   }
+
+  // WiFi up — persist creds on the node's FIRST-EVER successful connect
+  // (boot-time or background): the -4 build only persisted in setup(), so a
+  // node whose first connect happened in the background never saved them.
+  persistNetConfigIfEmpty();
 
   // MQTT down
   if (!client.connected()) {
