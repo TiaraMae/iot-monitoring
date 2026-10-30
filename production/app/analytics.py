@@ -34,15 +34,29 @@ def _compute_motor_baseline_median(motor_readings, filter_threshold=None):
 
 
 def _compute_energy_kwh(readings, voltage):
-    """Compute total energy (kWh) from (time, current) readings."""
+    """Compute total energy (kWh) from readings. Uses indexed access so rows
+    may carry extra trailing columns (e.g. treturn/tsupply for avg delta-T)."""
     energy_ws = 0.0
     for i in range(1, len(readings)):
-        prev_time, prev_current = readings[i - 1]
-        curr_time, curr_current = readings[i]
+        prev_time, prev_current = readings[i - 1][0], readings[i - 1][1]
+        curr_time = readings[i][0]
         gap = (curr_time - prev_time).total_seconds()
         if gap <= 120 and prev_current >= config.RUNNING_CURRENT_THRESHOLD:
             energy_ws += prev_current * voltage * gap
     return round(energy_ws / 3_600_000, 4)
+
+
+def _compute_avg_delta_t(readings):
+    """Average signed running delta-T (warmup-skipped) from HVAC readings rows
+    of (time, icompressor, treturn, tsupply), or None."""
+    return models.compute_avg_running_delta_t(
+        [
+            {"time": r[0], "icompressor": r[1], "treturn": r[2], "tsupply": r[3]}
+            for r in readings
+        ],
+        config.RUNNING_CURRENT_THRESHOLD,
+        config.AVG_DELTA_T_WARMUP_MINUTES,
+    )
 
 
 @analytics_bp.route("/api/device/<int:appliance_id>/hvac_analytics")
@@ -99,6 +113,7 @@ def hvac_analytics(appliance_id):
             ],
             config.RUNNING_CURRENT_THRESHOLD,
             config.AVG_DELTA_T_WARMUP_MINUTES,
+            limit=365,  # 12 months — feeds the per-month dropdown groups in the dashboard
         )
         daily_averages = [
             {
@@ -648,7 +663,7 @@ def api_energy_summary():
                 """, (app_id, query_start, month_end))
             else:
                 cur.execute("""
-                    SELECT r.time, r.icompressor
+                    SELECT r.time, r.icompressor, r.treturn, r.tsupply
                     FROM hvac_readings r
                     JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
                     WHERE sn.appliance_id = %s AND r.time >= %s AND r.time < %s
@@ -656,11 +671,13 @@ def api_energy_summary():
                 """, (app_id, query_start, month_end))
             readings = cur.fetchall()
             energy = _compute_energy_kwh(readings, voltage)
+            avg_delta_t = _compute_avg_delta_t(readings) if "Dryer" not in app_type else None
             result.append({
                 "id": app_id,
                 "name": app_name,
                 "type": app_type,
                 "energy_kwh": energy,
+                "avg_delta_t": avg_delta_t,
             })
             by_type[app_type] += energy
             total_kwh += energy
@@ -712,16 +729,16 @@ def api_energy_summary_export():
         header_fill = PatternFill(start_color="2563EB", end_color="2563EB", fill_type="solid")
         header_font = Font(color="FFFFFF", bold=True)
 
-        ws.merge_cells("A1:E1")
+        ws.merge_cells("A1:F1")
         ws["A1"] = "Monthly Energy Consumption Summary"
         ws["A1"].font = Font(size=14, bold=True)
-        ws.merge_cells("A2:E2")
+        ws.merge_cells("A2:F2")
         ws["A2"] = f"Month: {month_str}"
         ws["A2"].font = Font(size=11, bold=True)
-        ws.merge_cells("A3:E3")
+        ws.merge_cells("A3:F3")
         ws["A3"] = f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
-        headers = ["Appliance Type", "Appliance Name", "Energy Consumption (kWh)"]
+        headers = ["Appliance Type", "Appliance Name", "Energy Consumption (kWh)", "Avg Delta-T (°C)"]
         row_idx = 5
         for col, header in enumerate(headers, start=1):
             cell = ws.cell(row=row_idx, column=col, value=header)
@@ -743,7 +760,7 @@ def api_energy_summary_export():
                 """, (app_id, query_start, month_end))
             else:
                 cur.execute("""
-                    SELECT r.time, r.icompressor
+                    SELECT r.time, r.icompressor, r.treturn, r.tsupply
                     FROM hvac_readings r
                     JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
                     WHERE sn.appliance_id = %s AND r.time >= %s AND r.time < %s
@@ -751,10 +768,12 @@ def api_energy_summary_export():
                 """, (app_id, query_start, month_end))
             readings = cur.fetchall()
             energy = _compute_energy_kwh(readings, voltage)
+            avg_delta_t = _compute_avg_delta_t(readings) if "Dryer" not in app_type else None
             row_idx += 1
             ws.cell(row=row_idx, column=1, value=app_type)
             ws.cell(row=row_idx, column=2, value=app_name)
             ws.cell(row=row_idx, column=3, value=energy)
+            ws.cell(row=row_idx, column=4, value=avg_delta_t if avg_delta_t is not None else "--")
             total_kwh += energy
 
         row_idx += 1
@@ -763,7 +782,7 @@ def api_energy_summary_export():
         ws.cell(row=row_idx, column=3, value=round(total_kwh, 4))
         ws.cell(row=row_idx, column=3).font = Font(bold=True)
 
-        for col_idx in range(1, 4):
+        for col_idx in range(1, 5):
             max_length = 0
             col_letter = get_column_letter(col_idx)
             for r in range(1, ws.max_row + 1):

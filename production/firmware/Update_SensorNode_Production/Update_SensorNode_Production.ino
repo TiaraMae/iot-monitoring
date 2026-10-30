@@ -58,7 +58,7 @@ const char* ca_cert =
 // Release version: bump per release; MUST match the OTA .bin file name
 // (node_<FIRMWARE_VERSION>.bin). Incoming OTA triggers for the version the
 // node already runs are ignored (idempotent re-trigger safety).
-#define FIRMWARE_VERSION "20261018-1"
+#define FIRMWARE_VERSION "20261030-1"
 
 // Running/idle boundary for the current clamp, in amps. MUST stay equal to
 // the backend's config.RUNNING_CURRENT_THRESHOLD (app/config.py) — a
@@ -573,6 +573,10 @@ void setupWifi() {
   WiFi.mode(WIFI_OFF);
   delay(100);
   WiFi.mode(WIFI_STA);
+  // Modem sleep OFF: with the Arduino-core default (sleep on) the C3 randomly
+  // misses AP beacons and drops off the campus WiFi several times a day, which
+  // used to trip the connection-down buzzer (2026-10-30 hardening).
+  WiFi.setSleep(false);
   WiFi.setTxPower(WIFI_POWER_8_5dBm);
   WiFi.begin(netSsid.length() > 0 ? netSsid.c_str() : WIFI_SSID,
              netPass.length() > 0 ? netPass.c_str() : WIFI_PASS);
@@ -1049,12 +1053,15 @@ void callback(String &topic, String &payload) {
 }
 
 static unsigned long lastConnBuzzer = 0;
+static unsigned long connLostAt = 0;  // 0 = currently connected
 
 void checkConnection() {
   unsigned long now = millis();
 
   // --- LED STATE MACHINE ---
-  // Priority: calibration > running > connection down > idle
+  // Priority: calibration > connection down > running > idle. Connection-down
+  // outranks "running solid ON" so a drop during a compressor run is VISIBLE
+  // on the LED (with the buzzer gated, the LED is the flap diagnosis path).
   if (calibState == CALIBBASELINEWAIT || calibState == CALIBRUNNING) {
     // Calibration: slow blink (1000ms)
     if (now - lastLedBlink >= 1000) {
@@ -1062,9 +1069,6 @@ void checkConnection() {
       ledState = !ledState;
       digitalWrite(PINLED, ledState);
     }
-  } else if (isRunningByCurrent(lastAvgCurrent)) {
-    // Running: solid ON
-    digitalWrite(PINLED, HIGH);
   } else if (WiFi.status() != WL_CONNECTED) {
     // WiFi down: fast blink (200ms)
     if (now - lastLedBlink >= 200) {
@@ -1079,6 +1083,9 @@ void checkConnection() {
       ledState = !ledState;
       digitalWrite(PINLED, ledState);
     }
+  } else if (isRunningByCurrent(lastAvgCurrent)) {
+    // Running: solid ON
+    digitalWrite(PINLED, HIGH);
   } else {
     // Idle: brief blink every 10s
     if (now - lastIdleBlink >= 10000) {
@@ -1089,10 +1096,21 @@ void checkConnection() {
     }
   }
 
-  // --- CONNECTION DOWN BUZZER (every 10s; muted while calibrating) ---
-  if ((WiFi.status() != WL_CONNECTED || !client.connected()) &&
-      (calibState == CALIBIDLE)) {
-    if (now - lastConnBuzzer >= 10000) {
+  // --- CONNECTION DOWN BUZZER (gated; muted while calibrating) ---
+  // Brief self-healing flaps (WiFi/MQTT drops for a few seconds that recover
+  // on their own via the retry loops below) stay SILENT — they were the
+  // "random beeps" (~5-6/day, mostly mid-run when sampling blocks the loop).
+  // Only a SUSTAINED outage beeps: first at 60 s, then every 5 min while the
+  // outage continues. The LED fast/medium blink still shows drops instantly.
+  bool connOk = (WiFi.status() == WL_CONNECTED && client.connected());
+  if (connOk) {
+    connLostAt = 0;
+    lastConnBuzzer = 0;
+  } else {
+    if (connLostAt == 0) connLostAt = now;
+    if (calibState == CALIBIDLE &&
+        now - connLostAt >= 60000 &&
+        (lastConnBuzzer == 0 || now - lastConnBuzzer >= 300000)) {
       lastConnBuzzer = now;
       beepShort(1, 120, 0);
     }
@@ -1107,6 +1125,7 @@ void checkConnection() {
       WiFi.mode(WIFI_OFF);
       delay(100);
       WiFi.mode(WIFI_STA);
+      WiFi.setSleep(false);  // keep modem sleep off across reconnects (see setupWifi)
       WiFi.setTxPower(WIFI_POWER_8_5dBm);
       WiFi.begin(netSsid.length() > 0 ? netSsid.c_str() : WIFI_SSID,
              netPass.length() > 0 ? netPass.c_str() : WIFI_PASS);
@@ -1422,7 +1441,9 @@ void setup() {
 
   client.begin(mqtt_server, mqtt_port, espClient);
   client.onMessage(callback);
-  client.setKeepAlive(15);
+  // 60 s keepalive: 15 s was too aggressive for TLS over campus WiFi — brief
+  // latency spikes flipped client.connected() false and caused buzzer flaps.
+  client.setKeepAlive(60);
 
   Serial.println("System Ready.");
 }
