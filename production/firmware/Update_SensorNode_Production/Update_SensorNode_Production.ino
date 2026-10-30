@@ -58,7 +58,7 @@ const char* ca_cert =
 // Release version: bump per release; MUST match the OTA .bin file name
 // (node_<FIRMWARE_VERSION>.bin). Incoming OTA triggers for the version the
 // node already runs are ignored (idempotent re-trigger safety).
-#define FIRMWARE_VERSION "20261030-1"
+#define FIRMWARE_VERSION "20261030-4"
 
 // Running/idle boundary for the current clamp, in amps. MUST stay equal to
 // the backend's config.RUNNING_CURRENT_THRESHOLD (app/config.py) — a
@@ -174,6 +174,24 @@ void loadNetConfig() {
   if (netMqttUser.length() > 0) {
     Serial.println("NETCFG: MQTT creds loaded from NVS");
   }
+}
+
+// FIRST-CONNECT AUTO-PROVISION (2026-10-31): a node that has NO creds in NVS
+// persists the credentials it just connected with (the compiled-in secrets.h
+// fallback) into its own flash. From then on the node owns its WiFi config
+// and every future OTA binary is code-only — the standard per-site workflow
+// is "flash each node once with its own secrets.h; OTA forever after" without
+// a manual setwifi: step. Never overwrites existing NVS creds (setwifi: still
+// wins for re-provisioning).
+void persistNetConfigIfEmpty() {
+  if (netSsid.length() > 0) return;  // already provisioned — never overwrite
+  prefs.begin("netcfg", false);
+  prefs.putString("ssid", WIFI_SSID);
+  prefs.putString("pass", WIFI_PASS);
+  prefs.end();
+  netSsid = WIFI_SSID;
+  netPass = WIFI_PASS;
+  Serial.println("NETCFG: first-connect auto-provisioned WiFi creds to NVS");
 }
 
 // =========================
@@ -1407,6 +1425,9 @@ void setup() {
 
   // Connect WiFi first so backend sees us quickly
   setupWifi();
+  // First successful connect with no NVS creds yet → save the credentials
+  // this node was flashed with, so future OTA binaries are code-only.
+  if (WiFi.status() == WL_CONNECTED) persistNetConfigIfEmpty();
 
   ds1.begin();
   ds2.begin();
