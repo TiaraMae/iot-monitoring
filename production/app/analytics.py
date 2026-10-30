@@ -738,7 +738,7 @@ def api_energy_summary_export():
         ws.merge_cells("A3:F3")
         ws["A3"] = f"Export Date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
 
-        headers = ["Appliance Type", "Appliance Name", "Energy Consumption (kWh)", "Avg Delta-T (°C)"]
+        headers = ["Appliance Type", "Appliance Name", "Avg Delta-T (°C)", "Energy Consumption (kWh)"]
         row_idx = 5
         for col, header in enumerate(headers, start=1):
             cell = ws.cell(row=row_idx, column=col, value=header)
@@ -772,15 +772,15 @@ def api_energy_summary_export():
             row_idx += 1
             ws.cell(row=row_idx, column=1, value=app_type)
             ws.cell(row=row_idx, column=2, value=app_name)
-            ws.cell(row=row_idx, column=3, value=energy)
-            ws.cell(row=row_idx, column=4, value=avg_delta_t if avg_delta_t is not None else "--")
+            ws.cell(row=row_idx, column=3, value=avg_delta_t if avg_delta_t is not None else "--")
+            ws.cell(row=row_idx, column=4, value=energy)
             total_kwh += energy
 
         row_idx += 1
         ws.cell(row=row_idx, column=1, value="Total")
         ws.cell(row=row_idx, column=1).font = Font(bold=True)
-        ws.cell(row=row_idx, column=3, value=round(total_kwh, 4))
-        ws.cell(row=row_idx, column=3).font = Font(bold=True)
+        ws.cell(row=row_idx, column=4, value=round(total_kwh, 4))
+        ws.cell(row=row_idx, column=4).font = Font(bold=True)
 
         for col_idx in range(1, 5):
             max_length = 0

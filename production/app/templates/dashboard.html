@@ -259,8 +259,6 @@
             font-size: 0.875rem;
         }
         .energy-appliance-name { display: flex; align-items: center; gap: 0.5rem; }
-        .energy-appliance-values { display: flex; align-items: baseline; gap: 0.75rem; }
-        .energy-appliance-delta { color: var(--text-muted); font-size: 0.8rem; }
         .energy-dot {
             width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0;
         }
@@ -1207,7 +1205,7 @@ async function loadEnergySummary(month) {
             listEl.innerHTML = apps.map((a, i) => `
                 <div class="energy-appliance-item">
                     <span class="energy-appliance-name"><span class="energy-dot" style="background:${CHART_COLORS[i % CHART_COLORS.length]}"></span>${escapeHtml(a.name)}</span>
-                    <span class="energy-appliance-values">${a.avg_delta_t != null ? `<span class="energy-appliance-delta">ΔT ${a.avg_delta_t.toFixed(2)} °C</span>` : ''}<span style="font-weight:600;">${(a.energy_kwh != null ? a.energy_kwh.toFixed(2) : '--')} kWh</span></span>
+                    <span style="font-weight:600;">${(a.energy_kwh != null ? a.energy_kwh.toFixed(2) : '--')} kWh</span>
                 </div>
             `).join('');
         }
@@ -2091,7 +2089,8 @@ function monthKeyLabel(key) {  // 'YYYY-MM' -> 'Month YYYY' (day=2 avoids TZ mon
 // Groups newest-first rows into collapsible per-month sections. Each section is
 // a month header row followed by that month's data rows (newest month expanded
 // by default). cellHtmlFn(row) returns the row's <td>…</td> content only.
-function buildMonthGroupsHTML(rows, monthKeyFn, colspan, cellHtmlFn) {
+// rowNoun: 'day' for HVAC daily averages, 'cycle' for dryer cycles.
+function buildMonthGroupsHTML(rows, monthKeyFn, colspan, cellHtmlFn, rowNoun) {
     const groups = [];
     let cur = null;
     for (const r of rows) {
@@ -2101,7 +2100,7 @@ function buildMonthGroupsHTML(rows, monthKeyFn, colspan, cellHtmlFn) {
     }
     return groups.map((g, gi) => {
         const collapsed = gi > 0;
-        const header = `<tr class="month-group-header${collapsed ? ' collapsed' : ''}" data-month="${g.key}"><td colspan="${colspan}"><span class="month-chevron">▾</span>${monthKeyLabel(g.key)}<span class="month-count">(${g.rows.length} ${g.rows.length === 1 ? 'row' : 'rows'})</span></td></tr>`;
+        const header = `<tr class="month-group-header${collapsed ? ' collapsed' : ''}" data-month="${g.key}"><td colspan="${colspan}"><span class="month-chevron">▾</span>${monthKeyLabel(g.key)}<span class="month-count">(${g.rows.length} ${g.rows.length === 1 ? rowNoun : rowNoun + 's'})</span></td></tr>`;
         const body = g.rows.map(r =>
             `<tr class="month-row" data-month="${g.key}"${collapsed ? ' style="display:none"' : ''}>${cellHtmlFn(r)}</tr>`
         ).join('');
@@ -2151,7 +2150,7 @@ async function loadAnalyticsTable() {
                     <td class="numeric">${avgSupply != null ? avgSupply.toFixed(2) + ' °C' : '--'}</td>
                     <td class="numeric">${delta !== '--' ? delta + ' °C' : '--'}</td>
                     <td class="numeric">${r.daily_energy_kwh != null ? r.daily_energy_kwh.toFixed(4) + ' kWh' : '--'}</td>`;
-            });
+            }, 'day');
         } else {
             title.textContent = 'Dryer Cycles';
             thead.innerHTML = `
@@ -2171,7 +2170,7 @@ async function loadAnalyticsTable() {
             tbody.innerHTML = buildMonthGroupsHTML(rows, cycleMonthKey, 4, r => `<td>${fmtTime(r.start_time)}</td>
                 <td class="numeric">${r.duration_minutes != null ? r.duration_minutes.toFixed(1) : '--'}</td>
                 <td class="numeric">${r.max_temp != null ? r.max_temp.toFixed(1) + ' °C' : '--'}</td>
-                <td class="numeric">${r.energy_kwh != null ? r.energy_kwh.toFixed(4) + ' kWh' : '--'}</td>`);
+                <td class="numeric">${r.energy_kwh != null ? r.energy_kwh.toFixed(4) + ' kWh' : '--'}</td>`, 'cycle');
         }
     } catch (e) {
         tbody.innerHTML = '<tr><td colspan="5" class="status-msg error">' + e.message + '</td></tr>';

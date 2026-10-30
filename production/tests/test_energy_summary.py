@@ -164,16 +164,17 @@ def main():
             headers = [c.value for c in ws[5]][:4]
             check('export: 4-column header',
                   headers == ["Appliance Type", "Appliance Name",
-                              "Energy Consumption (kWh)", "Avg Delta-T (°C)"])
+                              "Avg Delta-T (°C)", "Energy Consumption (kWh)"])
             rows = [list(r) for r in ws.iter_rows(min_row=6, values_only=True) if r[0]]
             by_name = {r[1]: r for r in rows if r[1]}
             hvac_row = by_name.get('Energy Test AC', [])
             dry_row = by_name.get('Energy Test Dryer', [])
-            check('export: hvac delta-t cell matches JSON', len(hvac_row) >= 4 and hvac_row[3] == 10.0)
-            check('export: dryer delta-t cell is "--"', len(dry_row) >= 4 and dry_row[3] == "--")
+            check('export: hvac delta-t cell matches JSON', len(hvac_row) >= 4 and hvac_row[2] == 10.0)
+            check('export: hvac energy cell present', len(hvac_row) >= 4 and hvac_row[3] is not None)
+            check('export: dryer delta-t cell is "--"', len(dry_row) >= 4 and dry_row[2] == "--")
             total_rows = [r for r in rows if r[0] == 'Total']
             check('export: total row keeps kWh total',
-                  len(total_rows) == 1 and total_rows[0][2] is not None)
+                  len(total_rows) == 1 and total_rows[0][3] is not None)
 
             if failures:
                 print(f'\n{len(failures)} check(s) FAILED')
