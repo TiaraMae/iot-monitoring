@@ -148,17 +148,63 @@ def main():
             try:
                 alerts_mod.send_discord_alert(
                     APP_ID, 'fault_hvac_low_delta_t', 'async test',
-                    value=1.0, threshold=8.0, severity='warning')
+                    value=9.9, threshold=10.0, severity='warning',
+                    delay_minutes=4)
                 check('no synchronous HTTP POST from send_discord_alert',
                       len(posted) == 0)
                 try:
                     item = alerts_mod._discord_queue.get_nowait()
                     alerts_mod._discord_queue.task_done()
+                    embed = item[1]
+                    flds = {f['name']: f['value'] for f in embed.get('fields', [])}
                     check('embed enqueued for the background worker',
                           item[0] == WEBHOOK
-                          and 'async test' in item[1].get('description', ''))
-                except Exception:
+                          and embed.get('title') ==
+                          'WARNING: Cooling Performance Below Threshold')
+                    check('HVAC embed footer is "IoT Monitoring System"',
+                          embed.get('footer', {}).get('text') == 'IoT Monitoring System')
+                    check('HVAC embed shows current Delta-T, threshold, duration',
+                          flds.get('Current Delta-T') == '9.9 °C'
+                          and flds.get('Minimum Threshold') == '10.0 °C'
+                          and flds.get('Duration') == '4 minutes')
+                    check('HVAC embed has the recommended action',
+                          flds.get('Recommended Action') ==
+                          'Inspect the air filter, refrigerant charge, and compressor.')
+                    text = (embed.get('title', '') + embed.get('description', '')
+                            + ' '.join(flds.values()))
+                    check('HVAC embed has no Cause / technician wording',
+                          'Cause' not in text and 'technician' not in text)
+                except Exception as e:
                     check('embed enqueued for the background worker', False)
+                    print('   (embed checks aborted: %r)' % (e,))
+
+                # Singular duration + missing-value fallback to the generic path.
+                alerts_mod.send_discord_alert(
+                    APP_ID, 'fault_hvac_low_delta_t', 'x', value=5.0,
+                    threshold=8.0, delay_minutes=1)
+                e1 = alerts_mod._discord_queue.get_nowait()[1]
+                alerts_mod._discord_queue.task_done()
+                check('duration singular: "1 minute"',
+                      any(f['value'] == '1 minute' for f in e1.get('fields', [])))
+                alerts_mod.send_discord_alert(
+                    APP_ID, 'fault_hvac_low_delta_t', 'fallback msg')
+                e2 = alerts_mod._discord_queue.get_nowait()[1]
+                alerts_mod._discord_queue.task_done()
+                check('HVAC without value falls back to generic fault embed',
+                      'fallback msg' in e2.get('description', '')
+                      and 'fields' not in e2
+                      and e2['footer']['text'] == 'IoT Monitoring System')
+
+                # Dryer embed unchanged apart from the shared footer.
+                alerts_mod.send_discord_alert(
+                    APP_ID, 'fault_dryer_belt_snapped', 'dryer msg',
+                    severity='critical')
+                e3 = alerts_mod._discord_queue.get_nowait()[1]
+                alerts_mod._discord_queue.task_done()
+                check('dryer embed keeps structure, new footer',
+                      e3['title'] == 'CRITICAL: Belt Snapped'
+                      and '**Cause:**' in e3['description']
+                      and e3['footer']['text'] == 'IoT Monitoring System')
             finally:
                 alerts_mod.requests.post = real_post
                 alerts_mod._ensure_discord_worker = real_ensure

@@ -46,12 +46,14 @@ FAULT_DISCORD_MAP = {
         "action": "Clean lint filter, inspect exhaust duct, and check exterior vent.",
     },
     "fault_hvac_low_delta_t": {
-        "title": "HVAC Delta-T Below Limit",
-        "description": "Temperature split across the evaporator coil has stayed below the configured minimum value while the compressor is running.",
-        "cause": "Low refrigerant, dirty filter, or compressor issue.",
-        "action": "Check air filter and schedule HVAC technician if alert persists.",
+        "title": "Cooling Performance Below Threshold",
+        "description": "Delta-T has stayed below the configured minimum threshold while the compressor is running.",
+        "cause": "Dirty filter, low refrigerant charge, or compressor issue.",
+        "action": "Inspect the air filter, refrigerant charge, and compressor.",
     },
 }
+
+EMBED_FOOTER = "IoT Monitoring System"
 
 
 def _get_appliance_alert_gates(appliance_id, cur):
@@ -123,7 +125,12 @@ def _ensure_discord_worker():
             _discord_worker.start()
 
 
-def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=None, severity="warning"):
+def _minutes_text(minutes):
+    return "1 minute" if minutes == 1 else f"{minutes} minutes"
+
+
+def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=None,
+                       severity="warning", delay_minutes=None):
     try:
         webhook_url = models.get_user_webhook(appliance_id)
         if not webhook_url:
@@ -139,7 +146,29 @@ def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=
             embed_color = 0xF59E0B
             severity_prefix = "WARNING: "
 
-        if fault_meta:
+        if (alert_type == "fault_hvac_low_delta_t" and fault_meta
+                and value is not None and threshold is not None):
+            # Concise technician-facing layout: live Delta-T vs the saved
+            # minimum threshold, how long, and what to inspect.
+            fields = [
+                {"name": "Current Delta-T", "value": f"{float(value):.1f} °C", "inline": True},
+                {"name": "Minimum Threshold", "value": f"{float(threshold):.1f} °C", "inline": True},
+            ]
+            if delay_minutes is not None:
+                fields.append({"name": "Duration", "value": _minutes_text(delay_minutes), "inline": True})
+            fields.append({"name": "Recommended Action", "value": fault_meta["action"], "inline": False})
+            embed = {
+                "title": f"{severity_prefix}{fault_meta['title']}",
+                "description": (
+                    f"**{app_name or f'ID {appliance_id}'}** is operating below its "
+                    f"minimum cooling threshold."
+                ),
+                "color": embed_color,
+                "fields": fields,
+                "timestamp": datetime.now(config.TIMEZONE).isoformat(),
+                "footer": {"text": EMBED_FOOTER},
+            }
+        elif fault_meta:
             embed = {
                 "title": f"{severity_prefix}{fault_meta['title']}",
                 "description": (
@@ -150,7 +179,7 @@ def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=
                 ),
                 "color": embed_color,
                 "timestamp": datetime.now(config.TIMEZONE).isoformat(),
-                "footer": {"text": "IoT Monitoring & Predictive Maintenance"},
+                "footer": {"text": EMBED_FOOTER},
             }
         else:
             embed = {
@@ -163,7 +192,7 @@ def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=
                     {"name": "Threshold", "value": str(threshold) if threshold is not None else "N/A", "inline": True},
                 ],
                 "timestamp": datetime.now(config.TIMEZONE).isoformat(),
-                "footer": {"text": "IoT Monitoring & Predictive Maintenance"},
+                "footer": {"text": EMBED_FOOTER},
             }
 
         # Hand the embed to the background worker (never POST from the MQTT
@@ -289,6 +318,7 @@ def check_hvac_delta_t_alert(appliance_id, reading_data):
                     delta_t,
                     delta_t_lcl,
                     "warning",
+                    delay_minutes=delay_minutes,
                 )
             except Exception as e:
                 print(f"Discord delivery failed for appliance {appliance_id}: {e}")

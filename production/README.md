@@ -129,7 +129,7 @@ Single-page app served at `/dashboard` with a fixed sidebar and top navbar.
   - Live/history chart modes and a **Running only / All data** toggle — Running only shows running data only (`current ≥ 0.25 A`); an empty-state hint explains when no running data exists. History Range covers the **entire selected window**: ranges wider than the ~1080-point chart cap are evenly sampled (every Nth real reading) instead of truncating to the newest hours.
   - HVAC: Return & Supply chart, Delta-T chart, Compressor Current chart. Dryer: Exhaust Temperature chart, Motor Current chart. X-axis ticks render actual reading times in local time.
   - Inline SPC baseline editor (HVAC: delta-T LCL + alert delay only — delta-T is the sole HVAC alert trigger; dryer: exhaust temp, RH, current, pressure), with last-updated timestamp.
-  - Alert list with acknowledge/resolve actions and maintenance history.
+  - Alert list with a resolve action and maintenance history.
   - Per-device Excel export with date-stamped filenames (`MMDDYYYY-HHMMSS`, `_filtered`/`_unfiltered` suffix).
   - Calibration-required / calibrating / baseline-not-configured action bars.
 - **Add Device view** — scans for unpaired nodes, MAC dropdown, appliance type selector with HVAC technology mapping, current-sensor selector, and a dynamic wiring guide.
