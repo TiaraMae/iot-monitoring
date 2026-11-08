@@ -46,7 +46,7 @@ FAULT_DISCORD_MAP = {
         "action": "Clean lint filter, inspect exhaust duct, and check exterior vent.",
     },
     "fault_hvac_low_delta_t": {
-        "title": "Cooling Performance Below Threshold",
+        "title": "Low Cooling Performance",
         "description": "Delta-T has stayed below the configured minimum threshold while the compressor is running.",
         "cause": "Dirty filter, low refrigerant charge, or compressor issue.",
         "action": "Inspect the air filter, refrigerant charge, and compressor.",
@@ -157,12 +157,12 @@ def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=
             if delay_minutes is not None:
                 fields.append({"name": "Duration", "value": _minutes_text(delay_minutes), "inline": True})
             fields.append({"name": "Recommended Action", "value": fault_meta["action"], "inline": False})
+            # Appliance name leads the title ("Room AC: Low Cooling Performance");
+            # capped well under Discord's 256-char title limit so an unusually
+            # long name can never make Discord reject (and lose) the alert.
+            display_name = (app_name or f"ID {appliance_id}")[:200]
             embed = {
-                "title": f"{severity_prefix}{fault_meta['title']}",
-                "description": (
-                    f"**{app_name or f'ID {appliance_id}'}** is operating below its "
-                    f"minimum cooling threshold."
-                ),
+                "title": f"{display_name}: {fault_meta['title']}",
                 "color": embed_color,
                 "fields": fields,
                 "timestamp": datetime.now(config.TIMEZONE).isoformat(),

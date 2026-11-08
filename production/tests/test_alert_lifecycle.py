@@ -160,7 +160,9 @@ def main():
                     check('embed enqueued for the background worker',
                           item[0] == WEBHOOK
                           and embed.get('title') ==
-                          'WARNING: Cooling Performance Below Threshold')
+                          'Lifecycle AC: Low Cooling Performance')
+                    check('HVAC embed has no description line',
+                          'description' not in embed)
                     check('HVAC embed footer is "IoT Monitoring System"',
                           embed.get('footer', {}).get('text') == 'IoT Monitoring System')
                     check('HVAC embed shows current Delta-T, threshold, duration',
@@ -205,6 +207,22 @@ def main():
                       e3['title'] == 'CRITICAL: Belt Snapped'
                       and '**Cause:**' in e3['description']
                       and e3['footer']['text'] == 'IoT Monitoring System')
+
+                # An over-long appliance name must not push the title past
+                # Discord's 256-char limit (the whole embed would be rejected).
+                real_name = alerts_mod.models.get_appliance_name
+                alerts_mod.models.get_appliance_name = lambda _id: 'X' * 400
+                try:
+                    alerts_mod.send_discord_alert(
+                        APP_ID, 'fault_hvac_low_delta_t', 'x', value=5.0,
+                        threshold=8.0, delay_minutes=4)
+                    e4 = alerts_mod._discord_queue.get_nowait()[1]
+                    alerts_mod._discord_queue.task_done()
+                    check('long appliance name keeps title <= 256 chars',
+                          len(e4['title']) <= 256
+                          and e4['title'].endswith(': Low Cooling Performance'))
+                finally:
+                    alerts_mod.models.get_appliance_name = real_name
             finally:
                 alerts_mod.requests.post = real_post
                 alerts_mod._ensure_discord_worker = real_ensure
