@@ -8,8 +8,12 @@ import psycopg2.pool
 from app import config
 
 
+# ThreadedConnectionPool, NOT SimpleConnectionPool: the pool is shared by the
+# Waitress worker threads, the paho MQTT network thread and background workers.
+# SimpleConnectionPool's getconn/putconn bookkeeping is unlocked, so concurrent
+# checkouts can corrupt it (duplicate keys, lost slots -> "pool exhausted").
 try:
-    db_pool = psycopg2.pool.SimpleConnectionPool(
+    db_pool = psycopg2.pool.ThreadedConnectionPool(
         1,
         10,
         host=config.DB_HOST,
