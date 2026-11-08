@@ -87,6 +87,39 @@ def main():
         check("on_disconnect silent on clean close (rc=0)",
               not pr.called)
 
+    # --- 5. connection log lines carry a WIB timestamp, and the reconnect
+    # line reports how long the backend was offline (outage correlation).
+    import re
+    from datetime import datetime, timedelta
+    stamp = re.compile(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] ")
+    t0 = datetime(2026, 11, 8, 21, 0, 0)
+    mq._lost_at = None
+    fake_client = mock.MagicMock()
+    fake_client._client_id = b"ProductionBackend"
+    with mock.patch("builtins.print") as pr, \
+         mock.patch.object(mq.config, "now_wib", return_value=t0):
+        mq.on_disconnect(mq.mqtt_client, None, None, 7)
+        line = str(pr.call_args_list[0].args[0])
+        check("connection-lost line is timestamped", bool(stamp.match(line)))
+        check("timestamp is WIB wall clock", line.startswith("[2026-11-08 21:00:00]"))
+        # a second drop before reconnecting must not move the outage start
+        mq.config.now_wib.return_value = t0 + timedelta(seconds=30)
+        mq.on_disconnect(mq.mqtt_client, None, None, 7)
+        check("outage start kept on repeated drop", mq._lost_at == t0)
+    with mock.patch("builtins.print") as pr, \
+         mock.patch.object(mq.config, "now_wib",
+                           return_value=t0 + timedelta(seconds=185)):
+        mq.on_connect(fake_client, None, None, 0)
+        line = str(pr.call_args_list[0].args[0])
+        check("reconnect line is timestamped", bool(stamp.match(line)))
+        check("reconnect line reports offline duration",
+              "after 185s offline" in line)
+        check("outage marker cleared after reconnect", mq._lost_at is None)
+        pr.reset_mock()
+        mq.on_connect(fake_client, None, None, 0)
+        check("fresh connect has no offline suffix",
+              "offline" not in str(pr.call_args_list[0].args[0]))
+
     if failures:
         print(f'\n{len(failures)} check(s) FAILED')
         sys.exit(1)

@@ -52,9 +52,27 @@ def send_node_command(mac, command):
     print(f"Backend -> Node {mac}: {command}")
 
 
+# When the broker connection was last lost (None while connected). Lets the
+# reconnect line state how long the backend was offline, which separates
+# brief broker-side drops from multi-minute network outages in the log.
+_lost_at = None
+
+
+def _ts():
+    """WIB wall-clock stamp for connection log lines (outage correlation)."""
+    return config.now_wib().strftime("%Y-%m-%d %H:%M:%S")
+
+
 def on_connect(client, userdata, flags, rc, properties=None):
+    global _lost_at
     if rc == 0:
-        print(f"MQTT Connected Successfully! ID: {client._client_id}")
+        offline = ""
+        if _lost_at is not None:
+            secs = int((config.now_wib() - _lost_at).total_seconds())
+            offline = f" after {secs}s offline"
+            _lost_at = None
+        print(f"[{_ts()}] MQTT Connected Successfully! ID: "
+              f"{client._client_id}{offline}")
         # QoS 1 so the broker can queue for the durable backend session
         # (clean_start=False, expiry 3600) while the backend is down —
         # delivery QoS is min(publish, subscribe), so nodes must also
@@ -62,15 +80,18 @@ def on_connect(client, userdata, flags, rc, properties=None):
         client.subscribe(f"{config.MQTT_TOPIC_PREFIX}/+/events", qos=1)
         client.subscribe(f"{config.MQTT_TOPIC_PREFIX}/+/telemetry", qos=1)
     else:
-        print(f"MQTT Connection Failed with Code {rc}")
+        print(f"[{_ts()}] MQTT Connection Failed with Code {rc}")
 
 
 def on_disconnect(client, userdata, disconnect_flags, rc, properties=None):
     # rc != 0 means the drop was NOT a clean client disconnect — the broker
     # connection was lost. paho's network loop reconnects automatically; this
     # log makes the silent-deaf-window visible in service.out.log.
+    global _lost_at
     if rc != 0:
-        print(f"MQTT connection lost (rc={rc}); auto-reconnecting...")
+        if _lost_at is None:
+            _lost_at = config.now_wib()
+        print(f"[{_ts()}] MQTT connection lost (rc={rc}); auto-reconnecting...")
 
 
 def on_message(client, userdata, msg):
@@ -121,10 +142,10 @@ def _connect_retry_loop():
     while not mqtt_client.is_connected():
         try:
             _connect_once()
-            print("MQTT connected (background retry).")
+            print(f"[{_ts()}] MQTT connected (background retry).")
             return
         except Exception as e:
-            print(f"MQTT connection error: {e} — retrying in "
+            print(f"[{_ts()}] MQTT connection error: {e} — retrying in "
                   f"{CONNECT_RETRY_SECONDS}s.")
         time.sleep(CONNECT_RETRY_SECONDS)
 
