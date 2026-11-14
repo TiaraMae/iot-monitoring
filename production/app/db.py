@@ -212,6 +212,10 @@ def _run_startup_migrations():
             ("appliances", "updated_at", "TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()"),
             ("sensor_nodes", "last_seen", "TIMESTAMP WITHOUT TIME ZONE"),
             ("dryer_readings", "abs_pressure", "REAL"),
+            # Rows recorded while a calibration session had the offsets
+            # zeroed (raw probes): kept for charts/energy, excluded from the
+            # temperature averages. Old rows stay FALSE (not classifiable).
+            ("hvac_readings", "during_calibration", "BOOLEAN DEFAULT FALSE"),
             ("alerts", "severity", "TEXT DEFAULT 'warning'"),
             ("alerts", "acknowledged", "BOOLEAN DEFAULT FALSE"),
             ("sensor_events", "detail", "TEXT"),

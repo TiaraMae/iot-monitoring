@@ -1,5 +1,7 @@
 """Database helper functions."""
 
+import hashlib
+import time as _time
 from datetime import timedelta
 
 from app import config
@@ -92,7 +94,16 @@ def set_reset_token(user_id, token, expires_at):
         release_conn(conn)
 
 
+def hash_reset_token(token):
+    """users.reset_token stores sha256(token), never the token itself: a
+    leaked DB row/backup cannot be turned into a working reset link. The raw
+    token only ever exists in the emailed (or server-logged) link."""
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+
+
 def get_user_by_reset_token(token):
+    if not token:
+        return None
     conn = get_conn()
     if not conn:
         return None
@@ -101,7 +112,7 @@ def get_user_by_reset_token(token):
         cur.execute("""
             SELECT id, email, name FROM users
             WHERE reset_token = %s AND reset_token_expires > NOW()
-        """, (token,))
+        """, (hash_reset_token(token),))
         return _to_dict(cur, cur.fetchone())
     finally:
         cur.close()
@@ -325,17 +336,23 @@ def unpair_node_by_appliance(appliance_id):
         release_conn(conn)
 
 
-def insert_hvac_reading(sensor_node_id, time, treturn, tsupply, icompressor):
+def insert_hvac_reading(sensor_node_id, time, treturn, tsupply, icompressor,
+                        during_calibration=False):
+    """during_calibration marks rows recorded while a calibration session had
+    the offsets zeroed (raw probe values): kept for charts/energy, excluded
+    from the temperature averages."""
     conn = get_conn()
     if not conn:
         return None
     cur = conn.cursor()
     try:
         cur.execute("""
-            INSERT INTO hvac_readings (sensor_node_id, time, treturn, tsupply, icompressor)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO hvac_readings
+            (sensor_node_id, time, treturn, tsupply, icompressor, during_calibration)
+            VALUES (%s, %s, %s, %s, %s, %s)
             RETURNING id
-        """, (sensor_node_id, time, treturn, tsupply, icompressor))
+        """, (sensor_node_id, time, treturn, tsupply, icompressor,
+              bool(during_calibration)))
         reading_id = cur.fetchone()[0]
         conn.commit()
         return reading_id
@@ -452,7 +469,10 @@ def compute_avg_running_delta_t(rows, threshold, warmup_minutes):
     count = 0
     for r in rows:
         running = (r.get("icompressor") or 0.0) >= threshold
-        if not running:
+        if not running or r.get("during_calibration"):
+            # Idle rows end a run. Rows recorded during a (re-)calibration
+            # session carry zeroed offsets (raw probes) and are excluded too;
+            # they also break the run, so the warmup restarts afterwards.
             segment_start = None
             continue
         t = r.get("time")
@@ -487,7 +507,9 @@ def compute_daily_running_averages(rows, threshold, warmup_minutes, limit=30):
     buckets = {}  # date -> [sum_return, sum_supply, count]
     for r in rows:
         running = (r.get("icompressor") or 0.0) >= threshold
-        if not running:
+        if not running or r.get("during_calibration"):
+            # Same exclusion as compute_avg_running_delta_t: calibration-
+            # session rows (raw, zeroed offsets) are skipped and end the run.
             segment_start = None
             continue
         t = r.get("time")
@@ -552,6 +574,12 @@ def compute_daily_export_averages(rows, threshold, warmup_minutes, fields,
             cb = b.setdefault("__cur", [0.0, 0])
             cb[0] += float(current)
             cb[1] += 1
+        if r.get("during_calibration"):
+            # Real current (kept, so Avg Current still matches Energy), but
+            # raw calibration-session temperatures are excluded and the run's
+            # warmup restarts once the session is over.
+            segment_start = None
+            continue
         if t is None or t - segment_start < warmup:
             continue
         for f in fields:
@@ -615,15 +643,37 @@ def compute_daily_energy(readings, voltage):
     return round(energy_ws / 3_600_000, 4)
 
 
+# appliance_id -> (time.monotonic() when computed, value). The card polls
+# /latest every 5 s per open tab; a 24 h average does not need recomputing
+# from ~8,640 rows each time (config.AVG_DELTA_T_CACHE_SECONDS, 0 = off).
+_AVG_DELTA_T_CACHE = {}
+
+
+def clear_avg_delta_t_cache(appliance_id=None):
+    if appliance_id is None:
+        _AVG_DELTA_T_CACHE.clear()
+    else:
+        _AVG_DELTA_T_CACHE.pop(appliance_id, None)
+
+
 def get_avg_delta_t_running_24h(appliance_id):
-    """Average running delta-T over the last 24 h (5-min per-run warmup applied)."""
+    """Average running delta-T over the last 24 h (5-min per-run warmup applied).
+
+    Cached per appliance for config.AVG_DELTA_T_CACHE_SECONDS (same value,
+    refreshed at most once per TTL)."""
+    ttl = config.AVG_DELTA_T_CACHE_SECONDS
+    if ttl > 0:
+        hit = _AVG_DELTA_T_CACHE.get(appliance_id)
+        if hit is not None and _time.monotonic() - hit[0] < ttl:
+            return hit[1]
     conn = get_conn()
     if not conn:
         return None
     cur = conn.cursor()
     try:
         cur.execute("""
-            SELECT hr.time, hr.treturn, hr.tsupply, hr.icompressor
+            SELECT hr.time, hr.treturn, hr.tsupply, hr.icompressor,
+                   hr.during_calibration
             FROM hvac_readings hr
             JOIN sensor_nodes sn ON hr.sensor_node_id = sn.id
             WHERE sn.appliance_id = %s
@@ -631,15 +681,19 @@ def get_avg_delta_t_running_24h(appliance_id):
             ORDER BY hr.time ASC
         """, (appliance_id,))
         rows = [
-            {"time": r[0], "treturn": r[1], "tsupply": r[2], "icompressor": r[3]}
+            {"time": r[0], "treturn": r[1], "tsupply": r[2], "icompressor": r[3],
+             "during_calibration": bool(r[4])}
             for r in cur.fetchall()
         ]
     finally:
         cur.close()
         release_conn(conn)
-    return compute_avg_running_delta_t(
+    value = compute_avg_running_delta_t(
         rows, config.RUNNING_CURRENT_THRESHOLD, config.AVG_DELTA_T_WARMUP_MINUTES
     )
+    if ttl > 0:
+        _AVG_DELTA_T_CACHE[appliance_id] = (_time.monotonic(), value)
+    return value
 
 
 def get_latest_current(appliance_id):

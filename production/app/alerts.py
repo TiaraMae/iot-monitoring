@@ -617,14 +617,30 @@ def _finalize_dryer_cycle(appliance_id, baselines, now):
         rhexhaust_ucl = baselines.get("rhexhaust", {}).get("ucl")
         texhaust_ucl = baselines.get("texhaust", {}).get("ucl")
         pressure_ucl = baselines.get("pressure", {}).get("ucl")
+        # One alert per bad cycle (B15): when the blockage condition holds it
+        # is the root cause of the high end-RH as well, so the separate
+        # "incomplete drying" alert for the SAME cycle is suppressed below.
+        blockage_raised = False
         if rhexhaust_ucl is not None and texhaust_ucl is not None:
             if end_rh_avg > rhexhaust_ucl and max_temp > texhaust_ucl:
-                if pressure_ucl is not None and max_gauge_pressure > pressure_ucl:
+                blockage_raised = True
+                pressure_high = pressure_ucl is not None and max_gauge_pressure > pressure_ucl
+                if pressure_high:
                     severity = "critical"
                     msg = (
                         f"CRITICAL - Exhaust ventilation blockage detected: "
                         f"gauge pressure {max_gauge_pressure:.2f} hPa > maximum {pressure_ucl:.2f} hPa, "
                         f"end RH {end_rh_avg:.1f}% > maximum {rhexhaust_ucl:.1f}%, "
+                        f"max temp {max_temp:.1f}C > maximum {texhaust_ucl:.1f}C"
+                    )
+                elif end_rh_avg > 90.0:
+                    # Carries over the incomplete-drying "not drying at all"
+                    # critical rule, so suppressing that alert loses nothing.
+                    severity = "critical"
+                    msg = (
+                        f"CRITICAL - Exhaust ventilation blockage, clothes not drying: "
+                        f"end RH {end_rh_avg:.1f}% exceeds 90% "
+                        f"(maximum {rhexhaust_ucl:.1f}%), "
                         f"max temp {max_temp:.1f}C > maximum {texhaust_ucl:.1f}C"
                     )
                 else:
@@ -638,16 +654,18 @@ def _finalize_dryer_cycle(appliance_id, baselines, now):
                     appliance_id,
                     "fault_dryer_exhaust_ventilation_blockage",
                     msg,
-                    max_gauge_pressure if severity == "critical" else end_rh_avg,
-                    pressure_ucl if severity == "critical" else rhexhaust_ucl,
+                    max_gauge_pressure if pressure_high else end_rh_avg,
+                    pressure_ucl if pressure_high else rhexhaust_ucl,
                     severity,
                     cycle_end_time,
                     cur,
                     conn,
                 )
 
-        # Incomplete drying
-        if rhexhaust_ucl is not None and end_rh_avg > rhexhaust_ucl:
+        # Incomplete drying (skipped when the blockage alert above already
+        # covers this cycle's high end-RH).
+        if (not blockage_raised and rhexhaust_ucl is not None
+                and end_rh_avg > rhexhaust_ucl):
             if end_rh_avg > 90.0:
                 severity = "critical"
                 msg = (

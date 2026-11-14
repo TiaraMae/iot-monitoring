@@ -8,6 +8,11 @@ Waitress directly via `python -m waitress run:app`.
 
 import os
 
+from app.logstamp import install as _install_log_timestamps
+
+# Every service log line gets a WIB timestamp (outage correlation).
+_install_log_timestamps()
+
 from app.singleinstance import acquire_lock
 
 # Deny a second backend BEFORE anything connects to MQTT or the DB.

@@ -1081,14 +1081,11 @@
 <script>
 const INITIAL_APPLIANCES = {{ appliances|tojson|safe }};
 const INITIAL_UNPAIRED = {{ unpaired_nodes|tojson|safe }};
-const ALL_NODES = {{ all_nodes|tojson|safe }};
 
 let appliances = INITIAL_APPLIANCES;
 let unpairedNodes = INITIAL_UNPAIRED;
 let selectedApplianceId = null;
-let charts = {};
 let pollTimer = null;
-let unpairedPollTimer = null;
 let energyPieChart = null;
 const CHART_COLORS = ['#2563EB','#F59E0B','#10B981','#EF4444','#8B5CF6','#EC4899','#06B6D4','#84CC16'];
 

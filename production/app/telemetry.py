@@ -104,7 +104,8 @@ def handle_telemetry(mac, payload):
         delta_t = (treturn - tsupply) if treturn is not None and tsupply is not None else None
 
         models.insert_hvac_reading(
-            node["id"], actual_time, treturn, tsupply, current
+            node["id"], actual_time, treturn, tsupply, current,
+            during_calibration=appliance.get("operational_status") == "calibrating",
         )
 
         # Skip alert evaluation during an active calibration session: offsets

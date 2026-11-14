@@ -1,5 +1,6 @@
 """Energy and cycle analytics endpoints."""
 
+import time as _time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from io import BytesIO
@@ -18,19 +19,19 @@ from app import alerts
 analytics_bp = Blueprint("analytics", __name__)
 
 
-def _compute_motor_baseline_median(motor_readings, filter_threshold=None):
-    if not motor_readings:
-        return 0.0
-    readings = motor_readings
-    if filter_threshold is not None:
-        readings = [r for r in readings if r <= filter_threshold]
-        if not readings:
-            return 0.0
-    sorted_r = sorted(readings)
-    n = len(sorted_r)
-    if n % 2 == 1:
-        return sorted_r[n // 2]
-    return (sorted_r[n // 2 - 1] + sorted_r[n // 2]) / 2.0
+# Same median helper the live dryer fault engine uses (was a verbatim copy).
+_compute_motor_baseline_median = alerts._compute_motor_baseline_median
+
+# (user_id, "YYYY-MM") -> (time.monotonic() when computed, JSON payload).
+# The dashboard energy panel rescans a whole month of readings per appliance
+# on every load; reloads/multiple tabs within the TTL reuse the result
+# (config.ENERGY_SUMMARY_CACHE_SECONDS, 0 = off). The Excel export is never
+# cached.
+_ENERGY_SUMMARY_CACHE = {}
+
+
+def clear_energy_cache():
+    _ENERGY_SUMMARY_CACHE.clear()
 
 
 def _compute_energy_kwh(readings, voltage):
@@ -51,7 +52,8 @@ def _compute_avg_delta_t(readings):
     of (time, icompressor, treturn, tsupply), or None."""
     return models.compute_avg_running_delta_t(
         [
-            {"time": r[0], "icompressor": r[1], "treturn": r[2], "tsupply": r[3]}
+            {"time": r[0], "icompressor": r[1], "treturn": r[2], "tsupply": r[3],
+             "during_calibration": bool(r[4]) if len(r) > 4 else False}
             for r in readings
         ],
         config.RUNNING_CURRENT_THRESHOLD,
@@ -87,7 +89,8 @@ def hvac_analytics(appliance_id):
         # of each compressor run (same rule as the device card's Avg ΔT).
         if start and end:
             cur.execute("""
-                SELECT r.time, r.icompressor, r.treturn, r.tsupply
+                SELECT r.time, r.icompressor, r.treturn, r.tsupply,
+                       r.during_calibration
                 FROM hvac_readings r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
                 JOIN appliances a ON a.id = sn.appliance_id
@@ -97,7 +100,8 @@ def hvac_analytics(appliance_id):
             """, (appliance_id, start, end))
         else:
             cur.execute("""
-                SELECT r.time, r.icompressor, r.treturn, r.tsupply
+                SELECT r.time, r.icompressor, r.treturn, r.tsupply,
+                       r.during_calibration
                 FROM hvac_readings r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
                 JOIN appliances a ON a.id = sn.appliance_id
@@ -108,7 +112,8 @@ def hvac_analytics(appliance_id):
 
         daily_rows = models.compute_daily_running_averages(
             [
-                {"time": r[0], "icompressor": r[1], "treturn": r[2], "tsupply": r[3]}
+                {"time": r[0], "icompressor": r[1], "treturn": r[2], "tsupply": r[3],
+             "during_calibration": bool(r[4]) if len(r) > 4 else False}
                 for r in readings
             ],
             config.RUNNING_CURRENT_THRESHOLD,
@@ -638,6 +643,13 @@ def api_energy_summary():
     except ValueError:
         return jsonify({"error": "Invalid month format. Use YYYY-MM."}), 400
 
+    cache_key = (current_user.id, month_str)
+    ttl = config.ENERGY_SUMMARY_CACHE_SECONDS
+    if ttl > 0:
+        hit = _ENERGY_SUMMARY_CACHE.get(cache_key)
+        if hit is not None and _time.monotonic() - hit[0] < ttl:
+            return jsonify(hit[1])
+
     conn = get_conn()
     if not conn:
         return jsonify({"error": "db"}), 500
@@ -668,7 +680,8 @@ def api_energy_summary():
                 """, (app_id, query_start, month_end))
             else:
                 cur.execute("""
-                    SELECT r.time, r.icompressor, r.treturn, r.tsupply
+                    SELECT r.time, r.icompressor, r.treturn, r.tsupply,
+                       r.during_calibration
                     FROM hvac_readings r
                     JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
                     WHERE sn.appliance_id = %s AND r.time >= %s AND r.time < %s
@@ -687,12 +700,15 @@ def api_energy_summary():
             by_type[app_type] += energy
             total_kwh += energy
 
-        return jsonify({
+        payload = {
             "month": month_str,
             "appliances": result,
             "total_kwh": round(total_kwh, 4),
             "by_type": dict(by_type),
-        })
+        }
+        if ttl > 0:
+            _ENERGY_SUMMARY_CACHE[cache_key] = (_time.monotonic(), payload)
+        return jsonify(payload)
     except Exception as e:
         print(f"analytics endpoint error: {e}")
         return jsonify({"error": "Internal server error"}), 500
@@ -766,7 +782,8 @@ def api_energy_summary_export():
                 """, (app_id, query_start, month_end))
             else:
                 cur.execute("""
-                    SELECT r.time, r.icompressor, r.treturn, r.tsupply
+                    SELECT r.time, r.icompressor, r.treturn, r.tsupply,
+                       r.during_calibration
                     FROM hvac_readings r
                     JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
                     WHERE sn.appliance_id = %s AND r.time >= %s AND r.time < %s

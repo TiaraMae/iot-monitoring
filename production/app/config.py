@@ -67,6 +67,12 @@ DEFAULT_DELTA_T_DELAY_MINUTES = 5
 # Minutes skipped at the start of each compressor run before a reading counts
 # toward the 24 h average delta-T on the device card (starting transients).
 AVG_DELTA_T_WARMUP_MINUTES = 5
+# The card's 24 h Avg Delta-T is recomputed at most this often per appliance
+# (every /latest poll used to rescan ~8,640 rows). 0 disables the cache.
+AVG_DELTA_T_CACHE_SECONDS = 60
+# GET /api/energy_summary JSON is cached per (user, month) for this long
+# (each request rescans a whole month of readings per appliance). 0 = off.
+ENERGY_SUMMARY_CACHE_SECONDS = 60
 # Must match MAX_CHART_POINTS in templates/dashboard.html — the chart requests
 # this many points, and the API must not truncate the window below it (GAP-9).
 MAX_CHART_POINTS = 1080

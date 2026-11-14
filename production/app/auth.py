@@ -185,7 +185,8 @@ def forgot_password():
         token = secrets.token_urlsafe(32)
         expires = config.now_wib() + timedelta(
             minutes=config.PASSWORD_RESET_TOKEN_TTL_MINUTES)
-        models.set_reset_token(user["id"], token, expires)
+        # Only the hash is stored; the raw token lives in the link alone.
+        models.set_reset_token(user["id"], models.hash_reset_token(token), expires)
         reset_url = url_for("auth.reset_password", token=token,
                             _external=True)
         if config.SMTP_USER and config.SMTP_APP_PASSWORD:

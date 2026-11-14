@@ -95,8 +95,14 @@ def main():
                 "SELECT reset_token FROM users WHERE id = %s", (USER_ID,), fetch='one')
             check('SMTP-unset: token stored for known user only',
                   bool(token_row and token_row[0]))
-            check('SMTP-unset: reset link printed to server log',
-                  token_row[0] in buf.getvalue())
+            # The DB holds sha256(token); the raw token is only in the link.
+            import re
+            m = re.search(r'/reset_password/([A-Za-z0-9_\-]+)', buf.getvalue())
+            logged_token = m.group(1) if m else ''
+            check('SMTP-unset: reset link printed to server log', bool(logged_token))
+            check('SMTP-unset: DB stores the HASH of the logged token, not the token',
+                  token_row[0] == models.hash_reset_token(logged_token)
+                  and token_row[0] != logged_token)
             sql("UPDATE users SET reset_token = NULL, reset_token_expires = NULL "
                 "WHERE id = %s", (USER_ID,))
 
@@ -116,9 +122,10 @@ def main():
             token_row = sql(
                 "SELECT reset_token FROM users WHERE id = %s", (USER_ID,), fetch='one')
             check('token stored', bool(token_row and token_row[0]))
-            token = token_row[0]
             reset_url = sent[0][1]
-            check('reset url carries the token', token in reset_url)
+            token = reset_url.rstrip('/').rsplit('/', 1)[-1]
+            check('reset url carries the token (DB holds its hash)',
+                  bool(token) and token_row[0] == models.hash_reset_token(token))
 
             # --- 2b. ProxyFix: behind nginx the request arrives as plain http,
             # but with X-Forwarded-Proto present (nginx always sends it) the
@@ -138,9 +145,10 @@ def main():
             # The forwarded request rotated the token — follow the fresh one.
             token_row = sql(
                 "SELECT reset_token FROM users WHERE id = %s", (USER_ID,), fetch='one')
+            token = sent[0][1].rstrip('/').rsplit('/', 1)[-1] if sent else ''
             check('token rotated after second request',
-                  bool(token_row and token_row[0] and token_row[0] in sent[0][1]))
-            token = token_row[0]
+                  bool(token_row and token_row[0]
+                       and token_row[0] == models.hash_reset_token(token)))
 
             # --- 3. Reset page: valid token renders, garbage rejected.
             r = client.get(f'/reset_password/{token}')
@@ -162,9 +170,8 @@ def main():
                             follow_redirects=True)
             check('forgot flash reworded and rendered in-card',
                   b'Please check your email for password reset link' in r.data)
-            token_row = sql(
-                "SELECT reset_token FROM users WHERE id = %s", (USER_ID,), fetch='one')
-            token = token_row[0]
+            # The latest request rotated the token: follow the newest link.
+            token = sent[-1][1].rstrip('/').rsplit('/', 1)[-1]
             r = client.get('/reset_password/bogustoken')
             check('bogus token redirected away', r.status_code == 302)
 

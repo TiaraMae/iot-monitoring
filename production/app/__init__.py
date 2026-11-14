@@ -53,6 +53,9 @@ def create_app():
     login_manager.login_view = "auth.login"
     limiter.init_app(app)
 
+    from app import security_headers
+    security_headers.init_app(app)
+
     # All times in the system are WIB; the DB uses naive local NOW(), which is
     # only correct if the host clock is set to Jakarta time (UTC+7).
     print(f"Timezone: {config.TIMEZONE} — all times are WIB; "
@@ -90,7 +93,6 @@ def create_app():
             user=current_user,
             appliances=models.get_appliances_for_user(current_user.id),
             unpaired_nodes=models.get_unpaired_nodes(),
-            all_nodes=models.get_all_nodes_for_user(current_user.id),
         ))
         # Never let the browser serve a stale dashboard build: status-dependent
         # JS (live polling, calibration UI) must always come from the current

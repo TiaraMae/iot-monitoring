@@ -53,7 +53,10 @@ def _daily_export_rows(is_dry, raw, voltage):
                    "Energy (kWh)"]
     else:
         dicts = [{"time": r[0], "treturn": r[1], "tsupply": r[2],
-                  "icompressor": r[3]} for r in raw]
+                  "icompressor": r[3],
+                  # Calibration-session rows: temps excluded, current kept.
+                  "during_calibration": bool(r[4]) if len(r) > 4 else False}
+                 for r in raw]
         fields = ["treturn", "tsupply"]
         current_idx = 3
         headers = ["Date", "Avg Return Temp (°C)", "Avg Supply Temp (°C)",
@@ -359,6 +362,9 @@ def pair_device():
             return redirect(url_for("dashboard"))
         mac = row[0]
         conn.commit()
+        # The new appliance must appear in the energy panel right away.
+        from app import analytics
+        analytics.clear_energy_cache()
     except Exception as e:
         conn.rollback()
         print(f"pair_device error (node {node_id}): {e}")
@@ -398,6 +404,9 @@ def forget_device(appliance_id):
         mqtt.send_node_command(mac, "settype:unpaired")
 
     alerts.clear_appliance_trackers(appliance_id)
+    models.clear_avg_delta_t_cache(appliance_id)
+    from app import analytics
+    analytics.clear_energy_cache()
     from app.calibration import CALIBRATION_TRACKER
     CALIBRATION_TRACKER.pop(appliance_id, None)
     flash("Device forgotten. All of its readings, alerts, and history were deleted.", "success")
@@ -859,7 +868,8 @@ def api_export_excel(appliance_id):
             raw = cur.fetchall()
         else:
             cur.execute(f"""
-                SELECT r.time, r.treturn, r.tsupply, r.icompressor
+                SELECT r.time, r.treturn, r.tsupply, r.icompressor,
+                       r.during_calibration
                 FROM hvac_readings r
                 JOIN sensor_nodes sn ON r.sensor_node_id = sn.id
                 WHERE sn.appliance_id = %s {date_filter}{current_filter_hvac}
