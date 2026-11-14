@@ -63,7 +63,10 @@ if ($existingService) {
 # Install new service
 Write-Host "Installing service: $ServiceName" -ForegroundColor Cyan
 
-$waitressArgs = "-m waitress --port=$Port --threads=$Threads run:app"
+# Bind to loopback only: nginx (same host) is the only client. With 0.0.0.0 a
+# missing firewall rule would expose Waitress directly, and ProxyFix trusts
+# X-Forwarded-For, so direct clients could spoof their IP (rate limits).
+$waitressArgs = "-m waitress --listen=127.0.0.1:$Port --threads=$Threads run:app"
 
 & $NssmPath install $ServiceName $PythonPath $waitressArgs
 & $NssmPath set $ServiceName DisplayName "IoT Monitoring Backend (Production)"
@@ -76,6 +79,11 @@ $waitressArgs = "-m waitress --port=$Port --threads=$Threads run:app"
 & $NssmPath set $ServiceName AppStderr "$logsDir\service.err.log"
 & $NssmPath set $ServiceName AppRotateFiles 1
 & $NssmPath set $ServiceName AppRotateBytes 10485760  # 10 MB
+# Rotate while running too (default NSSM only rotates at service start, so a
+# long-running service grew one unbounded log file).
+& $NssmPath set $ServiceName AppRotateOnline 1
+# Unbuffered stdout: log lines appear immediately and survive a crash.
+& $NssmPath set $ServiceName AppEnvironmentExtra PYTHONUNBUFFERED=1
 
 # Configure restart on failure
 & $NssmPath set $ServiceName AppRestartDelay 5000  # 5 seconds

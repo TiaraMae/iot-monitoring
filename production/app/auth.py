@@ -2,6 +2,7 @@
 change-password, and email self-service password reset."""
 
 import bcrypt
+import psycopg2
 import secrets
 import smtplib
 from email.message import EmailMessage
@@ -73,8 +74,13 @@ def signup():
             session["_epoch"] = row.get("session_epoch", 0)
             return redirect(url_for("dashboard"))
         flash("Could not create account", "error")
+    except psycopg2.IntegrityError:
+        # users.email is UNIQUE. (The raw database error text used to be
+        # flashed here; it now goes to the server log only.)
+        flash("An account with this email already exists.", "error")
     except Exception as e:
-        flash(f"Error: {e}", "error")
+        print(f"signup error: {e}")
+        flash("Could not create account. Please try again.", "error")
     return redirect(url_for("auth.signup"))
 
 

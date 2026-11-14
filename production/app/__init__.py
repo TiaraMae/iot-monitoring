@@ -64,6 +64,7 @@ def create_app():
     from app.analytics import analytics_bp
     from app.api import api_bp
     from app.ota import ota_bp
+    from app.health import health_bp
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(devices_bp)
@@ -71,6 +72,7 @@ def create_app():
     app.register_blueprint(analytics_bp)
     app.register_blueprint(api_bp)
     app.register_blueprint(ota_bp)
+    app.register_blueprint(health_bp)
 
     @app.route("/")
     def landing():

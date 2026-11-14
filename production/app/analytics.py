@@ -140,7 +140,8 @@ def hvac_analytics(appliance_id):
 
         return jsonify({"daily_averages": daily_averages})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"analytics endpoint error: {e}")
+        return jsonify({"error": "Internal server error"}), 500
     finally:
         if conn:
             cur.close()
@@ -306,7 +307,8 @@ def dryer_analytics(appliance_id):
         cycles.reverse()
         return jsonify(cycles)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"analytics endpoint error: {e}")
+        return jsonify({"error": "Internal server error"}), 500
     finally:
         if conn:
             cur.close()
@@ -409,7 +411,8 @@ def api_baseline_config(appliance_id):
             return jsonify({"success": True, "message": "Baseline removed"})
         except Exception as e:
             conn.rollback()
-            return jsonify({"error": str(e)}), 500
+            print(f"analytics endpoint error: {e}")
+            return jsonify({"error": "Internal server error"}), 500
         finally:
             cur.close()
             release_conn(conn)
@@ -509,7 +512,8 @@ def api_baseline_config(appliance_id):
                     conn.commit()
                 except Exception as e:
                     conn.rollback()
-                    return jsonify({"error": str(e)}), 500
+                    print(f"analytics endpoint error: {e}")
+                    return jsonify({"error": "Internal server error"}), 500
                 finally:
                     cur.close()
                     release_conn(conn)
@@ -585,7 +589,8 @@ def api_device_baseline_analysis(appliance_id):
             "baseline_set_at": updated_at.isoformat() if updated_at else None,
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"analytics endpoint error: {e}")
+        return jsonify({"error": "Internal server error"}), 500
     finally:
         cur.close()
         release_conn(conn)
@@ -689,7 +694,8 @@ def api_energy_summary():
             "by_type": dict(by_type),
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"analytics endpoint error: {e}")
+        return jsonify({"error": "Internal server error"}), 500
     finally:
         if conn:
             cur.close()
@@ -802,7 +808,8 @@ def api_energy_summary_export():
             download_name=filename,
         )
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"analytics endpoint error: {e}")
+        return jsonify({"error": "Internal server error"}), 500
     finally:
         if conn:
             cur.close()
@@ -834,7 +841,8 @@ def api_energy_months():
         rows = cur.fetchall()
         return jsonify([r[0] for r in rows])
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"analytics endpoint error: {e}")
+        return jsonify({"error": "Internal server error"}), 500
     finally:
         if conn:
             cur.close()

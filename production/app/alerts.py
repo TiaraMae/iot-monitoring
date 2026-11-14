@@ -3,6 +3,7 @@
 import queue
 import threading
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 import requests
 
@@ -54,6 +55,33 @@ FAULT_DISCORD_MAP = {
 }
 
 EMBED_FOOTER = "IoT Monitoring System"
+
+# Hosts that serve real Discord webhooks. Any other URL is refused when saved
+# and skipped at send time: the server POSTs to this URL from inside the
+# campus network, so an arbitrary URL would be a server-side request forgery.
+DISCORD_WEBHOOK_HOSTS = {
+    "discord.com",
+    "discordapp.com",
+    "ptb.discord.com",
+    "canary.discord.com",
+}
+
+
+def is_discord_webhook_url(url):
+    """True only for https://<discord host>/api/webhooks/... URLs."""
+    if not url or not isinstance(url, str):
+        return False
+    try:
+        parsed = urlparse(url.strip())
+        port = parsed.port  # raises ValueError on a malformed port
+    except ValueError:
+        return False
+    return (
+        parsed.scheme == "https"
+        and (parsed.hostname or "").lower() in DISCORD_WEBHOOK_HOSTS
+        and port in (None, 443)
+        and parsed.path.startswith("/api/webhooks/")
+    )
 
 
 def _get_appliance_alert_gates(appliance_id, cur):
@@ -134,6 +162,12 @@ def send_discord_alert(appliance_id, alert_type, message, value=None, threshold=
     try:
         webhook_url = models.get_user_webhook(appliance_id)
         if not webhook_url:
+            return
+        if not is_discord_webhook_url(webhook_url):
+            # Stored before the allowlist existed (or edited in the DB): never
+            # POST to a non-Discord host. The alert row is already saved.
+            print(f"Discord alert skipped for appliance {appliance_id}: "
+                  f"stored webhook is not a Discord webhook URL")
             return
 
         app_name = models.get_appliance_name(appliance_id)

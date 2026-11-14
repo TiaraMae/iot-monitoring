@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>IoT Monitoring</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Pinned to major v4: an unversioned URL would silently jump to a future
+         breaking major release. -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
     <style>
         :root {
             --bg: #F8FAFC;
@@ -911,6 +913,24 @@
                             </div>
                             <div style="font-size:0.7rem; color:var(--text-muted); margin-top:0.4rem;">Maximum/Minimum are auto-computed as ±20% of the mean.</div>
                         </div>
+                        <div id="baseline-inputs-dryer-env" class="baseline-inputs-row" style="display:none;">
+                            <strong style="font-size:0.85rem; display:block; margin-bottom:0.5rem;">Exhaust Humidity &amp; Pressure</strong>
+                            <div style="display:flex; gap:1rem; flex-wrap:wrap;">
+                                <div style="flex:1; min-width:120px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">Exhaust RH maximum (%)</label>
+                                    <input type="number" step="0.1" id="bl-rhexhaust-ucl" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
+                                </div>
+                                <div style="flex:1; min-width:120px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">Gauge pressure maximum (hPa)</label>
+                                    <input type="number" step="0.01" id="bl-pressure-ucl" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
+                                </div>
+                                <div style="flex:1; min-width:120px;">
+                                    <label style="font-size:0.72rem; color:var(--text-muted); display:block; margin-bottom:2px;">Atmospheric pressure (hPa)</label>
+                                    <input type="number" step="0.01" id="bl-atm-pressure" class="form-control" style="padding:0.4rem 0.6rem; font-size:0.85rem;" />
+                                </div>
+                            </div>
+                            <div style="font-size:0.7rem; color:var(--text-muted); margin-top:0.4rem;">RH maximum enables the end-of-cycle Incomplete Drying and Ventilation Blockage alerts; a blockage becomes Critical when the gauge pressure maximum is also exceeded. Gauge pressure = sensor pressure &minus; atmospheric pressure.</div>
+                        </div>
                     </div>
                 </div>
 
@@ -1079,6 +1099,11 @@ let detailShowIdle = false; // "Running only" selected by default (filtered=true
 let detailHistoryStart = null;
 let detailHistoryEnd = null;
 let currentDeviceHasBaseline = false;
+// Dryer Settings panel: values loaded when the panel opens, so saving can
+// keep the stored pressure mean and only re-post a changed atmospheric value.
+let dryerPressureMeanLoaded = null;
+let dryerAtmPressureLoaded = null;
+let dryerRhLoaded = {};
 
 function isDryer(type) { return (type || '').includes('Dryer'); }
 
@@ -1153,7 +1178,10 @@ async function populateEnergyMonths() {
         const data = await fetchJson('/api/energy_months');
         const months = Array.isArray(data) ? data : (data.months || []);
         sel.innerHTML = '';
-        const current = new Date().toISOString().slice(0, 7);
+        // Local (WIB) year-month — toISOString() is UTC and would pick the
+        // previous month during the first 7 hours of each month.
+        const nowLocal = new Date();
+        const current = nowLocal.getFullYear() + '-' + String(nowLocal.getMonth() + 1).padStart(2, '0');
         const defaultMonth = months.includes(current) ? current : (months[0] || current);
         months.forEach(m => {
             const opt = document.createElement('option');
@@ -1241,7 +1269,8 @@ async function loadEnergySummary(month) {
 
 function exportEnergySummary() {
     const sel = document.getElementById('energy-month-select');
-    const month = sel ? sel.value : new Date().toISOString().slice(0, 7);
+    const nowLocal = new Date();
+    const month = sel ? sel.value : nowLocal.getFullYear() + '-' + String(nowLocal.getMonth() + 1).padStart(2, '0');
     window.open('/api/energy_summary/export?month=' + encodeURIComponent(month), '_blank');
 }
 
@@ -1602,6 +1631,8 @@ function renderReadings(a, data) {
     let html = '';
     if (isDryer(a.type)) {
         html += readingItem('Exhaust Temp', data.Texhaust != null ? data.Texhaust.toFixed(1) + ' °C' : '--', statusCls('texhaust', data.Texhaust));
+        html += readingItem('Exhaust RH', data.RHexhaust != null ? data.RHexhaust.toFixed(1) + ' %' : '--', statusCls('rhexhaust', data.RHexhaust));
+        html += readingItem('Gauge Pressure', data.Pressure != null ? data.Pressure.toFixed(2) + ' hPa' : '--', statusCls('pressure', data.Pressure));
         html += readingItem('Motor Current', data.Imotor != null ? data.Imotor.toFixed(2) + ' A' : '--', statusCls('current', data.Imotor));
     } else {
         html += readingItem('Return Temp', data.Treturn != null ? data.Treturn.toFixed(1) + ' °C' : '--', '');
@@ -1813,7 +1844,9 @@ function populateHistoryCharts(id, isHVAC, readings) {
         if (isHVAC) {
             pushChartPoint('temps', label, r.Treturn, 0);
             pushChartPoint('temps', label, r.Tsupply, 1);
-            pushChartPoint('deltat', label, r.DeltaT != null ? r.DeltaT : (r.Treturn || 0) - (r.Tsupply || 0));
+            // Server value only: null (a probe missing) is drawn as a gap,
+            // never as a fake difference against 0 °C.
+            pushChartPoint('deltat', label, r.DeltaT);
             pushChartPoint('current', label, r.Icompressor);
         } else {
             pushChartPoint('texhaust', label, r.Texhaust);
@@ -1991,8 +2024,24 @@ async function showBaselineConfigPanel() {
             document.getElementById('bl-texhaust-lcl') && (document.getElementById('bl-texhaust-lcl').value = texhaustVals.lcl != null ? texhaustVals.lcl : '');
             const currentVals = metrics.current || {};
             document.getElementById('bl-current-mean') && (document.getElementById('bl-current-mean').value = currentVals.mean != null ? currentVals.mean : '');
+            // Humidity / pressure limits (feed the end-of-cycle dryer faults).
+            const rhVals = metrics.rhexhaust || {};
+            document.getElementById('bl-rhexhaust-ucl').value = rhVals.ucl != null ? rhVals.ucl : '';
+            dryerRhLoaded = { lcl: rhVals.lcl, mean: rhVals.mean };
+            const presVals = metrics.pressure || {};
+            document.getElementById('bl-pressure-ucl').value = presVals.ucl != null ? presVals.ucl : '';
+            // The saved pressure mean (gauge fallback reference) is re-sent
+            // untouched on save so this panel can never wipe it.
+            dryerPressureMeanLoaded = (presVals.mean !== '' && presVals.mean != null) ? presVals.mean : null;
+            dryerAtmPressureLoaded = null;
+            try {
+                const pb = await fetchJson('/api/device/' + selectedApplianceId + '/pressure_baseline');
+                dryerAtmPressureLoaded = pb && pb.atmospheric_pressure != null ? pb.atmospheric_pressure : null;
+            } catch (e) { /* leave empty: saving still works */ }
+            document.getElementById('bl-atm-pressure').value = dryerAtmPressureLoaded != null ? dryerAtmPressureLoaded : '';
             document.getElementById('baseline-inputs-texhaust').style.display = 'block';
             document.getElementById('baseline-inputs-dryer-current').style.display = 'block';
+            document.getElementById('baseline-inputs-dryer-env').style.display = 'block';
         }
         document.getElementById('btn-configure-baseline').style.display = 'none';
         document.getElementById('btn-edit-baseline').style.display = 'none';
@@ -2022,6 +2071,8 @@ function hideBaselineInputs() {
     if (texhaustRow) texhaustRow.style.display = 'none';
     const dryerCurrentRow = document.getElementById('baseline-inputs-dryer-current');
     if (dryerCurrentRow) dryerCurrentRow.style.display = 'none';
+    const dryerEnvRow = document.getElementById('baseline-inputs-dryer-env');
+    if (dryerEnvRow) dryerEnvRow.style.display = 'none';
     document.getElementById('btn-save-baseline').style.display = 'none';
     document.getElementById('btn-cancel-baseline').style.display = 'none';
     checkBaselineResults();
@@ -2043,17 +2094,55 @@ async function saveBaselineConfig() {
     } else {
         addIfPresent('texhaust', { ucl: document.getElementById('bl-texhaust-ucl')?.value, lcl: document.getElementById('bl-texhaust-lcl')?.value });
         addIfPresent('current', { mean: document.getElementById('bl-current-mean')?.value });
+        // RH: only the maximum is editable here; any stored minimum/mean
+        // (e.g. set through the API) is sent back unchanged, not wiped.
+        const rhUcl = document.getElementById('bl-rhexhaust-ucl')?.value;
+        if (rhUcl !== '' && rhUcl != null) {
+            addIfPresent('rhexhaust', {
+                ucl: rhUcl,
+                lcl: dryerRhLoaded.lcl,
+                mean: dryerRhLoaded.mean
+            });
+        }
+        // The backend requires a maximum for pressure; the stored mean (if
+        // any) is sent back unchanged so it is never wiped.
+        const presUcl = document.getElementById('bl-pressure-ucl')?.value;
+        if (presUcl !== '' && presUcl != null) {
+            const pres = { ucl: parseFloat(presUcl) };
+            if (dryerPressureMeanLoaded != null) pres.mean = parseFloat(dryerPressureMeanLoaded);
+            metrics.pressure = pres;
+        }
     }
-    if (Object.keys(metrics).length === 0) { alert('No values entered.'); return; }
+    // Atmospheric pressure lives on its own endpoint; post it only when it
+    // was filled in and differs from the stored value.
+    let atmToSave = null;
+    if (!isHVAC) {
+        const atmRaw = document.getElementById('bl-atm-pressure')?.value;
+        if (atmRaw !== '' && atmRaw != null) {
+            const atmVal = parseFloat(atmRaw);
+            if (!isNaN(atmVal) && (dryerAtmPressureLoaded == null || atmVal !== parseFloat(dryerAtmPressureLoaded))) {
+                atmToSave = atmVal;
+            }
+        }
+    }
+    if (Object.keys(metrics).length === 0 && atmToSave == null) { alert('No values entered.'); return; }
     const payload = { metrics };
     if (isHVAC) {
         const delayRaw = document.getElementById('bl-deltat-delay').value;
         if (delayRaw !== '' && delayRaw != null) payload.alert_delay_minutes = delayRaw;
     }
     try {
-        await fetchJson('/api/device/' + selectedApplianceId + '/baseline_config', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-        });
+        if (Object.keys(metrics).length > 0) {
+            await fetchJson('/api/device/' + selectedApplianceId + '/baseline_config', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+            });
+        }
+        if (atmToSave != null) {
+            await fetchJson('/api/device/' + selectedApplianceId + '/pressure_baseline', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ atmospheric_pressure: atmToSave })
+            });
+        }
         const base = await fetchJson('/api/device/' + selectedApplianceId + '/baseline_config');
         buildSpcLimits(base.metrics || {});
         applySpcLines();

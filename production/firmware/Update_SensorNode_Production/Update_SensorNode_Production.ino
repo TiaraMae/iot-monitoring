@@ -205,6 +205,8 @@ float nodeDeductor = 0.0;  // Deductor from backend
 
 bool calibrationAcked = false;
 bool maintenanceRequestPending = false;
+unsigned long maintenanceRequestedAt = 0;
+const unsigned long MAINTENANCE_ACK_TIMEOUT_MS = 30000UL;  // yellow-button answer window
 
 // =========================
 // OFFSET CALIBRATION STATE MACHINE (v4 protocol, DS18B20 adaptation)
@@ -1261,8 +1263,14 @@ void handleButtons() {
         beepLongFail(700);
       } else if (maintenanceRequestPending) {
         // SILENTLY ignore
+      } else if (!client.connected()) {
+        // Events are not buffered: a request sent now would be dropped and
+        // leave the button "pending" forever. Refuse it audibly instead.
+        Serial.println("BUTTON 1 denied: not connected to the server.");
+        beepLongFail(700);
       } else {
         maintenanceRequestPending = true;
+        maintenanceRequestedAt = now;
         String ev = "{\"mac\":\"" + deviceMac + "\",\"event\":\"maintenance_request\"}";
         Serial.println("BUTTON 1 -> maintenance request sent");
         beepRequest();
@@ -1272,6 +1280,16 @@ void handleButtons() {
     }
   } else {
     btn1State = 0;
+  }
+
+  // No maintenanceack/maintenancedenied within the timeout (message lost,
+  // backend down): clear the pending flag so the button works again, with the
+  // same "refused" beep. A late ack still beeps and logs normally.
+  if (maintenanceRequestPending && now - maintenanceRequestedAt >= MAINTENANCE_ACK_TIMEOUT_MS) {
+    maintenanceRequestPending = false;
+    Serial.println("BUTTON 1: no backend answer -> request cleared.");
+    beepLongFail(700);
+    printWorkflow();
   }
 
   // ---------- BUTTON 2: OFFSET CALIBRATION (HVAC only, 5 s) ----------
@@ -1605,11 +1623,14 @@ void loop() {
       float t1 = ds1.getTempCByIndex(0);
       float t2 = ds2.getTempCByIndex(0);
 
-      if (!isnan(t1) && t1 > -50.0 && t1 < 120.0) {
+      // 85.0 °C exactly is the DS18B20 power-on-reset register value (a
+      // conversion that never ran, e.g. after a brown-out/glitch), not a real
+      // air temperature — reject it like the -127 °C "disconnected" value.
+      if (!isnan(t1) && t1 > -50.0 && t1 < 120.0 && t1 != 85.0f) {
         sumDS1T += t1;
         validDS1T++;
       }
-      if (!isnan(t2) && t2 > -50.0 && t2 < 120.0) {
+      if (!isnan(t2) && t2 > -50.0 && t2 < 120.0 && t2 != 85.0f) {
         sumDS2T += t2;
         validDS2T++;
       }

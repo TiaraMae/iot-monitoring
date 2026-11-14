@@ -112,6 +112,22 @@ def _dedupe_event(mac, event_type):
     return False
 
 
+# When restore:normal was last sent to each MAC (process memory). The firmware
+# answers every restore:normal with an immediate checkin, and a checkin from a
+# calibrated node triggers the restore:normal self-heal below — without this
+# record the two would bounce back and forth, stopped only by the 5 s event
+# dedupe (and endlessly whenever the round trip exceeds 5 s).
+LAST_RESTORE_NORMAL = {}
+# The checkin self-heal is skipped when restore:normal already went to that
+# node this recently (it just received exactly the command the heal would send).
+RESTORE_HEAL_MIN_INTERVAL_SECONDS = 60
+
+
+def _send_restore_normal(mac):
+    mqtt.send_node_command(mac, "restore:normal")
+    LAST_RESTORE_NORMAL[mac] = time.time()
+
+
 def _send_type_config(mac, app_type, current_sensor, status):
     cf, deductor = get_cf_deductor(current_sensor)
     mqtt.send_node_command(mac, f"settype:{'dryer' if _is_dryer(app_type) else 'hvac'}")
@@ -121,7 +137,7 @@ def _send_type_config(mac, app_type, current_sensor, status):
     # mid-FSM and `restore:offsetcalibrationneeded` would desync it (it flips
     # calibrationAcked but leaves calibState running — 2026-10-18 incident).
     if _is_dryer(app_type) or status == "normal":
-        mqtt.send_node_command(mac, "restore:normal")
+        _send_restore_normal(mac)
     elif status == "offset_calibration_needed":
         mqtt.send_node_command(mac, "restore:offsetcalibrationneeded")
 
@@ -161,7 +177,13 @@ def _restore_normal_if_calibrated(node):
         return
     appliance = models.get_appliance(node["appliance_id"])
     if appliance and appliance["operational_status"] == "normal":
-        mqtt.send_node_command(node["mac_address"], "restore:normal")
+        mac = node["mac_address"]
+        last = LAST_RESTORE_NORMAL.get(mac)
+        if last is not None and time.time() - last < RESTORE_HEAL_MIN_INTERVAL_SECONDS:
+            # This checkin is the node's echo of a restore:normal it just got —
+            # it is already normal, so re-sending would only start a ping-pong.
+            return
+        _send_restore_normal(mac)
 
 
 def handle_node_event(mac, payload):
@@ -303,9 +325,13 @@ def pair_device():
     cf, deductor = get_cf_deductor(current_sensor)
     initial_status = "normal" if _is_dryer(app_type) else "offset_calibration_needed"
 
+    conn = get_conn()
+    if not conn:
+        flash("Error pairing device: database unavailable. Please try again.", "error")
+        return redirect(url_for("dashboard"))
+    cur = conn.cursor()
+    mac = None
     try:
-        conn = get_conn()
-        cur = conn.cursor()
         cur.execute("""
             INSERT INTO appliances
             (user_id, name, type, is_inverter, location, brand,
@@ -317,25 +343,42 @@ def pair_device():
               # Dryers never calibrate: their display window starts at pairing.
               config.now_wib() if _is_dryer(app_type) else None))
         appliance_id = cur.fetchone()[0]
+        # Guarded claim: only a node that is STILL unpaired can be taken, so
+        # two simultaneous pair requests for the same node cannot both win.
         cur.execute("""
             UPDATE sensor_nodes
             SET appliance_id = %s, status = 'paired'
-            WHERE id = %s
+            WHERE id = %s AND status = 'unpaired'
             RETURNING mac_address
         """, (appliance_id, node_id))
-        mac = cur.fetchone()[0]
+        row = cur.fetchone()
+        if not row:
+            # Node was claimed meanwhile: undo the appliance insert as well.
+            conn.rollback()
+            flash("Node not available", "error")
+            return redirect(url_for("dashboard"))
+        mac = row[0]
         conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"pair_device error (node {node_id}): {e}")
+        flash("Error pairing device. Please try again.", "error")
+        return redirect(url_for("dashboard"))
+    finally:
         cur.close()
         release_conn(conn)
 
+    try:
         _send_type_config(mac, app_type, current_sensor, initial_status)
-
-        if _is_dryer(app_type):
-            flash(f"{name} added and ready. Configure baseline to enable alerts.", "success")
-        else:
-            flash(f"{name} added. Hold the hidden button for 5s in still air, then start the AC to calibrate offsets.", "success")
     except Exception as e:
-        flash(f"Error pairing device: {e}", "error")
+        # The pairing is committed; an unpaired node re-requests its config
+        # every 10 s, so it picks the new type up on its next request.
+        print(f"pair_device: could not notify node {mac}: {e}")
+
+    if _is_dryer(app_type):
+        flash(f"{name} added and ready. Configure baseline to enable alerts.", "success")
+    else:
+        flash(f"{name} added. Hold the hidden button for 5s in still air, then start the AC to calibrate offsets.", "success")
 
     return redirect(url_for("dashboard"))
 
@@ -449,7 +492,11 @@ def api_device_latest(appliance_id):
 
     icomp = row["icompressor"] or 0
     running = icomp >= config.RUNNING_CURRENT_THRESHOLD
-    delta_t = round((row["treturn"] or 0) - (row["tsupply"] or 0), 2)
+    # Delta-T only exists when BOTH probes reported: a missing (null) probe
+    # must show "--", never a fake difference against 0 °C.
+    delta_t = (round(row["treturn"] - row["tsupply"], 2)
+               if row["treturn"] is not None and row["tsupply"] is not None
+               else None)
     return jsonify({
         "time": row["time"].isoformat(),
         "Treturn": row["treturn"],
@@ -732,7 +779,8 @@ def api_device_latest_n(appliance_id):
                 "time": r[0].isoformat(),
                 "Treturn": r[1],
                 "Tsupply": r[2],
-                "DeltaT": round((r[1] or 0) - (r[2] or 0), 2),
+                "DeltaT": (round(r[1] - r[2], 2)
+                           if r[1] is not None and r[2] is not None else None),
                 "Icompressor": r[3],
                 "Tcoil": None,
                 "RHreturn": None,
@@ -741,7 +789,8 @@ def api_device_latest_n(appliance_id):
             for r in rows
         ])
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"latest_n error (appliance {appliance_id}): {e}")
+        return jsonify({"error": "Internal server error"}), 500
     finally:
         if conn:
             cur.close()
@@ -906,7 +955,8 @@ def api_export_excel(appliance_id):
             download_name=download_name,
         )
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"export_excel error (appliance {appliance_id}): {e}")
+        return jsonify({"error": "Internal server error"}), 500
     finally:
         if conn:
             cur.close()
@@ -940,8 +990,12 @@ def api_user_discord_webhook():
 
     data = request.get_json() or {}
     webhook_url = (data.get("webhook_url") or data.get("url") or "").strip()
-    if webhook_url and not webhook_url.startswith(("http://", "https://")):
-        return jsonify({"error": "Invalid webhook URL"}), 400
+    # Only real Discord webhook URLs may be stored: the alert worker POSTs to
+    # this URL from inside the server network, so an arbitrary URL would let a
+    # user make the server call internal/other hosts (SSRF). Empty = clear.
+    if webhook_url and not alerts.is_discord_webhook_url(webhook_url):
+        return jsonify({"error": "Invalid webhook URL. Use a Discord webhook "
+                                 "(https://discord.com/api/webhooks/...)."}), 400
 
     if models.update_user_webhook(current_user.id, webhook_url):
         return jsonify({"success": True})
@@ -955,6 +1009,9 @@ def api_user_discord_webhook_test():
     webhook_url = (data.get("webhook_url") or data.get("url") or "").strip()
     if not webhook_url:
         return jsonify({"error": "Webhook URL is required"}), 400
+    if not alerts.is_discord_webhook_url(webhook_url):
+        return jsonify({"error": "Invalid webhook URL. Use a Discord webhook "
+                                 "(https://discord.com/api/webhooks/...)."}), 400
 
     try:
         payload = {
@@ -972,16 +1029,12 @@ def api_user_discord_webhook_test():
             return jsonify({"success": True, "message": "Test alert sent"})
         return jsonify({"error": f"Discord returned {resp.status_code}"}), 400
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"Discord webhook test error: {e}")
+        return jsonify({"error": "Could not reach Discord"}), 500
 
 
-@devices_bp.route("/api/send_command", methods=["POST"])
-@login_required
-def api_send_command():
-    data = request.get_json() or {}
-    mac = (data.get("mac") or "").strip()
-    command = (data.get("command") or "").strip()
-    if not mac or not command:
-        return jsonify({"error": "mac and command are required"}), 400
-    mqtt.send_node_command(mac, command)
-    return jsonify({"success": True, "message": f"Command '{command}' sent to {mac}"})
+# NOTE (2026-11-14): the former POST /api/send_command passthrough was removed.
+# It let ANY logged-in user publish ANY control command (setwifi:, setmqtt:,
+# settype:unpaired, ota:, ...) to ANY node MAC, with no ownership check, and
+# nothing in the dashboard used it. Node commands are only sent by the backend
+# flows that own them (pairing, calibration, forget, baseline, OTA tool).

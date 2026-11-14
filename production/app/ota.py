@@ -7,6 +7,7 @@ MQTT-trigger message, which itself rides the authenticated, TLS-protected
 control topic).
 """
 
+import hmac
 import os
 
 from flask import Blueprint, send_file, jsonify
@@ -18,7 +19,10 @@ ota_bp = Blueprint("ota", __name__)
 
 @ota_bp.route("/firmware/<token>/<path:filename>")
 def serve_firmware(token, filename):
-    if not config.OTA_TOKEN or token != config.OTA_TOKEN:
+    # Constant-time comparison: the token must not be guessable from response
+    # timing.
+    if not config.OTA_TOKEN or not hmac.compare_digest(
+            token.encode("utf-8"), config.OTA_TOKEN.encode("utf-8")):
         return jsonify({"error": "unauthorized"}), 401
     if not config.OTA_FILENAME_RE.match(filename):
         return jsonify({"error": "invalid file"}), 400

@@ -148,16 +148,29 @@ def get_appliances_for_user(user_id):
         return []
     cur = conn.cursor()
     try:
+        # alert_status is computed in the same query (same ranking and the
+        # same 'normal' default as get_appliance_alert_status) instead of one
+        # extra pool checkout per appliance while this connection is held.
         cur.execute("""
-            SELECT id, name, type, sub_type, is_inverter, brand, location,
-                   created_at, operational_status, baseline_configured,
-                   alert_enabled,
-                   treturn_offset, tsupply_offset, delta_t_lcl,
-                   delta_t_delay_minutes, atmospheric_pressure,
-                   map_x, map_y, map_w, map_h, map_on_map, current_sensor
-            FROM appliances
-            WHERE user_id = %s
-            ORDER BY created_at
+            SELECT a.id, a.name, a.type, a.sub_type, a.is_inverter, a.brand, a.location,
+                   a.created_at, a.operational_status, a.baseline_configured,
+                   a.alert_enabled,
+                   a.treturn_offset, a.tsupply_offset, a.delta_t_lcl,
+                   a.delta_t_delay_minutes, a.atmospheric_pressure,
+                   a.map_x, a.map_y, a.map_w, a.map_h, a.map_on_map, a.current_sensor,
+                   COALESCE(NULLIF((
+                       SELECT al.severity FROM alerts al
+                       WHERE al.appliance_id = a.id AND al.resolved_at IS NULL
+                       ORDER BY CASE al.severity
+                           WHEN 'critical' THEN 3
+                           WHEN 'warning' THEN 2
+                           ELSE 1
+                       END DESC
+                       LIMIT 1
+                   ), ''), 'normal') AS alert_status
+            FROM appliances a
+            WHERE a.user_id = %s
+            ORDER BY a.created_at
         """, (user_id,))
         rows = cur.fetchall()
         appliances = []
@@ -185,7 +198,7 @@ def get_appliances_for_user(user_id):
                 "map_h": r[19],
                 "map_on_map": r[20],
                 "current_sensor": r[21],
-                "alert_status": get_appliance_alert_status(r[0]),
+                "alert_status": r[22],
             }
             appliances.append(app)
         return appliances
@@ -684,6 +697,36 @@ def update_offsets(appliance_id, treturn_offset, tsupply_offset):
         release_conn(conn)
 
 
+def set_calib_prev_offsets(appliance_id, treturn_offset, tsupply_offset):
+    """Persist the offsets that were in effect BEFORE a calibration session
+    zeroed them, so a backend restart mid-session can still restore them
+    (the RAM tracker copy is lost on restart)."""
+    conn = get_conn()
+    if not conn:
+        return False
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            UPDATE appliances
+            SET calib_prev_treturn_offset = %s, calib_prev_tsupply_offset = %s
+            WHERE id = %s
+        """, (treturn_offset, tsupply_offset, appliance_id))
+        conn.commit()
+        return cur.rowcount > 0
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+        release_conn(conn)
+
+
+def clear_calib_prev_offsets(appliance_id):
+    """Forget the persisted pre-session offsets once the session has ended
+    (success, failure, rejection, cancel or revert)."""
+    return set_calib_prev_offsets(appliance_id, None, None)
+
+
 def mark_calibrated(appliance_id):
     """Record a successful calibration: `calibrated_at` refreshes every time;
     `initial_calibrated_at` (the display-window start) is written only on the
@@ -951,7 +994,8 @@ def save_spc_baselines(appliance_id, baselines):
         return True, "Baseline saved successfully"
     except Exception as e:
         conn.rollback()
-        return False, str(e)
+        print(f"save_spc_baselines error (appliance {appliance_id}): {e}")
+        return False, "Failed to save baseline"
     finally:
         cur.close()
         release_conn(conn)

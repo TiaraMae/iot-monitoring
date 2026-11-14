@@ -9,12 +9,14 @@ v4 drop-based protocol (firmware-driven):
    sample window — the AC must be OFF at this point — then the user starts the
    AC in cooling mode.
 3. While running, the firmware publishes throttled ``calibration_progress``
-   events ``{ds2, base_ds2, delta}`` and, once the supply probe (DS2) has
-   dropped >= 8.0 C below baseline, a ``calibration_success_request`` with the
-   base/final readings. On the 10-minute timeout it publishes a
-   ``calibration_fail_request``.
-4. The backend validates the reported drop (supply >= 7.5 C, return >= 2.5 C),
-   then aligns sensor 2 to sensor 1: sensor 1 (Port 1, return) is the trusted
+   events ``{ds1, base_ds1, delta}`` and, once the REFERENCE probe (DS1,
+   Port 1) has dropped >= 8.0 C below baseline (signed: only cooling counts),
+   a ``calibration_success_request`` with the base/final readings. A baseline
+   that cannot be captured within 60 s fails as ``sensor_fault_ds1|_ds2``; the
+   overall 10-minute timeout publishes a ``calibration_fail_request``.
+4. The backend validates the reported drop (reference DS1 >= 7.5 C, tracking
+   DS2 >= 2.5 C, temperature actually fell), then aligns sensor 2 to sensor 1:
+   sensor 1 (Port 1, return) is the trusted
    reference (offset stays 0); sensor 2 (Port 2, supply) gets the additive
    offset c = base_ds1 - base_ds2 (affine y = m*x + c with m = 1 — a single
    shared calibration point fixes c only). Both probes then read identically
@@ -22,9 +24,13 @@ v4 drop-based protocol (firmware-driven):
    `calibrated_at`; failure reverts to `offset_calibration_needed` with the
    previous offsets restored.
 
-The drop is monitored on the supply probe (DS2) because it sits in the
-supply-air stream and tracks the evaporator cold front fastest; v4 monitored
-the coil DS18B20 directly, which this hardware does not have.
+Both probes sit at the SAME point during calibration, so the drop that proves
+real cooling is measured on the reference probe (DS1); DS2 only has to follow
+it. (v4 monitored a coil DS18B20, which this hardware does not have.)
+
+The offsets in effect before a session are persisted in
+``appliances.calib_prev_treturn_offset / calib_prev_tsupply_offset`` as well as
+in the RAM tracker, so a backend restart mid-session can still restore them.
 """
 
 from flask import Blueprint, jsonify
@@ -65,14 +71,46 @@ def _expire_tracker(appliance_id):
     return False
 
 
+def _saved_prev_offsets(appliance):
+    """The pre-session offsets persisted in the DB, or None when not set."""
+    if not appliance:
+        return None
+    tr = appliance.get("calib_prev_treturn_offset")
+    ts = appliance.get("calib_prev_tsupply_offset")
+    if tr is None or ts is None:
+        return None
+    return (tr, ts)
+
+
+def _prev_offsets(appliance_id, tracker):
+    """Offsets to restore when a session ends without success. The RAM
+    tracker is the primary source (unchanged behavior); the DB copy is only a
+    fallback for when the tracker was lost (backend restarted mid-session) or
+    was re-created by a progress event without prev_offsets."""
+    prev = (tracker or {}).get("prev_offsets")
+    if prev is not None:
+        return prev
+    return _saved_prev_offsets(models.get_appliance(appliance_id))
+
+
 def _begin_session(appliance_id, mac):
     """Approve the calibration: zero offsets so calibration-period telemetry
     is raw, mark the appliance calibrating, and tell the node to capture its
-    baseline. The previous offsets are kept in the tracker so a failed or
-    cancelled re-calibration can restore them."""
+    baseline. The previous offsets are kept in the tracker (and persisted in
+    the DB) so a failed or cancelled re-calibration can restore them."""
     appliance = models.get_appliance(appliance_id) or {}
-    prev_offsets = (appliance.get("treturn_offset") or 0.0,
-                    appliance.get("tsupply_offset") or 0.0)
+    current = (appliance.get("treturn_offset") or 0.0,
+               appliance.get("tsupply_offset") or 0.0)
+    prev_offsets = current
+    if appliance.get("operational_status") == "calibrating":
+        # Re-approval after a backend restart: the DB offsets were already
+        # zeroed by the lost session, so the real pre-session offsets are the
+        # persisted ones (when present).
+        saved = _saved_prev_offsets(appliance)
+        if saved is not None:
+            prev_offsets = saved
+    # Persist BEFORE zeroing so a crash in between can never lose them.
+    models.set_calib_prev_offsets(appliance_id, prev_offsets[0], prev_offsets[1])
     models.update_offsets(appliance_id, 0.0, 0.0)
     models.update_operational_status(appliance_id, "calibrating")
     CALIBRATION_TRACKER[appliance_id] = {
@@ -89,10 +127,11 @@ def _begin_session(appliance_id, mac):
 def _revert_to_calibration_needed(appliance_id, tracker):
     """Restore the offsets zeroed at session start and put the appliance back
     to `offset_calibration_needed` (the pre-calibration state)."""
-    prev = (tracker or {}).get("prev_offsets")
+    prev = _prev_offsets(appliance_id, tracker)
     if prev is not None:
         models.update_offsets(appliance_id, prev[0], prev[1])
     models.update_operational_status(appliance_id, "offset_calibration_needed")
+    models.clear_calib_prev_offsets(appliance_id)
 
 
 def _notify_session_reset(appliance_id):
@@ -226,8 +265,12 @@ def handle_calibration_success_request(mac, appliance, data):
 
     tracker = CALIBRATION_TRACKER.pop(appliance_id, None) or {}
 
-    base = data.get("base") or {}
-    final = data.get("final") or {}
+    base = (data.get("base") if isinstance(data.get("base"), dict) else None) or {}
+    final = (data.get("final") if isinstance(data.get("final"), dict) else None) or {}
+    # Initialised up front so a malformed payload is REJECTED cleanly (failack
+    # + revert) instead of raising on an unbound name and leaving the node
+    # waiting for an ack that never comes.
+    base_ds1 = base_ds2 = final_ds1 = final_ds2 = None
     try:
         base_ds1 = float(base.get("ds1"))
         base_ds2 = float(base.get("ds2"))
@@ -236,20 +279,21 @@ def handle_calibration_success_request(mac, appliance, data):
         ds1_delta = abs(base_ds1 - final_ds1)
         ds2_delta = abs(base_ds2 - final_ds2)
     except (TypeError, ValueError):
+        base_ds1 = base_ds2 = final_ds1 = final_ds2 = None
         ds1_delta = ds2_delta = 0.0
-        final_ds2 = None
 
     # The drop is validated on the REFERENCE probe (DS1): only cooling counts,
     # a temperature rise must never complete calibration. DS2 (tracking probe)
     # must also have moved: both probes are assumed to sit at the same point,
     # so a DS2 that did not follow indicates a dead or sluggish probe.
-    no_cooling = final_ds1 is None or final_ds1 >= base_ds1
+    no_cooling = final_ds1 is None or base_ds1 is None or final_ds1 >= base_ds1
 
     if no_cooling or ds1_delta < MIN_REFERENCE_DROP or ds2_delta < MIN_TRACKING_DROP:
-        prev = tracker.get("prev_offsets")
+        prev = _prev_offsets(appliance_id, tracker)
         if prev is not None:
             models.update_offsets(appliance_id, prev[0], prev[1])
         models.update_operational_status(appliance_id, "offset_calibration_needed")
+        models.clear_calib_prev_offsets(appliance_id)
         mqtt.send_node_command(mac, "offsetcalibrationfailack")
         print(f"Calibration appliance {appliance_id} REJECTED: "
               f"reference (DS1) drop {ds1_delta:.2f} C (need {MIN_REFERENCE_DROP}), "
@@ -267,6 +311,7 @@ def handle_calibration_success_request(mac, appliance, data):
 
     models.update_offsets(appliance_id, treturn_offset, tsupply_offset)
     models.update_operational_status(appliance_id, "normal")
+    models.clear_calib_prev_offsets(appliance_id)
     is_initial_calibration = appliance.get("initial_calibrated_at") is None
     models.mark_calibrated(appliance_id)
     if is_initial_calibration:
@@ -288,10 +333,11 @@ def handle_calibration_fail_request(mac, appliance_id, reason=None):
     tracker = CALIBRATION_TRACKER.pop(appliance_id, None) or {}
     appliance = models.get_appliance(appliance_id)
     if appliance and appliance["operational_status"] == "calibrating":
-        prev = tracker.get("prev_offsets")
+        prev = _prev_offsets(appliance_id, tracker)
         if prev is not None:
             models.update_offsets(appliance_id, prev[0], prev[1])
         models.update_operational_status(appliance_id, "offset_calibration_needed")
+        models.clear_calib_prev_offsets(appliance_id)
     mqtt.send_node_command(mac, "offsetcalibrationfailack")
     try:
         models.insert_sensor_event(mac, "calibration_fail", reason)
@@ -399,8 +445,9 @@ def api_cancel_calibration(appliance_id):
         # Re-open the firmware telemetry gate (no-op if already open).
         mqtt.send_node_command(mac, "restore:normal")
 
-    prev = tracker.get("prev_offsets")
+    prev = _prev_offsets(appliance_id, tracker)
     if prev is not None:
         models.update_offsets(appliance_id, prev[0], prev[1])
     models.update_operational_status(appliance_id, "normal")
+    models.clear_calib_prev_offsets(appliance_id)
     return jsonify({"ok": True})

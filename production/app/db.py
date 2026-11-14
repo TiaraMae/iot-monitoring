@@ -12,10 +12,14 @@ from app import config
 # Waitress worker threads, the paho MQTT network thread and background workers.
 # SimpleConnectionPool's getconn/putconn bookkeeping is unlocked, so concurrent
 # checkouts can corrupt it (duplicate keys, lost slots -> "pool exhausted").
+# maxconn 20 (was 10): 4 Waitress threads + the paho MQTT thread + the Discord
+# worker + startup/rehydration all share this pool, and some request paths
+# hold one connection while taking another. An exhausted pool makes
+# get_conn() return None and every model silently return empty results.
 try:
     db_pool = psycopg2.pool.ThreadedConnectionPool(
         1,
-        10,
+        20,
         host=config.DB_HOST,
         port=config.DB_PORT,
         dbname=config.DB_NAME,
@@ -200,6 +204,11 @@ def _run_startup_migrations():
             ("appliances", "current_sensor", "TEXT"),
             ("appliances", "calibrated_at", "TIMESTAMP"),
             ("appliances", "initial_calibrated_at", "TIMESTAMP"),
+            # Offsets in effect before a calibration session zeroed them
+            # (NULL when no session is running). Lets a backend restart
+            # mid-session restore the right offsets instead of leaving 0/0.
+            ("appliances", "calib_prev_treturn_offset", "REAL"),
+            ("appliances", "calib_prev_tsupply_offset", "REAL"),
             ("appliances", "updated_at", "TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()"),
             ("sensor_nodes", "last_seen", "TIMESTAMP WITHOUT TIME ZONE"),
             ("dryer_readings", "abs_pressure", "REAL"),
