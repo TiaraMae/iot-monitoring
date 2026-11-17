@@ -55,6 +55,19 @@ MQTT_PASS = _require_env("MQTT_PASS")
 RUNNING_CURRENT_THRESHOLD = 0.25
 MQTT_TOPIC_PREFIX = "iot/production/nodes"
 UNPAIRED_TIMEOUT_SECONDS = 30
+# Node telemetry cadence (firmware: 5 samples x 2 s). Used to space readings
+# that the broker queued while the backend was offline (see telemetry.py).
+TELEMETRY_INTERVAL_SECONDS = 10
+# Backlog detection after a broker reconnect: a reading with agoms=0 counts as
+# queued when it arrives this soon after the previous one from the same node
+# (live cadence is 10 s) ...
+BACKLOG_BURST_SECONDS = 5
+# ... or is the node's first message within this many seconds of the reconnect.
+BACKLOG_FIRST_MESSAGE_SECONDS = 3
+# Reconstruction only runs this long after a reconnect, and only when the gap to
+# the node's last stored reading is larger than BACKLOG_MIN_GAP_SECONDS.
+BACKLOG_WINDOW_SECONDS = 900
+BACKLOG_MIN_GAP_SECONDS = 15
 # A paired node streams telemetry every 10 s; silence beyond this marks it offline.
 OFFLINE_TIMEOUT_SECONDS = 120
 # A need-calibration node streams no telemetry by design (mandatory calibration);

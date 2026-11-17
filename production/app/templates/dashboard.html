@@ -4,10 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>IoT Monitoring</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <!-- Pinned to major v4: an unversioned URL would silently jump to a future
-         breaking major release. -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <!-- Chart.js 4.4.1 is served from this server (app/static/vendor), not a
+         CDN: on-campus users must get a working page and charts even while the
+         campus internet uplink is down. System fonts for the same reason. -->
+    <script src="{{ url_for('static', filename='vendor/chart.umd.min.js') }}"></script>
     <style>
         :root {
             --bg: #F8FAFC;
@@ -26,7 +26,9 @@
             --radius: 12px;
             --sidebar-width: 260px;
         }
-        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; }
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', -apple-system, Roboto, Helvetica, Arial, sans-serif; }
+        .conn-banner { display: none; margin-bottom: 1rem; padding: 0.65rem 1rem; border-radius: 8px;
+                       background: #FEF3C7; color: #92400E; border: 1px solid #FCD34D; font-size: 0.9rem; }
         body { background: var(--bg); color: var(--text); display: flex; min-height: 100vh; overflow-x: hidden; }
 
         /* --- SIDEBAR --- */
@@ -639,6 +641,8 @@
                 {% endif %}
             {% endwith %}
 
+            <div id="conn-banner" class="conn-banner" role="status" aria-live="polite"></div>
+
             <!-- DASHBOARD VIEW -->
             <div id="view-dashboard" class="view-section active">
                 <div class="page-header"><h1 class="page-title">Device Dashboard</h1></div>
@@ -1126,10 +1130,30 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+const FETCH_TIMEOUT_MS = 8000;
+
 async function fetchJson(url, options = {}) {
     // no-store: API responses must never come from the browser cache (a
     // stale /latest would freeze cards in their last-known state).
-    const resp = await fetch(url, { credentials: 'same-origin', cache: 'no-store', ...options });
+    // Timeout: on a dead network a fetch can hang for minutes; abort it so
+    // polls fail fast instead of piling up.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    let resp;
+    try {
+        resp = await fetch(url, { credentials: 'same-origin', cache: 'no-store',
+                                  signal: controller.signal, ...options });
+    } catch (e) {
+        throw new Error(e && e.name === 'AbortError' ? 'Request timed out' : 'Network error');
+    } finally {
+        clearTimeout(timer);
+    }
+    if (resp.status === 401) {
+        // Session expired: the API answers 401 JSON instead of redirecting,
+        // so send the user to the login page rather than freezing silently.
+        window.location.href = '/login';
+        throw new Error('Unauthorized');
+    }
     const text = await resp.text();
     let data;
     try { data = JSON.parse(text); } catch (e) { data = text; }
@@ -1321,10 +1345,36 @@ function updateCardStatus(a, data) {
     badge.textContent = txt;
 }
 
+// Card poll bookkeeping: skip a tick while the previous one is still
+// running, and show a banner after repeated failures.
+let liveInFlight = false;
+let liveFailures = 0;
+let lastLiveOk = null;
+
+function setConnBanner(show) {
+    const el = document.getElementById('conn-banner');
+    if (!el) return;
+    if (!show) { el.style.display = 'none'; return; }
+    const when = lastLiveOk
+        ? lastLiveOk.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+        : 'not yet';
+    el.textContent = 'Connection to the server lost. Last updated: ' + when + '. Retrying automatically...';
+    el.style.display = 'block';
+}
+
 function updateLiveData() {
-    if (!appliances.length) return;
+    if (!appliances.length || liveInFlight) return;
+    liveInFlight = true;
     Promise.all(appliances.map(a => fetchJson('/api/device/' + a.id + '/latest').catch(() => null)))
         .then(results => {
+            if (results.some(r => r)) {
+                liveFailures = 0;
+                lastLiveOk = new Date();
+                setConnBanner(false);
+            } else {
+                liveFailures += 1;
+                if (liveFailures >= 2) setConnBanner(true);
+            }
             results.forEach((data, i) => {
                 if (!data) return;
                 // One failing appliance/response must never freeze the other
@@ -1387,7 +1437,8 @@ function updateLiveData() {
                 // open — no updateDetailData() call here (it duplicated every
                 // /latest request and coupled the two polls' failure modes).
             });
-        }).catch(e => console.error('live poll error', e));
+        }).catch(e => console.error('live poll error', e))
+        .finally(() => { liveInFlight = false; });
 }
 
 
@@ -1898,8 +1949,10 @@ function keyMapToMetric(key) {
     return map[key];
 }
 
+let detailInFlight = false;
+
 function updateDetailData() {
-    if (!selectedApplianceId) return;
+    if (!selectedApplianceId || detailInFlight) return;
     if (!document.getElementById('detail-overlay').classList.contains('active')) return;
     const a = appliances.find(x => x.id === selectedApplianceId);
     if (!a) return;
@@ -1909,6 +1962,7 @@ function updateDetailData() {
     loadMaintenanceTable();
     loadAlerts();
 
+    detailInFlight = true;
     fetchJson('/api/device/' + selectedApplianceId + '/latest').then(data => {
         // During calibration, mirror the live S2 (supply) reading into the
         // progress bar (S1 comes from the calibration_progress endpoint).
@@ -1966,7 +2020,8 @@ function updateDetailData() {
                 Object.values(detailCharts).forEach(c => { if (c) c.update('none'); });
             }
         }
-    }).catch(e => console.error('detail poll error', e));
+    }).catch(e => console.error('detail poll error', e))
+      .finally(() => { detailInFlight = false; });
 }
 
 /* --- BASELINE CONFIG (inline per chart) --- */

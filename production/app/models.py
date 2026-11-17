@@ -337,10 +337,11 @@ def unpair_node_by_appliance(appliance_id):
 
 
 def insert_hvac_reading(sensor_node_id, time, treturn, tsupply, icompressor,
-                        during_calibration=False):
+                        during_calibration=False, time_estimated=False):
     """during_calibration marks rows recorded while a calibration session had
     the offsets zeroed (raw probe values): kept for charts/energy, excluded
-    from the temperature averages."""
+    from the temperature averages. time_estimated marks broker-queued readings
+    whose time was reconstructed after a backend outage (telemetry.py)."""
     conn = get_conn()
     if not conn:
         return None
@@ -348,11 +349,12 @@ def insert_hvac_reading(sensor_node_id, time, treturn, tsupply, icompressor,
     try:
         cur.execute("""
             INSERT INTO hvac_readings
-            (sensor_node_id, time, treturn, tsupply, icompressor, during_calibration)
-            VALUES (%s, %s, %s, %s, %s, %s)
+            (sensor_node_id, time, treturn, tsupply, icompressor, during_calibration,
+             time_estimated)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
             RETURNING id
         """, (sensor_node_id, time, treturn, tsupply, icompressor,
-              bool(during_calibration)))
+              bool(during_calibration), bool(time_estimated)))
         reading_id = cur.fetchone()[0]
         conn.commit()
         return reading_id
@@ -365,7 +367,8 @@ def insert_hvac_reading(sensor_node_id, time, treturn, tsupply, icompressor,
 
 
 def insert_dryer_reading(
-    sensor_node_id, time, texhaust, rh_exhaust, pressure, abs_pressure, imotor
+    sensor_node_id, time, texhaust, rh_exhaust, pressure, abs_pressure, imotor,
+    time_estimated=False,
 ):
     conn = get_conn()
     if not conn:
@@ -374,16 +377,38 @@ def insert_dryer_reading(
     try:
         cur.execute("""
             INSERT INTO dryer_readings
-            (sensor_node_id, time, texhaust, rh_exhaust, pressure, abs_pressure, imotor)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            (sensor_node_id, time, texhaust, rh_exhaust, pressure, abs_pressure, imotor,
+             time_estimated)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             RETURNING id
-        """, (sensor_node_id, time, texhaust, rh_exhaust, pressure, abs_pressure, imotor))
+        """, (sensor_node_id, time, texhaust, rh_exhaust, pressure, abs_pressure, imotor,
+              bool(time_estimated)))
         reading_id = cur.fetchone()[0]
         conn.commit()
         return reading_id
     except Exception:
         conn.rollback()
         raise
+    finally:
+        cur.close()
+        release_conn(conn)
+
+
+def get_last_reading_time(sensor_node_id):
+    """Newest stored reading time for a node (HVAC or dryer), or None."""
+    conn = get_conn()
+    if not conn:
+        return None
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT GREATEST(
+                (SELECT MAX(time) FROM hvac_readings WHERE sensor_node_id = %s),
+                (SELECT MAX(time) FROM dryer_readings WHERE sensor_node_id = %s)
+            )
+        """, (sensor_node_id, sensor_node_id))
+        row = cur.fetchone()
+        return row[0] if row else None
     finally:
         cur.close()
         release_conn(conn)

@@ -18,7 +18,10 @@ param(
     [string]$NssmPath = "C:\nssm\nssm.exe",
     [string]$PythonPath = "python",
     [int]$Threads = 4,
-    [int]$Port = 5000
+    [int]$Port = 5000,
+    # PostgreSQL Windows service the backend waits for at boot. Check the real
+    # name on the host with:  Get-Service postgres*
+    [string]$PostgresService = "postgresql-x64-18"
 )
 
 $ErrorActionPreference = "Stop"
@@ -84,6 +87,15 @@ $waitressArgs = "-m waitress --listen=127.0.0.1:$Port --threads=$Threads run:app
 & $NssmPath set $ServiceName AppRotateOnline 1
 # Unbuffered stdout: log lines appear immediately and survive a crash.
 & $NssmPath set $ServiceName AppEnvironmentExtra PYTHONUNBUFFERED=1
+
+# Start only after PostgreSQL. Without this the backend can start while
+# Postgres is still "starting up" (seen 2026-10-20). The app now retries the
+# DB pool by itself, so this is a second line of defence.
+if (Get-Service -Name $PostgresService -ErrorAction SilentlyContinue) {
+    & $NssmPath set $ServiceName DependOnService $PostgresService
+} else {
+    Write-Host "WARNING: service '$PostgresService' not found; no DB start dependency set." -ForegroundColor Yellow
+}
 
 # Configure restart on failure
 & $NssmPath set $ServiceName AppRestartDelay 5000  # 5 seconds

@@ -98,10 +98,11 @@ def test_compute_actual_time():
 
 
 def test_dedupe_window():
-    """Reconnect bursts (broker-queued agoms:0 messages arriving together)
-    are collapsed by the 1.0 s dedupe window: arrivals < 1 s apart are dropped,
-    arrivals >= 1 s apart are kept — that is exactly why stored rows can sit
-    1-2 s apart after a backend outage. Dedupe is per-MAC."""
+    """The 1.0 s dedupe window: readings < 1 s apart are dropped, >= 1 s apart
+    are kept, per MAC. (Since 2026-11-17 broker-queued reconnect bursts are
+    re-timed at the 10 s cadence BEFORE this check, so they are no longer
+    collapsed; see tests/test_outage_resilience.py.) The dedupe now runs after
+    the node lookup, so the test supplies an (unpaired) node."""
     mac = "DE:DU:PE:00:00:01"
     mac2 = "DE:DU:PE:00:00:02"
     telemetry.DEDUPE_CACHE.clear()
@@ -111,9 +112,9 @@ def test_dedupe_window():
                   t0 + timedelta(seconds=1.5), t0 + timedelta(seconds=1.5),  # msg 3: kept (>= 1 s)
                   t0, t0])                      # msg 4 (other MAC): kept
     with patch("app.telemetry.config.now_wib", side_effect=lambda: next(times)), \
-         patch("app.telemetry.models.get_sensor_node_by_mac", return_value=None), \
-         patch("app.telemetry.models.register_unpaired_node", return_value=1), \
-         patch("app.telemetry.models.get_node_by_id", return_value=None):
+         patch("app.telemetry.models.get_sensor_node_by_mac",
+               return_value={"id": 1, "appliance_id": None, "status": "unpaired"}), \
+         patch("app.telemetry.models.update_node_last_seen", return_value=None):
         telemetry.handle_telemetry(mac, '{"agoms":0}')
         assert telemetry.DEDUPE_CACHE.get(mac) == t0, "msg 1 should seed the dedupe cache"
         telemetry.handle_telemetry(mac, '{"agoms":0}')

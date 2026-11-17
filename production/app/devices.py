@@ -14,7 +14,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, Alignment, PatternFill
 from openpyxl.utils import get_column_letter
 
-from app import config, models, mqtt
+from app import config, db, models, mqtt
 from app import calibration
 from app import alerts
 from app.db import get_conn, release_conn
@@ -207,6 +207,13 @@ def handle_node_event(mac, payload):
         return
 
     node = models.get_sensor_node_by_mac(mac)
+    if node is None and not db.is_available():
+        # "Not found" and "database down" both come back as None. Treating a
+        # DB outage as "unknown node" made the backend send settype:unpaired
+        # to PAIRED nodes, which wipes their pairing/CF/deductor from flash
+        # (2026-10-20 zombie: 152 such commands). Do nothing until the DB is back.
+        db.log_unavailable(f"event {event_type} from {mac}")
+        return
 
     if event_type == "event_request_config":
         if not node:

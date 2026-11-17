@@ -187,7 +187,8 @@ def main():
                 r = client.get(path)
                 csp = r.headers.get('Content-Security-Policy', '')
                 check(f'CSP header on {path}',
-                      "default-src 'self'" in csp and 'https://cdn.jsdelivr.net' in csp
+                      "default-src 'self'" in csp and 'cdn.jsdelivr.net' not in csp
+                      and 'fonts.googleapis.com' not in csp
                       and "frame-ancestors 'self'" in csp)
 
             # ---------------- PERF: energy summary cache ----------------

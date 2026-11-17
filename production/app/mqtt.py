@@ -57,6 +57,16 @@ def send_node_command(mac, command):
 # brief broker-side drops from multi-minute network outages in the log.
 _lost_at = None
 
+# Last successful (re)connect: monotonic time + whether the broker kept our
+# session. session_present=True means messages published while we were offline
+# were queued and are about to arrive in a burst (telemetry.py re-times them).
+_last_connect = {"mono": None, "session_present": False}
+
+
+def last_connect():
+    """(monotonic time of the last connect or None, broker kept the session)."""
+    return _last_connect["mono"], _last_connect["session_present"]
+
 
 def _ts():
     """WIB wall-clock stamp for connection log lines (outage correlation)."""
@@ -71,8 +81,11 @@ def on_connect(client, userdata, flags, rc, properties=None):
             secs = int((config.now_wib() - _lost_at).total_seconds())
             offline = f" after {secs}s offline"
             _lost_at = None
+        session_present = bool(getattr(flags, "session_present", False))
+        _last_connect["mono"] = time.monotonic()
+        _last_connect["session_present"] = session_present
         print(f"[{_ts()}] MQTT Connected Successfully! ID: "
-              f"{client._client_id}{offline}")
+              f"{client._client_id}{offline} session_present={session_present}")
         # QoS 1 so the broker can queue for the durable backend session
         # (clean_start=False, expiry 3600) while the backend is down —
         # delivery QoS is min(publish, subscribe), so nodes must also

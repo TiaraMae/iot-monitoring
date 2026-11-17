@@ -1,6 +1,8 @@
 """PostgreSQL connection pool and idempotent startup migrations."""
 
 import os
+import threading
+import time
 
 import psycopg2
 import psycopg2.pool
@@ -16,19 +18,53 @@ from app import config
 # worker + startup/rehydration all share this pool, and some request paths
 # hold one connection while taking another. An exhausted pool makes
 # get_conn() return None and every model silently return empty results.
-try:
-    db_pool = psycopg2.pool.ThreadedConnectionPool(
-        1,
-        20,
-        host=config.DB_HOST,
-        port=config.DB_PORT,
-        dbname=config.DB_NAME,
-        user=config.DB_USER,
-        password=config.DB_PASSWORD,
-    )
-except Exception as e:
-    print(f"DB Pool Error: {e}")
-    db_pool = None
+# Built lazily (and retried) by _ensure_pool(), NOT only once at import: on
+# 2026-10-20 the service started while Postgres was still "starting up", the
+# import-time build failed, db_pool stayed None for the whole process life and
+# the backend ran as a 44 h zombie (and told paired nodes to unpair).
+db_pool = None
+_pool_lock = threading.Lock()
+# Rate-limit the "pool build failed" log line while Postgres is down.
+_POOL_RETRY_LOG_SECONDS = 60
+_last_pool_error_log = 0.0
+# Startup migrations run once, right after the pool is first built — so a
+# backend that started before Postgres still migrates when the DB comes up.
+_migrations_done = False
+
+
+def _ensure_pool():
+    """Build the pool if it does not exist yet. Returns the pool or None."""
+    global db_pool, _last_pool_error_log
+    if db_pool is not None:
+        return db_pool
+    created = False
+    with _pool_lock:
+        if db_pool is not None:
+            return db_pool
+        try:
+            db_pool = psycopg2.pool.ThreadedConnectionPool(
+                1,
+                20,
+                host=config.DB_HOST,
+                port=config.DB_PORT,
+                dbname=config.DB_NAME,
+                user=config.DB_USER,
+                password=config.DB_PASSWORD,
+                connect_timeout=5,
+            )
+            created = True
+            if _last_pool_error_log:
+                print("DB pool created (database reachable again).")
+                _last_pool_error_log = 0.0
+        except Exception as e:
+            now = time.monotonic()
+            if not _last_pool_error_log or now - _last_pool_error_log >= _POOL_RETRY_LOG_SECONDS:
+                print(f"DB Pool Error: {e} (will retry on next use)")
+                _last_pool_error_log = now
+            db_pool = None
+    if created and not _migrations_done:
+        _run_startup_migrations()
+    return db_pool
 
 
 def get_conn():
@@ -43,17 +79,18 @@ def get_conn():
     is back (no service restart required).
     """
     try:
-        if not db_pool:
+        pool = _ensure_pool()
+        if not pool:
             return None
-        conn = db_pool.getconn()
+        conn = pool.getconn()
         try:
             with conn.cursor() as probe:
                 probe.execute("SELECT 1")
                 probe.fetchone()
             return conn
         except (psycopg2.OperationalError, psycopg2.InterfaceError):
-            db_pool.putconn(conn, close=True)
-            conn = db_pool.getconn()
+            pool.putconn(conn, close=True)
+            conn = pool.getconn()
             with conn.cursor() as probe:
                 probe.execute("SELECT 1")
                 probe.fetchone()
@@ -63,6 +100,30 @@ def get_conn():
     return None
 
 
+def is_available():
+    """True when a pooled connection can be checked out and answers SELECT 1.
+
+    Lets callers tell "the database is down" apart from "the row does not
+    exist" (model helpers return None for both)."""
+    conn = get_conn()
+    if not conn:
+        return False
+    release_conn(conn)
+    return True
+
+
+_last_unavailable_log = 0.0
+
+
+def log_unavailable(what):
+    """Rate-limited (once a minute) log for work skipped because the DB is down."""
+    global _last_unavailable_log
+    now = time.monotonic()
+    if not _last_unavailable_log or now - _last_unavailable_log >= _POOL_RETRY_LOG_SECONDS:
+        print(f"Database unavailable, skipped {what} (nodes are left untouched).")
+        _last_unavailable_log = now
+
+
 def release_conn(conn):
     if db_pool and conn:
         db_pool.putconn(conn)
@@ -70,6 +131,7 @@ def release_conn(conn):
 
 def _run_startup_migrations():
     """Run lightweight idempotent migrations on startup."""
+    global _migrations_done
     conn = get_conn()
     if not conn:
         return
@@ -216,6 +278,8 @@ def _run_startup_migrations():
             # zeroed (raw probes): kept for charts/energy, excluded from the
             # temperature averages. Old rows stay FALSE (not classifiable).
             ("hvac_readings", "during_calibration", "BOOLEAN DEFAULT FALSE"),
+            ("hvac_readings", "time_estimated", "BOOLEAN DEFAULT FALSE"),
+            ("dryer_readings", "time_estimated", "BOOLEAN DEFAULT FALSE"),
             ("alerts", "severity", "TEXT DEFAULT 'warning'"),
             ("alerts", "acknowledged", "BOOLEAN DEFAULT FALSE"),
             ("sensor_events", "detail", "TEXT"),
@@ -330,6 +394,7 @@ def _run_startup_migrations():
                 )
 
         conn.commit()
+        _migrations_done = True
     except Exception as e:
         print(f"Startup migration error: {e}")
         conn.rollback()
@@ -338,4 +403,6 @@ def _run_startup_migrations():
         release_conn(conn)
 
 
-_run_startup_migrations()
+# Build the pool (and run the migrations) now if Postgres is already up; if it
+# is still starting, the first get_conn() that finds it ready does both.
+_ensure_pool()

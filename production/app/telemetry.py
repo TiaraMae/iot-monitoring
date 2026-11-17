@@ -1,13 +1,18 @@
 """MQTT telemetry ingestion."""
 
 import json
+import time
 from datetime import timedelta
 
-from app import models, config
+from app import models, config, db, mqtt
 from app import alerts
 
 
 DEDUPE_CACHE = {}
+# Backlog re-timing state, per MAC: monotonic time of the last message's
+# arrival, and the reconnect (monotonic) the node was last seen after.
+_LAST_ARRIVAL = {}
+_SEEN_AFTER_CONNECT = {}
 
 
 def _safe_float(value, default=0.0):
@@ -28,6 +33,60 @@ def _compute_actual_time(data):
     return now - timedelta(seconds=max(0, int(data.get("ago", 0))))
 
 
+def _is_live_stamp(data):
+    """True when the node marked the reading as fresh (not from its own buffer)."""
+    try:
+        if "agoms" in data:
+            return int(data["agoms"]) == 0
+        if "ago_ms" in data:
+            return int(data["ago_ms"]) == 0
+        return int(data.get("ago", 0)) == 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _backlog_time(mac, node_id, data, now):
+    """Return the reconstructed time of a broker-queued reading, or None.
+
+    While the backend is offline the nodes (on their own Wi-Fi) keep publishing
+    live readings (agoms=0) at QoS 1; the broker queues them in our persistent
+    session and delivers them as a burst on reconnect. Stamped by arrival time
+    they would all land at "now" and the 1 s dedupe would drop most of them.
+    Queued messages arrive in publish order, so each one is placed one
+    telemetry interval after the node's previous stored reading.
+    """
+    arrival = time.monotonic()
+    prev_arrival = _LAST_ARRIVAL.get(mac)
+    _LAST_ARRIVAL[mac] = arrival
+
+    connect_mono, session_present = mqtt.last_connect()
+    if connect_mono is None or not session_present or not _is_live_stamp(data):
+        return None
+    if arrival - connect_mono > config.BACKLOG_WINDOW_SECONDS:
+        return None
+
+    first_after_connect = _SEEN_AFTER_CONNECT.get(mac) != connect_mono
+    _SEEN_AFTER_CONNECT[mac] = connect_mono
+    in_burst = (prev_arrival is not None
+                and arrival - prev_arrival < config.BACKLOG_BURST_SECONDS)
+    early_first = (first_after_connect
+                   and arrival - connect_mono < config.BACKLOG_FIRST_MESSAGE_SECONDS)
+    if not (in_burst or early_first):
+        return None
+
+    last_stored = DEDUPE_CACHE.get(mac)
+    if last_stored is None:
+        last_stored = models.get_last_reading_time(node_id)
+    if last_stored is None:
+        return None
+    if (now - last_stored).total_seconds() <= config.BACKLOG_MIN_GAP_SECONDS:
+        return None
+    candidate = last_stored + timedelta(seconds=config.TELEMETRY_INTERVAL_SECONDS)
+    if candidate > now - timedelta(seconds=config.BACKLOG_BURST_SECONDS):
+        return None
+    return candidate
+
+
 def handle_telemetry(mac, payload):
     try:
         safe_str = payload.replace("nan", "null")
@@ -36,24 +95,37 @@ def handle_telemetry(mac, payload):
         print(f"Invalid telemetry payload from {mac}: {e}")
         return
 
-    actual_time = _compute_actual_time(data)
+    try:
+        actual_time = _compute_actual_time(data)
+    except (TypeError, ValueError):
+        print(f"Invalid age field in telemetry from {mac}")
+        return
     now = config.now_wib()
     if actual_time > now + timedelta(minutes=1):
         actual_time = now
 
-    # Deduplicate messages that arrive too close together.
-    last_time = DEDUPE_CACHE.get(mac)
-    if last_time and abs((actual_time - last_time).total_seconds()) < 1.0:
-        return
-    DEDUPE_CACHE[mac] = actual_time
-
     node = models.get_sensor_node_by_mac(mac)
+    if node is None and not db.is_available():
+        db.log_unavailable(f"telemetry from {mac}")
+        return
     if not node:
         node_id = models.register_unpaired_node(mac)
         node = models.get_node_by_id(node_id)
 
     if node is None:
         return
+
+    estimated = False
+    backlog_time = _backlog_time(mac, node["id"], data, now)
+    if backlog_time is not None:
+        actual_time = backlog_time
+        estimated = True
+
+    # Deduplicate messages that arrive too close together.
+    last_time = DEDUPE_CACHE.get(mac)
+    if last_time and abs((actual_time - last_time).total_seconds()) < 1.0:
+        return
+    DEDUPE_CACHE[mac] = actual_time
 
     models.update_node_last_seen(node["id"])
 
@@ -83,7 +155,8 @@ def handle_telemetry(mac, payload):
             atmospheric = pressure_baseline.get("mean")
         gauge = pres - atmospheric if pres is not None and atmospheric is not None else None
         models.insert_dryer_reading(
-            node["id"], actual_time, tex, rhex, gauge, pres, current
+            node["id"], actual_time, tex, rhex, gauge, pres, current,
+            time_estimated=estimated,
         )
         reading_data = {
             "texhaust": tex,
@@ -106,6 +179,7 @@ def handle_telemetry(mac, payload):
         models.insert_hvac_reading(
             node["id"], actual_time, treturn, tsupply, current,
             during_calibration=appliance.get("operational_status") == "calibrating",
+            time_estimated=estimated,
         )
 
         # Skip alert evaluation during an active calibration session: offsets
